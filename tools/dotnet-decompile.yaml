@@ -1,0 +1,63 @@
+name: "dotnet_decompile"
+command: "/opt/sophon/thirdTools/decompile.py"
+args: ["--mode", "dotnet"]
+enabled: true
+timeout_seconds: 300
+requires_binaries:
+  - "/opt/sophon/thirdTools/ilspycmd/ilspycmd"
+  - "/opt/sophon/thirdTools/dotnet/dotnet"
+  - "/usr/bin/setpriv"
+short_description: "Decompile .NET assemblies with the local ILSpy CLI"
+description: |
+  Decompile authorized .NET DLL or EXE files with ilspycmd.
+
+  dnSpy GUI is not launched by the agent. The stable headless path is ILSpy CLI
+  or another compatible tool configured through SOPHON_ILSPYCMD_BIN.
+parameters:
+  - name: "input_path"
+    type: "string"
+    description: ".NET DLL or EXE inside the workspace or authorized upload directory"
+    required: true
+    flag: "--input"
+    format: "flag"
+  - name: "output_dir"
+    type: "string"
+    description: "New output directory inside the current workspace"
+    required: true
+    flag: "--output"
+    format: "flag"
+  - name: "max_input_mb"
+    type: "int"
+    description: "Maximum input size in MiB"
+    required: false
+    default: 2048
+    flag: "--max-input-mb"
+    format: "flag"
+  - name: "max_files"
+    type: "int"
+    description: "Maximum generated file count"
+    required: false
+    default: 5000
+    flag: "--max-files"
+    format: "flag"
+  - name: "max_output_mb"
+    type: "int"
+    description: "Maximum generated output size in MiB"
+    required: false
+    default: 2048
+    flag: "--max-output-mb"
+    format: "flag"
+  - name: "max_runtime_seconds"
+    type: "int"
+    description: "Maximum runtime in seconds, capped at 285 seconds"
+    required: false
+    default: 240
+    flag: "--max-runtime-seconds"
+    format: "flag"
+  - name: "max_memory_mb"
+    type: "int"
+    description: "Maximum .NET heap and memory budget in MiB"
+    required: false
+    default: 2048
+    flag: "--max-memory-mb"
+    format: "flag"

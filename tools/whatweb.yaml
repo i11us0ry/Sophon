@@ -1,0 +1,49 @@
+name: "whatweb"
+command: "/usr/bin/whatweb"
+args: ["--color=never", "--no-errors"]
+enabled: true
+timeout_seconds: 600
+short_description: "Web技术栈、CMS、服务器与插件指纹识别"
+description: |
+  WhatWeb 用于识别Web应用使用的CMS、框架、服务器和插件。
+
+  **注意事项：**
+  - 仅扫描已获授权的目标
+  - 攻击级别越高，请求数量和检测可靠性越高
+parameters:
+  - name: "target"
+    type: "string"
+    description: "目标URL、主机名或IP地址"
+    required: true
+    position: 1
+    format: "positional"
+  - name: "aggression"
+    type: "string"
+    description: "扫描级别：1=隐蔽，3=激进，4=重请求"
+    required: false
+    flag: "--aggression"
+    format: "flag"
+    options: ["1", "3", "4"]
+  - name: "user_agent"
+    type: "string"
+    description: "自定义User-Agent"
+    required: false
+    flag: "--user-agent"
+    format: "flag"
+  - name: "plugins"
+    type: "string"
+    description: "指定插件或插件集合，多个值用逗号分隔"
+    required: false
+    flag: "--plugins"
+    format: "flag"
+  - name: "max_threads"
+    type: "int"
+    description: "最大并发线程数"
+    required: false
+    flag: "--max-threads"
+    format: "flag"
+  - name: "additional_args"
+    type: "string"
+    description: "额外的WhatWeb参数，多个参数用空格分隔"
+    required: false
+    format: "positional"

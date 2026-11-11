@@ -1,0 +1,45 @@
+name: "suo5"
+command: "python3"
+args: ["/opt/sophon/tools/suo5_manager.py"]
+enabled: true
+timeout_seconds: 20
+requires_binaries:
+  - "/opt/sophon/thirdTools/suo5-linux-amd64"
+  - "/opt/sophon/thirdTools/suo5-linux-arm64"
+short_description: "管理 suo5 HTTP 隧道：后台启动、状态检查和停止"
+description: |
+  suo5 是长驻 HTTP 隧道。本工具通过后台进程管理方式提供 start、status、stop，
+  避免同步执行阻塞 Agent。
+
+  start 会在会话共享工作区启动隧道，仅监听 127.0.0.1，并默认生成随机 SOCKS5
+  认证信息。隧道进程、日志和认证信息保存在当前会话的 .suo5 状态目录。
+
+  options_json 常用字段：
+  - target: 必填，远端 suo5 Shell URL，仅允许 http/https
+  - port: 本地 SOCKS5 端口，默认 1111
+  - method: HTTP 方法，默认 POST
+  - mode: auto/full/half/classic，默认 auto
+  - auth: 可选 username:password；留空自动生成
+  - proxy: 可选上游 socks5/http(s) 代理
+  - header: 可选 Header 字符串或字符串数组，最多 5 个
+  - ua: 可选 User-Agent
+  - timeout: 请求超时秒数，默认 5
+  - retry: 请求重试次数，默认 1
+  - debug、no_gzip、no_browser_headers: 可选布尔值
+
+  仅用于已授权测试。不要将本地监听地址改为 0.0.0.0。
+parameters:
+  - name: "operation"
+    type: "string"
+    description: "操作类型：start 启动隧道，status 查看状态，stop 停止隧道"
+    required: true
+    position: 0
+    format: "positional"
+    options: ["start", "status", "stop"]
+  - name: "options_json"
+    type: "object"
+    description: "JSON 参数对象。start 时至少提供 target；status 和 stop 可为空对象"
+    required: false
+    default: "{}"
+    position: 1
+    format: "positional"

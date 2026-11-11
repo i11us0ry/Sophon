@@ -1,0 +1,48 @@
+name: "urlfinder"
+command: "/opt/sophon/thirdTools/urlfinder"
+enabled: true
+timeout_seconds: 900
+short_description: "从JavaScript提取网站隐藏接口与敏感路径"
+description: |
+  URLFinder 从网页和 JavaScript 文件中提取接口、路径与敏感信息。
+
+  **抓取模式：**
+  - `1`：正常抓取
+  - `2`：深入抓取
+  - `3`：安全深入抓取，过滤 delete、remove 等敏感路由
+
+  **注意事项：**
+  - 仅扫描已获授权的目标
+  - `domain` 用于严格限制抓取和返回的域名范围
+parameters:
+  - name: "target"
+    type: "string"
+    description: "目标URL或IP，例如 https://example.com"
+    required: true
+    flag: "-u"
+    format: "flag"
+  - name: "status_code"
+    type: "string"
+    description: "需要返回的HTTP状态码；多个值用逗号分隔，all表示全部"
+    required: true
+    flag: "-s"
+    format: "flag"
+  - name: "model"
+    type: "string"
+    description: "抓取模式：1=正常，2=深入，3=安全深入"
+    required: true
+    flag: "-m"
+    format: "flag"
+    options: ["1", "2", "3"]
+  - name: "domain"
+    type: "string"
+    description: "严格限制抓取和返回的域名，支持正则表达式"
+    required: true
+    flag: "-d"
+    format: "flag"
+  - name: "output"
+    type: "string"
+    description: "可选。输出目录或完整文件名，支持.json、.csv、.html"
+    required: false
+    flag: "-o"
+    format: "flag"

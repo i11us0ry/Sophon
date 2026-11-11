@@ -1,0 +1,51 @@
+name: "httpx"
+command: "/opt/sophon/thirdTools/httpx"
+args: ["-silent", "-no-color", "-disable-update-check", "-sc", "-title", "-td", "-server", "-ip"]
+enabled: true
+timeout_seconds: 900
+short_description: "HTTP存活探测、状态码与技术栈识别"
+description: |
+  ProjectDiscovery HTTPX 用于批量探测HTTP服务。
+
+  **默认输出：**
+  - HTTP状态码
+  - 页面标题
+  - 技术栈
+  - Web服务器
+  - 主机IP
+
+  **注意事项：**
+  - 仅探测已获授权的目标
+  - 可通过 `additional_args` 开启截图、TLS抓取、VHOST等高级能力
+parameters:
+  - name: "target"
+    type: "string"
+    description: "目标URL、主机名或IP"
+    required: true
+    flag: "-u"
+    format: "flag"
+  - name: "follow_redirects"
+    type: "bool"
+    description: "跟随HTTP重定向"
+    required: false
+    flag: "-fr"
+    format: "flag"
+    default: false
+  - name: "output"
+    type: "string"
+    description: "输出文件路径"
+    required: false
+    flag: "-o"
+    format: "flag"
+  - name: "json"
+    type: "bool"
+    description: "以JSON Lines格式输出"
+    required: false
+    flag: "-json"
+    format: "flag"
+    default: false
+  - name: "additional_args"
+    type: "string"
+    description: "额外的HTTPX参数，多个参数用空格分隔"
+    required: false
+    format: "positional"

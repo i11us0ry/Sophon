@@ -1,0 +1,58 @@
+name: "naabu"
+command: "/opt/sophon/thirdTools/naabu"
+args: ["-silent", "-no-color", "-disable-update-check"]
+enabled: true
+timeout_seconds: 900
+requires_capabilities: ["cap_net_raw"]
+short_description: "快速端口扫描与开放端口发现"
+description: |
+  Naabu 用于快速发现目标主机上的开放端口。
+
+  **注意事项：**
+  - 仅扫描已获授权的目标
+  - `ports` 留空时使用工具默认的 top-100 端口
+  - `scan_type=s` 使用 SYN 扫描，需要 cap_net_raw，不需要 sudo
+parameters:
+  - name: "target"
+    type: "string"
+    description: "目标主机、IP或域名；多个目标用逗号分隔"
+    required: true
+    flag: "-host"
+    format: "flag"
+  - name: "ports"
+    type: "string"
+    description: "端口或范围，例如 80,443,8000-8100；留空使用默认top-100"
+    required: false
+    flag: "-p"
+    format: "flag"
+  - name: "scan_type"
+    type: "string"
+    description: "扫描类型：c=CONNECT，s=SYN"
+    required: false
+    flag: "-s"
+    format: "flag"
+    options: ["c", "s"]
+  - name: "rate"
+    type: "int"
+    description: "每秒发送的数据包数量"
+    required: false
+    flag: "-rate"
+    format: "flag"
+  - name: "output"
+    type: "string"
+    description: "输出文件路径"
+    required: false
+    flag: "-o"
+    format: "flag"
+  - name: "json"
+    type: "bool"
+    description: "以JSON Lines格式输出"
+    required: false
+    flag: "-json"
+    format: "flag"
+    default: false
+  - name: "additional_args"
+    type: "string"
+    description: "额外的Naabu参数，多个参数用空格分隔"
+    required: false
+    format: "positional"

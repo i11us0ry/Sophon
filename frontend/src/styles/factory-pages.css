@@ -1,0 +1,628 @@
+/* Shared factory-floor skin for operational pages. */
+.main-column .factory-page {
+  --module-accent: #55c7e8;
+  --module-soft: color-mix(in srgb, var(--module-accent) 9%, transparent);
+  --factory-panel: color-mix(in srgb, var(--surface) 94%, #0b0b10);
+  --factory-line: color-mix(in srgb, var(--border-strong) 72%, transparent);
+  position: relative;
+}
+
+.main-column .page-home,
+.main-column .page-workspace,
+.main-column .page-settings {
+  --module-accent: #55c7e8;
+}
+
+.main-column .page-projects,
+.main-column .page-governance {
+  --module-accent: #f0a43a;
+}
+
+.main-column .page-vulnerabilities {
+  --module-accent: #fb7185;
+}
+
+.main-column .page-assets,
+.main-column .page-mcp {
+  --module-accent: #55c7e8;
+}
+
+.main-column .page-roles,
+.main-column .page-skills {
+  --module-accent: #9d8cff;
+}
+
+.main-column .page-rbac,
+.main-column .page-business {
+  --module-accent: #34d399;
+}
+
+.main-column .factory-page .page-header {
+  position: relative;
+  min-height: 78px;
+  margin-bottom: 12px;
+  padding: 14px 16px;
+  overflow: hidden;
+  border: 1px solid var(--border) !important;
+  border-radius: 6px !important;
+  background:
+    linear-gradient(
+      90deg,
+      color-mix(in srgb, var(--module-accent) 7%, transparent),
+      transparent 30%
+    ),
+    var(--factory-panel) !important;
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, var(--text-primary) 5%, transparent),
+    0 6px 20px rgba(0, 0, 0, 0.15) !important;
+}
+
+.main-column .factory-page .page-header::before {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 72px;
+  height: 2px;
+  content: '';
+  background: var(--module-accent);
+}
+
+.main-column .factory-page .page-header::after {
+  position: absolute;
+  top: 11px;
+  right: 14px;
+  width: 40px;
+  height: 12px;
+  content: '';
+  background: repeating-linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--module-accent) 56%, transparent) 0 6px,
+    transparent 6px 10px
+  );
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+.main-column .factory-page .page-header > :first-child {
+  min-width: 0;
+}
+
+.main-column .factory-page .page-header .eyebrow {
+  margin-bottom: 4px;
+  color: var(--module-accent);
+  font-size: 8px;
+  letter-spacing: 0.12em;
+}
+
+.main-column .factory-page .page-header h1 {
+  color: var(--text-primary);
+  font-size: 24px;
+  font-weight: 500;
+  line-height: 1.2;
+}
+
+.main-column .factory-page .page-header .muted {
+  max-width: 760px;
+  margin-top: 5px;
+  font-size: 12px;
+}
+
+.main-column .factory-page .header-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 7px;
+}
+
+.main-column .factory-page .button {
+  min-height: 32px;
+  border-radius: 3px !important;
+  font-size: 12px;
+}
+
+.main-column .factory-page .button.compact {
+  min-height: 28px;
+  padding: 5px 9px;
+}
+
+.main-column .factory-page .button:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--module-accent) 55%, var(--border)) !important;
+  color: var(--module-accent) !important;
+  background: var(--module-soft) !important;
+}
+
+.main-column
+  .factory-page
+  :is(
+    .panel,
+    .project-card,
+    .role-card,
+    .skill-card,
+    .tool-panel,
+    .tool-card,
+    .business-card,
+    .resource-card,
+    .coverage-panel,
+    .stat-card,
+    .workspace-table,
+    .asset-table-wrap,
+    .rbac-table-wrap,
+    .hitl-card,
+    .fact-card,
+    .doctor-panel,
+    .settings-panels > .business-card
+  ) {
+  border: 1px solid color-mix(in srgb, var(--module-accent) 17%, var(--border)) !important;
+  border-radius: 5px !important;
+  background:
+    linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--module-accent) 4%, transparent),
+      transparent 22%
+    ),
+    var(--factory-panel) !important;
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, var(--module-accent) 9%, transparent),
+    0 5px 18px rgba(0, 0, 0, 0.15) !important;
+}
+
+.main-column .factory-page :is(.project-card, .role-card, .skill-card, .tool-card) {
+  transition:
+    border-color 0.15s ease,
+    box-shadow 0.15s ease,
+    transform 0.15s ease;
+}
+
+.main-column .factory-page :is(.project-card, .role-card, .skill-card, .tool-card):hover {
+  border-color: color-mix(in srgb, var(--module-accent) 42%, var(--border)) !important;
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, var(--module-accent) 14%, transparent),
+    0 9px 22px rgba(0, 0, 0, 0.2) !important;
+  transform: translateY(-2px);
+}
+
+.main-column
+  .factory-page
+  :is(
+    .panel-header,
+    .tool-panel-header,
+    .coverage-head,
+    .role-card > header,
+    .skill-card > header,
+    .tool-card > header
+  ) {
+  margin-bottom: 12px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid color-mix(in srgb, var(--module-accent) 12%, var(--border)) !important;
+}
+
+.main-column .factory-page :is(.panel-header h2, .tool-panel-header h2, .business-card h2) {
+  color: var(--text-primary);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.main-column
+  .factory-page
+  :is(.panel-hint, .project-filter-stats, .selected-count, .coverage-rate) {
+  color: var(--module-accent);
+  font-family: var(--mono);
+  font-size: 9px;
+}
+
+.main-column
+  .factory-page
+  :is(
+    .project-filters,
+    .filter-bar,
+    .asset-filter-bar,
+    .audit-filters,
+    .skill-toolbar,
+    .workspace-toolbar,
+    .tool-toolbar,
+    .tool-filters,
+    .list-toolbar
+  ) {
+  gap: 8px;
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--field-bg) 72%, transparent);
+}
+
+.main-column
+  .factory-page
+  :is(input:not([type='checkbox']):not([type='radio']), textarea, select) {
+  border-color: var(--border) !important;
+  border-radius: 3px !important;
+  color: var(--text-primary);
+  background: var(--field-bg) !important;
+  box-shadow: none !important;
+}
+
+.main-column
+  .factory-page
+  :is(input:not([type='checkbox']):not([type='radio']), textarea, select):focus {
+  border-color: color-mix(in srgb, var(--module-accent) 62%, var(--border)) !important;
+  outline: none;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--module-accent) 18%, transparent) !important;
+}
+
+.main-column
+  .factory-page
+  :is(
+    .stat-row,
+    .count-row,
+    .project-grid,
+    .role-grid,
+    .skill-grid,
+    .tool-grid,
+    .settings-panels,
+    .rbac-grid
+  ) {
+  gap: 10px;
+}
+
+.main-column .factory-page :is(.stat-card, .count-chip, .stat-chip) {
+  position: relative;
+  overflow: hidden;
+}
+
+.main-column .factory-page :is(.stat-card, .count-chip, .stat-chip)::after {
+  position: absolute;
+  right: 10px;
+  bottom: 0;
+  left: 10px;
+  height: 2px;
+  content: '';
+  background: repeating-linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--module-accent) 52%, transparent) 0 7px,
+    transparent 7px 12px
+  );
+  opacity: 0.5;
+}
+
+.main-column .factory-page :is(.stat-card, .count-chip) strong {
+  color: var(--text-primary);
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.main-column .factory-page :is(.count-chip, .stat-chip) {
+  border-radius: 4px !important;
+  background: var(--factory-panel) !important;
+}
+
+.main-column .factory-page :is(.count-chip, .stat-chip).active {
+  border-color: color-mix(in srgb, var(--module-accent) 48%, var(--border)) !important;
+  color: var(--module-accent) !important;
+  background: var(--module-soft) !important;
+}
+
+.main-column .factory-page .tab-nav {
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--field-bg);
+}
+
+.main-column .factory-page .tab-button {
+  min-height: 32px;
+  padding: 6px 11px;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  color: var(--text-muted);
+  background: transparent;
+  font-size: 11px;
+}
+
+.main-column .factory-page .tab-button:hover {
+  color: var(--text-secondary);
+  background: var(--surface-soft);
+}
+
+.main-column .factory-page .tab-button.active {
+  border-color: color-mix(in srgb, var(--module-accent) 35%, var(--border));
+  color: var(--module-accent);
+  background: var(--module-soft);
+}
+
+.main-column
+  .factory-page
+  :is(.vuln-table, .asset-table, .mcp-table, .rbac-table, .storage-table, .data-list, .data-table) {
+  width: 100%;
+  overflow: hidden;
+  border: 1px solid var(--border) !important;
+  border-radius: 5px;
+  border-collapse: separate !important;
+  border-spacing: 0;
+  background: var(--factory-panel);
+}
+
+.main-column
+  .factory-page
+  :is(.vuln-table, .asset-table, .mcp-table, .rbac-table, .storage-table, .data-list, .data-table)
+  th {
+  padding: 9px 10px !important;
+  border-bottom: 1px solid var(--border) !important;
+  color: var(--text-muted) !important;
+  background: color-mix(in srgb, var(--field-bg) 86%, var(--module-accent)) !important;
+  font-family: var(--mono);
+  font-size: 9px;
+  font-weight: 700 !important;
+  letter-spacing: 0.04em;
+  text-align: left;
+}
+
+.main-column
+  .factory-page
+  :is(.vuln-table, .asset-table, .mcp-table, .rbac-table, .storage-table, .data-list, .data-table)
+  td {
+  padding: 9px 10px !important;
+  border-bottom: 1px solid color-mix(in srgb, var(--text-primary) 8%, transparent) !important;
+  color: var(--text-secondary);
+  background: transparent;
+  font-size: 11px;
+  vertical-align: middle;
+}
+
+.main-column
+  .factory-page
+  :is(.vuln-table, .asset-table, .mcp-table, .rbac-table, .storage-table, .data-list, .data-table)
+  tbody
+  tr:hover
+  td {
+  background: color-mix(in srgb, var(--module-accent) 5%, transparent) !important;
+}
+
+.main-column
+  .factory-page
+  :is(.vuln-table, .asset-table, .mcp-table, .rbac-table, .storage-table, .data-list, .data-table)
+  tbody
+  tr:last-child
+  td {
+  border-bottom: 0 !important;
+}
+
+.main-column .factory-page :is(.asset-table-wrap, .rbac-table-wrap) {
+  overflow: auto;
+}
+
+.main-column .factory-page .factory-table-scroll {
+  width: 100%;
+  max-width: 100%;
+  overflow-x: auto;
+  border-radius: 5px;
+}
+
+.main-column .factory-page .pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-muted);
+  background: var(--field-bg);
+  font-size: 11px;
+}
+
+.main-column .factory-page .pagination-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.main-column
+  .factory-page
+  :is(
+    .project-modal,
+    .role-modal,
+    .skill-modal,
+    .fact-modal,
+    .batch-modal,
+    .intercept-modal
+  ) {
+  border: 1px solid color-mix(in srgb, var(--module-accent) 30%, var(--border)) !important;
+  border-radius: 6px !important;
+  background: var(--factory-panel) !important;
+  box-shadow: 0 14px 38px rgba(0, 0, 0, 0.32) !important;
+}
+
+.main-column
+  .factory-page
+  :is(.modal-header, .role-modal-head, .skill-modal-head, .fact-modal-head) {
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.main-column
+  .factory-page
+  :is(.modal-header h2, .role-modal-head h3, .skill-modal-head h3, .fact-modal-head h3) {
+  color: var(--text-primary);
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.main-column
+  .factory-page
+  :is(.status-badge, .severity-badge, .state-badge, .role-state, .project-status, .panel-hint) {
+  border-radius: 3px !important;
+}
+
+.main-column .factory-page :is(.project-counts, .coverage-stats) {
+  border-color: color-mix(in srgb, var(--module-accent) 12%, var(--border)) !important;
+  border-radius: 4px !important;
+  background: color-mix(in srgb, var(--field-bg) 68%, transparent) !important;
+}
+
+.main-column .factory-page :is(.project-name, .panel-link, .link-button) {
+  color: var(--text-primary);
+}
+
+.main-column .factory-page :is(.project-name, .panel-link, .link-button):hover {
+  color: var(--module-accent);
+}
+
+.main-column .factory-page :is(.empty-hint, .empty-projects, .empty) {
+  padding: 18px !important;
+  border: 1px dashed var(--border-strong);
+  border-radius: 4px;
+  color: var(--text-muted);
+  background: color-mix(in srgb, var(--field-bg) 54%, transparent);
+  font-size: 12px;
+  text-align: center;
+}
+
+.main-column .factory-page :is(.coverage-bar, .campaign-progress) {
+  border-radius: 2px;
+}
+
+.main-column .factory-page :is(.coverage-bar, .campaign-progress) i,
+.main-column .factory-page :is(.coverage-bar, .campaign-progress) span {
+  background: var(--module-accent);
+}
+
+.main-column .factory-page .coverage-panel {
+  overflow: hidden;
+}
+
+.main-column .factory-page .coverage-panel::before {
+  display: block;
+  height: 2px;
+  content: '';
+  background: var(--module-accent);
+}
+
+.main-column .factory-page .workspace-table {
+  overflow: auto;
+}
+
+.main-column .factory-page .settings-panels > .business-card {
+  align-self: start;
+}
+
+@media (max-width: 900px) {
+  .main-column .factory-page .page-header {
+    min-height: 0;
+    padding: 13px;
+  }
+
+  .main-column .factory-page .page-header .header-actions {
+    justify-content: flex-start;
+  }
+}
+
+@media (max-width: 760px) {
+  .main-column .factory-page .page-header {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .main-column .factory-page .page-header::after {
+    display: none;
+  }
+
+  .main-column .factory-page .page-header h1 {
+    font-size: 21px;
+  }
+
+  .main-column .factory-page .page-header .header-actions {
+    width: 100%;
+  }
+
+  .main-column
+    .factory-page
+    :is(
+      .project-filters,
+      .filter-bar,
+      .asset-filter-bar,
+      .audit-filters,
+      .skill-toolbar,
+      .workspace-toolbar,
+      .tool-toolbar,
+      .tool-filters,
+      .list-toolbar
+    ) {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .main-column
+    .factory-page
+    :is(
+      .project-filters,
+      .filter-bar,
+      .asset-filter-bar,
+      .audit-filters,
+      .skill-toolbar,
+      .workspace-toolbar,
+      .tool-toolbar,
+      .tool-filters,
+      .list-toolbar
+    )
+    > * {
+    width: 100%;
+  }
+
+  .main-column .factory-page .tab-nav {
+    overflow-x: auto;
+    flex-wrap: nowrap;
+  }
+
+  .main-column .factory-page .tab-button {
+    flex: 0 0 auto;
+  }
+
+  .main-column .factory-page .pagination {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .main-column
+    .factory-page
+    :is(.vuln-table, .asset-table, .mcp-table, .rbac-table, .storage-table, .data-list, .data-table) {
+    min-width: 680px;
+  }
+}
+
+/* Shared management-page title hierarchy */
+body .main-column .factory-page[class] .page-header h1 {
+  margin: 0 !important;
+  font-size: 22px !important;
+  font-weight: 500 !important;
+  line-height: 1.25 !important;
+}
+
+body .main-column .factory-page[class] .page-header .eyebrow {
+  margin: 0 0 3px !important;
+  font-size: 8px !important;
+  line-height: 1.4 !important;
+  letter-spacing: 0.1em !important;
+}
+
+body
+  .main-column
+  .factory-page[class]
+  .page-header
+  :is(
+    .muted,
+    .project-page-hint,
+    .asset-page-hint,
+    .mcp-page-hint,
+    .audit-page-hint,
+    .depot-page-hint,
+    .access-page-hint,
+    .config-page-hint,
+    .page-header-hint
+  ) {
+  max-width: 760px !important;
+  margin: 4px 0 0 !important;
+  color: var(--text-muted) !important;
+  font-size: 10px !important;
+  line-height: 1.5 !important;
+}

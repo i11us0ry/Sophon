@@ -1,0 +1,62 @@
+name: "katana"
+command: "/opt/sophon/thirdTools/katana"
+args: ["-silent", "-no-color", "-disable-update-check"]
+enabled: true
+timeout_seconds: 900
+short_description: "高速Web爬虫与JavaScript端点提取"
+description: |
+  Katana 用于抓取Web页面、JavaScript端点和已知文件。
+
+  **默认行为：**
+  - 默认深度为3
+  - 默认解析JavaScript文件中的端点
+  - 默认启用技术栈识别
+
+  **注意事项：**
+  - 仅抓取已获授权的目标
+  - Headless等高级模式可通过 `additional_args` 开启
+parameters:
+  - name: "target"
+    type: "string"
+    description: "目标URL，例如 https://example.com"
+    required: true
+    flag: "-u"
+    format: "flag"
+  - name: "depth"
+    type: "int"
+    description: "最大抓取深度"
+    required: false
+    flag: "-d"
+    format: "flag"
+  - name: "js_crawl"
+    type: "bool"
+    description: "解析并抓取JavaScript中的端点"
+    required: false
+    flag: "-jc"
+    format: "flag"
+    default: true
+  - name: "tech_detect"
+    type: "bool"
+    description: "启用技术栈识别"
+    required: false
+    flag: "-td"
+    format: "flag"
+    default: true
+  - name: "output"
+    type: "string"
+    description: "输出文件路径"
+    required: false
+    flag: "-o"
+    format: "flag"
+  - name: "jsonl"
+    type: "bool"
+    description: "以JSON Lines格式输出"
+    required: false
+    flag: "-jsonl"
+    format: "flag"
+    default: false
+  - name: "additional_args"
+    type: "string"
+    description: "额外的Katana参数，多个参数用空格分隔"
+    required: false
+    format: "positional"

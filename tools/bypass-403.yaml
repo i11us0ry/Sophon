@@ -1,0 +1,74 @@
+name: "bypass-403"
+command: "python3"
+args: ["/opt/sophon/thirdTools/bypass403.py"]
+enabled: true
+timeout_seconds: 900
+short_description: "检测HTTP 403的Header与路径绕过差异"
+description: |
+  对返回HTTP 403的授权目标执行有限的Header和Path变体测试，并比较响应差异。
+
+  **检测方式：**
+  - 先确认目标基线为HTTP 403
+  - 测试常见代理转发Header
+  - 测试尾斜杠、编码点和分号路径等变体
+  - 对反射值和动态页面内容进行归一化
+  - 区分bypass、redirect、auth_required和blocked
+
+  **注意事项：**
+  - 仅测试已获授权的目标
+  - 默认不跟随跳转
+  - 找到结果后不会执行后续利用操作
+parameters:
+  - name: "url"
+    type: "string"
+    description: "预期返回HTTP 403的目标URL"
+    required: true
+    flag: "--url"
+    format: "flag"
+  - name: "header"
+    type: "string"
+    description: "基线请求头，格式为 'Name: value'；Cookie等认证头可由此传入"
+    required: false
+    flag: "--header"
+    format: "flag"
+  - name: "threads"
+    type: "int"
+    description: "并发线程数，范围1-20"
+    required: false
+    flag: "--threads"
+    format: "flag"
+    default: 5
+  - name: "timeout"
+    type: "int"
+    description: "单请求超时秒数，范围1-60"
+    required: false
+    flag: "--timeout"
+    format: "flag"
+    default: 10
+  - name: "insecure"
+    type: "bool"
+    description: "HTTPS测试时关闭TLS证书校验"
+    required: false
+    flag: "--insecure"
+    format: "flag"
+    default: false
+  - name: "force"
+    type: "bool"
+    description: "基线不是HTTP 403时仍继续测试"
+    required: false
+    flag: "--force"
+    format: "flag"
+    default: false
+  - name: "all"
+    type: "bool"
+    description: "输出blocked和error等全部结果"
+    required: false
+    flag: "--all"
+    format: "flag"
+    default: false
+  - name: "output"
+    type: "string"
+    description: "可选JSONL结果文件路径"
+    required: false
+    flag: "--output"
+    format: "flag"

@@ -1,0 +1,78 @@
+name: "ksubdomain"
+command: "/opt/sophon/thirdTools/ksubdomain"
+args: ["enum", "--silent"]
+enabled: true
+timeout_seconds: 900
+requires_capabilities: ["cap_net_raw"]
+short_description: "高速无状态子域名爆破与DNS解析验证"
+description: |
+  KSubdomain 使用字典对目标域名进行高速子域名爆破。
+
+  **注意事项：**
+  - 仅扫描已获授权的域名
+  - 工具依赖 cap_net_raw 和可用的容器网卡，不需要 sudo
+  - 默认使用内置字典，可通过 `dictionary` 指定字典文件
+parameters:
+  - name: "domain"
+    type: "string"
+    description: "目标根域名，例如 example.com"
+    required: true
+    flag: "-d"
+    format: "flag"
+  - name: "dictionary"
+    type: "string"
+    description: "子域名字典文件路径；留空时使用内置字典"
+    required: false
+    flag: "-f"
+    format: "flag"
+  - name: "bandwidth"
+    type: "string"
+    description: "发包带宽，例如 3m、5m、10m；留空时使用工具默认值"
+    required: false
+    flag: "-b"
+    format: "flag"
+  - name: "resolvers"
+    type: "string"
+    description: "自定义DNS服务器，多个值用逗号分隔"
+    required: false
+    flag: "-r"
+    format: "flag"
+  - name: "format"
+    type: "string"
+    description: "输出文件格式"
+    required: false
+    flag: "--format"
+    format: "flag"
+    options: ["txt", "json", "csv", "jsonl"]
+  - name: "output"
+    type: "string"
+    description: "输出文件路径"
+    required: false
+    flag: "-o"
+    format: "flag"
+  - name: "wildcard_filter"
+    type: "string"
+    description: "泛解析过滤模式"
+    required: false
+    flag: "--wildcard-filter"
+    format: "flag"
+    options: ["none", "basic", "advanced"]
+  - name: "predict"
+    type: "bool"
+    description: "启用子域名预测"
+    required: false
+    flag: "--predict"
+    format: "flag"
+    default: false
+  - name: "only_domain"
+    type: "bool"
+    description: "仅输出域名，不输出解析记录"
+    required: false
+    flag: "--only-domain"
+    format: "flag"
+    default: false
+  - name: "additional_args"
+    type: "string"
+    description: "额外的KSubdomain参数，多个参数用空格分隔"
+    required: false
+    format: "positional"

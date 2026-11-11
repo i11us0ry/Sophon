@@ -1,0 +1,138 @@
+# Sophon 配置文件模板
+#
+# 使用方式：
+#   1. 复制本文件为同目录下的 config.yml，或直接启动服务自动生成。
+#   2. 只修改需要的项，未配置的项使用默认值。
+#   3. 优先级：默认值 < config.yml < 环境变量（空环境变量视为未设置）。
+#   4. config.yml 属于本地配置，不应提交到版本库。
+
+# 前端显示的版本号
+version: "dev"
+
+# 服务与运行目录
+server:
+  host: 127.0.0.1 # 容器或对外服务改为 0.0.0.0
+  port: 18080
+  data_dir: ./data # SQLite 数据库与运行数据目录
+  skills_dir: /opt/sophon/skills
+  roles_dir: /opt/sophon/roles # Agent 角色定义目录（YAML）
+  cookie_secure: false # 通过 HTTPS 访问时改为 true
+
+# 认证与 Session
+auth:
+  session_duration_hours: 12
+  bootstrap_admin:
+    username: admin
+    password: "" # 只在数据库中没有该用户时使用
+
+# Agent 与模型
+agent:
+  mock: true # 学习阶段用 Mock；接入真实模型改为 false
+  context_max_chars: 24000
+  context_max_tokens: 0 # 0=按 context_max_chars 估算；>0 时按估算 token 数裁剪历史
+  max_iterations: 40 # Agent ReAct 最大迭代轮数
+  max_turn_tokens: 20000000 # 单轮累计 token 硬上限；0 也回退到该安全值
+  max_hypotheses: 200 # 项目活跃测试假设上限（仅统计 untested/running/suspicious）
+  subagent_max_concurrency: 2 # Planner/Worker 子 Agent 最大并发数
+  subagent_max_tool_calls: 80 # 单个 Planner/Worker 最大工具调用次数
+  subagent_max_duration_seconds: 1800 # 单个 Planner/Worker 最长实际耗时
+  subagent_max_cpu_seconds: 900 # 单次受限进程组允许累计消耗的 CPU 秒数
+  subagent_max_processes: 8 # 单次受限进程组允许的最大进程数
+  llm:
+    base_url: https://api.deepseek.com/v1
+    api_key: "" # 直接写在这里，无需再配环境变量
+    model: deepseek-chat
+    allow_private_network: false # 本地 Ollama/私网模型地址需要显式开启
+    timeout_seconds: 120
+
+# 知识库向量模型
+embedding:
+  mock: true
+  base_url: https://api.openai.com/v1
+  api_key: ""
+  model: text-embedding-3-small
+  dimensions: 256
+  timeout_seconds: 60
+
+# 平台全局出网代理
+# type 支持 http / https / socks5；账号密码可选
+proxy:
+  enabled: false
+  type: http
+  host: 127.0.0.1
+  port: 7890
+  username: ""
+  password: ""
+  no_proxy: "localhost,127.0.0.1,::1"
+
+# 工具人工审批
+hitl:
+  enabled: true # 高风险工具默认需要人工审批
+  tools: # 需要人工审批的工具名；显式写 tools: [] 表示所有工具都需审批
+    - exec
+    - execute-python-script
+    - install-python-package
+    - metasploit
+    - msfvenom
+    - impacket
+    - netexec
+    - hydra
+    - hashcat
+    - sqlmap
+    - fscan
+    - masscan
+  timeout_seconds: 300
+
+# stdio MCP 工具服务
+mcp:
+  command: /opt/sophon/backend/sophon-mcp-tools
+  connect_timeout_seconds: 20
+  call_timeout_seconds: 30 # 单次工具调用等待时长
+  max_concurrent_per_server: 2 # 单个 MCP 服务并发上限；0=默认2，负数=不限制
+  max_concurrent_total: 16 # 所有 MCP 工具并发上限；0=默认16，负数=不限制
+
+# 存储清理：只清理平台流水数据，不动项目、资产与漏洞
+storage:
+  auto_clean: false # 开启后台定时清理
+  interval_minutes: 60 # 最小 5 分钟
+  artifact_root: /opt/sophon # 目录类别的根，所有 path 必须位于其下
+  active_grace_hours: 24 # 最近有活动的文件跳过
+  categories:
+    audit_logs:
+      enabled: true
+      retention_days: 90 # 0 表示不按时间清理
+    tool_executions:
+      enabled: true
+      retention_days: 90
+    tool_jobs:
+      enabled: true
+      retention_days: 30
+    token_usage:
+      enabled: true
+      retention_days: 180
+    hitl_requests:
+      enabled: true
+      retention_days: 90 # 仅清理已决策的审批记录
+    workspace: # Agent 工作区
+      enabled: true
+      retention_days: 30
+      path: tmp/workspace
+    reduction: # 工具输出缓存
+      enabled: true
+      retention_days: 7
+      path: tmp/reduction
+    conversation_artifacts: # 会话产物
+      enabled: true
+      retention_days: 30
+      path: data/conversation_artifacts
+    chat_uploads: # 对话上传文件
+      enabled: true
+      retention_days: 90
+      path: chat_uploads
+
+# 运行事件流：只写元数据（工具名、策略判定、耗时、成败），不写提示词与工具参数
+observability:
+  enabled: true
+  jsonl_path: /opt/sophon/data/observability/events.jsonl
+  max_file_mb: 64 # 单文件上限，写满后滚动为 events.jsonl.1
+  sample_rate: 1 # 落盘采样率 0-1；内存指标与最近事件不受采样影响

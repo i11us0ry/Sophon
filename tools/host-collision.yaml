@@ -1,0 +1,78 @@
+name: "host-collision"
+command: "python3"
+args: ["/opt/sophon/thirdTools/host_collision.py"]
+enabled: true
+timeout_seconds: 900
+short_description: "通过Host头差异发现隐藏虚拟主机"
+description: |
+  对同一目标地址发送不同Host头，通过基线、随机Host和候选Host的响应差异识别隐藏虚拟主机。
+
+  **检测方式：**
+  - 使用目标原始Host建立基线
+  - 使用随机无效Host识别泛匹配
+  - 比较状态码、页面标题、跳转地址和正文哈希
+  - 对响应中的Host反射进行归一化，降低误报
+
+  **注意事项：**
+  - 仅测试已获授权的目标
+  - 默认不跟随跳转
+  - `hosts` 必须是容器内可读取的候选Host字典路径
+parameters:
+  - name: "target"
+    type: "string"
+    description: "实际连接的HTTP或HTTPS目标URL，例如 https://203.0.113.10"
+    required: true
+    flag: "--target"
+    format: "flag"
+  - name: "hosts"
+    type: "string"
+    description: "候选Host列表文件路径，每行一个Host"
+    required: true
+    flag: "--hosts"
+    format: "flag"
+  - name: "threads"
+    type: "int"
+    description: "并发线程数，范围1-100"
+    required: false
+    flag: "--threads"
+    format: "flag"
+    default: 10
+  - name: "timeout"
+    type: "int"
+    description: "单请求超时秒数，范围1-60"
+    required: false
+    flag: "--timeout"
+    format: "flag"
+    default: 10
+  - name: "header"
+    type: "string"
+    description: "附加请求头，格式为 'Name: value'"
+    required: false
+    flag: "--header"
+    format: "flag"
+  - name: "user_agent"
+    type: "string"
+    description: "自定义User-Agent"
+    required: false
+    flag: "--user-agent"
+    format: "flag"
+  - name: "insecure"
+    type: "bool"
+    description: "HTTPS测试时关闭TLS证书校验"
+    required: false
+    flag: "--insecure"
+    format: "flag"
+    default: false
+  - name: "all"
+    type: "bool"
+    description: "输出全部结果，而不只是疑似碰撞"
+    required: false
+    flag: "--all"
+    format: "flag"
+    default: false
+  - name: "output"
+    type: "string"
+    description: "可选JSONL结果文件路径"
+    required: false
+    flag: "--output"
+    format: "flag"

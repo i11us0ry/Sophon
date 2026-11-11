@@ -1,0 +1,6 @@
+# 原始值<TAB>替换值
+# 复制到项目根目录 .release-redactions.tsv 后填写真实映射。
+# 不要把包含真实目标或凭据的映射文件提交到 Git。
+example-customer.invalid	example.com
+203.0.113.77	192.0.2.10
+local-builder-name	release-builder
