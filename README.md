@@ -33,6 +33,28 @@ Sophon 的目标不是让模型无限调用扫描器，而是让每次测试具�
 > [!WARNING]
 > Sophon 仅允许用于本组织拥有或控制的系统，以及已获得目标所有者明确书面授权的安全测试、代码审计和防御演练。严禁用于未授权访问、扫描、利用、干扰、数据收集或数据留存。使用者对全部操作及后果负责。
 
+## 界面预览
+
+| 仪表盘 | 对话与多 Agent 过程 | 项目管理 |
+|:---:|:---:|:---:|
+| [![仪表盘](./screenshots/thumbs/dashboard.png)](./screenshots/dashboard.png) | [![对话与多 Agent 过程](./screenshots/thumbs/chat.png)](./screenshots/chat.png) | [![项目管理](./screenshots/thumbs/projects.png)](./screenshots/projects.png) |
+| **仪表盘** | **对话与多 Agent 过程** | **项目管理** |
+
+| 项目详情 | 资产管理 | 漏洞管理 |
+|:---:|:---:|:---:|
+| [![项目详情](./screenshots/thumbs/project-detail.png)](./screenshots/project-detail.png) | [![资产管理](./screenshots/thumbs/assets.png)](./screenshots/assets.png) | [![漏洞管理](./screenshots/thumbs/vulnerabilities.png)](./screenshots/vulnerabilities.png) |
+| **项目详情** | **资产管理** | **漏洞管理** |
+
+| 角色管理 | 技能管理 | MCP 管理 |
+|:---:|:---:|:---:|
+| [![角色管理](./screenshots/thumbs/roles.png)](./screenshots/roles.png) | [![技能管理](./screenshots/thumbs/skills.png)](./screenshots/skills.png) | [![MCP 管理](./screenshots/thumbs/mcp.png)](./screenshots/mcp.png) |
+| **角色管理** | **技能管理** | **MCP 管理** |
+
+| 审计监控 | 工作空间 | 系统设置 |
+|:---:|:---:|:---:|
+| [![审计监控](./screenshots/thumbs/audit.png)](./screenshots/audit.png) | [![工作空间](./screenshots/thumbs/workspace.png)](./screenshots/workspace.png) | [![系统设置](./screenshots/thumbs/settings.png)](./screenshots/settings.png) |
+| **审计监控** | **工作空间** | **系统设置** |
+
 ## 核心能力
 
 | 能力 | 说明 |
@@ -241,6 +263,28 @@ Sophon is designed to make every test scoped, traceable, evidence-backed, review
 
 > [!WARNING]
 > Sophon may only be used against systems owned or controlled by your organization, or for security testing, code review, and defensive exercises with explicit written authorization from the target owner. Unauthorized access, scanning, exploitation, disruption, collection, or retention is prohibited. Users are responsible for all actions and consequences.
+
+## Screenshots
+
+| Dashboard | Conversations and Multi-Agent Trace | Projects |
+|:---:|:---:|:---:|
+| [![Dashboard](./screenshots/thumbs/dashboard.png)](./screenshots/dashboard.png) | [![Conversations and Multi-Agent Trace](./screenshots/thumbs/chat.png)](./screenshots/chat.png) | [![Projects](./screenshots/thumbs/projects.png)](./screenshots/projects.png) |
+| **Dashboard** | **Conversations and Multi-Agent Trace** | **Projects** |
+
+| Project Detail | Assets | Vulnerabilities |
+|:---:|:---:|:---:|
+| [![Project Detail](./screenshots/thumbs/project-detail.png)](./screenshots/project-detail.png) | [![Assets](./screenshots/thumbs/assets.png)](./screenshots/assets.png) | [![Vulnerabilities](./screenshots/thumbs/vulnerabilities.png)](./screenshots/vulnerabilities.png) |
+| **Project Detail** | **Assets** | **Vulnerabilities** |
+
+| Roles | Skills | MCP |
+|:---:|:---:|:---:|
+| [![Roles](./screenshots/thumbs/roles.png)](./screenshots/roles.png) | [![Skills](./screenshots/thumbs/skills.png)](./screenshots/skills.png) | [![MCP](./screenshots/thumbs/mcp.png)](./screenshots/mcp.png) |
+| **Roles** | **Skills** | **MCP** |
+
+| Audit | Workspace | Settings |
+|:---:|:---:|:---:|
+| [![Audit](./screenshots/thumbs/audit.png)](./screenshots/audit.png) | [![Workspace](./screenshots/thumbs/workspace.png)](./screenshots/workspace.png) | [![Settings](./screenshots/thumbs/settings.png)](./screenshots/settings.png) |
+| **Audit** | **Workspace** | **Settings** |
 
 ## Highlights
 
