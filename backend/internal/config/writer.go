@@ -17,12 +17,21 @@ type FieldUpdate struct {
 	Value interface{}
 }
 
+type UpdateOptions struct {
+	SkipBackup bool
+}
+
 const maxConfigBackups = 20
 
 var configWriteMu sync.Mutex
 
 // UpdateFile 在保留注释的前提下更新 YAML 字段，写入前自动备份原文件。
 func UpdateFile(path string, updates []FieldUpdate) error {
+	return UpdateFileWithOptions(path, updates, UpdateOptions{})
+}
+
+// UpdateFileWithOptions 按调用方要求更新配置；敏感配置可跳过明文备份。
+func UpdateFileWithOptions(path string, updates []FieldUpdate, options UpdateOptions) error {
 	configWriteMu.Lock()
 	defer configWriteMu.Unlock()
 
@@ -66,15 +75,17 @@ func UpdateFile(path string, updates []FieldUpdate) error {
 		return fmt.Errorf("序列化配置失败: %w", err)
 	}
 
-	backup := fmt.Sprintf(
-		"%s.bak.%s",
-		path,
-		time.Now().UTC().Format("20060102150405.000000000"),
-	)
-	if err := os.WriteFile(backup, raw, 0o600); err != nil {
-		return fmt.Errorf("备份配置文件失败: %w", err)
+	if !options.SkipBackup {
+		backup := fmt.Sprintf(
+			"%s.bak.%s",
+			path,
+			time.Now().UTC().Format("20060102150405.000000000"),
+		)
+		if err := os.WriteFile(backup, raw, 0o600); err != nil {
+			return fmt.Errorf("备份配置文件失败: %w", err)
+		}
+		pruneConfigBackups(path)
 	}
-	pruneConfigBackups(path)
 
 	tempFile, err := os.CreateTemp(
 		filepath.Dir(path),

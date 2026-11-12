@@ -31,6 +31,7 @@ type Config struct {
 	LLMProvider                string
 	LLMBaseURL                 string
 	LLMAPIKey                  string
+	LLMAPIKeys                 []string
 	LLMModel                   string
 	LLMAllowPrivateNetwork     bool
 	LLMTimeoutSeconds          int
@@ -129,12 +130,13 @@ type agentSection struct {
 }
 
 type llmSection struct {
-	Provider            *string `yaml:"provider"`
-	BaseURL             *string `yaml:"base_url"`
-	APIKey              *string `yaml:"api_key"`
-	Model               *string `yaml:"model"`
-	AllowPrivateNetwork *bool   `yaml:"allow_private_network"`
-	TimeoutSeconds      *int    `yaml:"timeout_seconds"`
+	Provider            *string  `yaml:"provider"`
+	BaseURL             *string  `yaml:"base_url"`
+	APIKey              *string  `yaml:"api_key"`
+	APIKeys             []string `yaml:"api_keys"`
+	Model               *string  `yaml:"model"`
+	AllowPrivateNetwork *bool    `yaml:"allow_private_network"`
+	TimeoutSeconds      *int     `yaml:"timeout_seconds"`
 }
 
 type embeddingSection struct {
@@ -227,6 +229,7 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	dataDir := pickString("SOPHON_DATA_DIR", file.Server.DataDir, "./data")
+	llmAPIKeys := resolveLLMAPIKeys(file.Agent.LLM.APIKeys, file.Agent.LLM.APIKey)
 	cfg := Config{
 		Host:                       pickString("SOPHON_HOST", file.Server.Host, "127.0.0.1"),
 		Port:                       pickInt("SOPHON_PORT", file.Server.Port, 18080),
@@ -238,7 +241,8 @@ func Load() (Config, error) {
 		BootstrapAdminPassword:     pickString("SOPHON_ADMIN_PASSWORD", file.Auth.BootstrapAdmin.Password, ""),
 		LLMBaseURL:                 pickString("SOPHON_LLM_BASE_URL", file.Agent.LLM.BaseURL, "https://api.deepseek.com/v1"),
 		LLMProvider:                normalizeLLMProvider(pickString("SOPHON_LLM_PROVIDER", file.Agent.LLM.Provider, "openai_compatible")),
-		LLMAPIKey:                  pickString("SOPHON_LLM_API_KEY", file.Agent.LLM.APIKey, ""),
+		LLMAPIKey:                  firstLLMAPIKey(llmAPIKeys),
+		LLMAPIKeys:                 llmAPIKeys,
 		LLMModel:                   pickString("SOPHON_LLM_MODEL", file.Agent.LLM.Model, "deepseek-chat"),
 		LLMAllowPrivateNetwork:     pickBool("SOPHON_LLM_ALLOW_PRIVATE_NETWORK", file.Agent.LLM.AllowPrivateNetwork, false),
 		LLMTimeoutSeconds:          pickInt("SOPHON_LLM_TIMEOUT_SECONDS", file.Agent.LLM.TimeoutSeconds, 120),
@@ -253,7 +257,7 @@ func Load() (Config, error) {
 		AgentContextMaxTokens:      pickIntAllowZero("SOPHON_AGENT_CONTEXT_MAX_TOKENS", file.Agent.ContextMaxTokens, 0),
 		AgentMaxTurnTokens:         pickIntAllowZero("SOPHON_AGENT_MAX_TURN_TOKENS", file.Agent.MaxTurnTokens, 0),
 		AgentMaxIterations:         pickIntAllowZero("SOPHON_AGENT_MAX_ITERATIONS", file.Agent.MaxIterations, 40),
-		AgentMaxHypotheses:         normalizeAgentMaxHypotheses(pickInt("SOPHON_AGENT_MAX_HYPOTHESES", file.Agent.MaxHypotheses, 200)),
+		AgentMaxHypotheses:         normalizeAgentMaxHypotheses(pickIntAllowZero("SOPHON_AGENT_MAX_HYPOTHESES", file.Agent.MaxHypotheses, 200)),
 		AgentSubagentConcurrency:   normalizeSubagentMaxConcurrency(pickInt("SOPHON_AGENT_SUBAGENT_MAX_CONCURRENCY", file.Agent.SubagentMaxConcurrency, 2)),
 		AgentSubagentMaxToolCalls:  normalizeSubagentMaxToolCalls(pickInt("SOPHON_AGENT_SUBAGENT_MAX_TOOL_CALLS", file.Agent.SubagentMaxToolCalls, 80)),
 		AgentSubagentMaxDuration:   normalizeSubagentMaxDuration(pickInt("SOPHON_AGENT_SUBAGENT_MAX_DURATION_SECONDS", file.Agent.SubagentMaxDuration, 1800)),
@@ -472,7 +476,7 @@ func pickInt(envKey string, value *int, fallback int) int {
 	return fallback
 }
 
-// pickIntAllowZero 允许配置 0 与负数：0 表示使用默认语义，负数表示不限制。
+// pickIntAllowZero 保留显式配置的 0 和负数，由调用方定义具体语义。
 func pickIntAllowZero(envKey string, value *int, fallback int) int {
 	if raw := strings.TrimSpace(os.Getenv(envKey)); raw != "" {
 		if parsed, err := strconv.Atoi(raw); err == nil {
@@ -556,6 +560,60 @@ func normalizeLLMProvider(value string) string {
 	}
 }
 
+const (
+	maxLLMAPIKeyCount = 20
+	maxLLMAPIKeyChars = 4096
+)
+
+// ParseLLMAPIKeys 按行解析 Key 列表，兼容 Windows 换行并去除空项和重复项。
+func ParseLLMAPIKeys(value string) []string {
+	value = strings.ReplaceAll(value, "\r\n", "\n")
+	return NormalizeLLMAPIKeys(strings.Split(value, "\n"))
+}
+
+// NormalizeLLMAPIKeys 清理 Key 列表，最多保留 maxLLMAPIKeyCount 个有效项。
+func NormalizeLLMAPIKeys(values []string) []string {
+	result := make([]string, 0, len(values))
+	seen := make(map[string]bool, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || len(value) > maxLLMAPIKeyChars || seen[value] {
+			continue
+		}
+		seen[value] = true
+		result = append(result, value)
+		if len(result) >= maxLLMAPIKeyCount {
+			break
+		}
+	}
+	return result
+}
+
+func resolveLLMAPIKeys(values []string, legacy *string) []string {
+	if raw := strings.TrimSpace(os.Getenv("SOPHON_LLM_API_KEYS")); raw != "" {
+		return ParseLLMAPIKeys(raw)
+	}
+	if raw := strings.TrimSpace(os.Getenv("SOPHON_LLM_API_KEY")); raw != "" {
+		return []string{raw}
+	}
+	if keys := NormalizeLLMAPIKeys(values); len(keys) > 0 {
+		return keys
+	}
+	if legacy != nil {
+		if value := strings.TrimSpace(*legacy); value != "" {
+			return []string{value}
+		}
+	}
+	return nil
+}
+
+func firstLLMAPIKey(keys []string) string {
+	if len(keys) == 0 {
+		return ""
+	}
+	return keys[0]
+}
+
 func normalizeSubagentMaxConcurrency(value int) int {
 	if value <= 0 {
 		return 2
@@ -613,8 +671,8 @@ func normalizeSubagentMaxProcesses(value int) int {
 }
 
 func normalizeAgentMaxHypotheses(value int) int {
-	if value < 10 {
-		return 10
+	if value <= 0 {
+		return 0
 	}
 	if value > 2000 {
 		return 2000

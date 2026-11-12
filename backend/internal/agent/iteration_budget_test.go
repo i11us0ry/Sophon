@@ -18,10 +18,10 @@ func TestConfiguredSegmentLimitPreservesUserTotal(t *testing.T) {
 	}
 }
 
-func TestTurnTokenBudgetZeroUsesSafetyDefault(t *testing.T) {
+func TestTurnTokenBudgetZeroMeansUnlimited(t *testing.T) {
 	service := &Service{cfg: config.Config{AgentMaxTurnTokens: 0}}
-	if got := service.turnTokenBudget(); got != defaultRunMaxTurnTokens {
-		t.Fatalf("0 应使用默认安全预算 %d，实际 %d", defaultRunMaxTurnTokens, got)
+	if got := service.turnTokenBudget(); got != 0 {
+		t.Fatalf("0 应表示不限，实际 %d", got)
 	}
 	service.cfg.AgentMaxTurnTokens = 500000
 	if got := service.turnTokenBudget(); got != 500000 {

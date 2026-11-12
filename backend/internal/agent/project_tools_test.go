@@ -407,7 +407,8 @@ func TestProjectFactToolRoundTrip(t *testing.T) {
 	if facts[0].Summary != "目标 IP 为 10.0.0.1" ||
 		facts[0].Body != "nmap 确认主机开放 80/443" ||
 		facts[0].Evidence != "nmap -sV 10.0.0.1 输出" ||
-		facts[0].Relation != "asset:asset-1" {
+		facts[0].Relation != "asset:asset-1" ||
+		facts[0].Priority != memoryDefaultPriority {
 		t.Fatalf("结构化事实字段不完整: %+v", facts[0])
 	}
 

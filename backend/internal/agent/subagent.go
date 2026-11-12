@@ -426,13 +426,13 @@ func (r *subAgentRunner) runWithOptions(
 
 	maxIterations := service.configSnapshot().AgentMaxIterations
 	if maxIterations <= 0 {
-		maxIterations = service.maxIterations
+		maxIterations = unlimitedRunIterations()
 	}
 	instruction := r.instruction(ctx)
 	chatAgent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
 		Name:          "pent-sub-agent",
 		Instruction:   instruction,
-		Model:         service.model,
+		Model:         wrapModelTokenBudget(service.model),
 		MaxIterations: maxIterations,
 		ToolsConfig: adk.ToolsConfig{
 			ToolsNodeConfig: compose.ToolsNodeConfig{

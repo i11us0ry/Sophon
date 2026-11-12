@@ -725,6 +725,30 @@ func TestSpecificFindingReferenceRejectsMissingOrInvalidFinding(t *testing.T) {
 	}
 }
 
+func TestExternalFindingAuditIgnoresInvalidProjectFindingIDs(t *testing.T) {
+	service, ctx := openProjectToolService(t, true)
+	for _, message := range []string{
+		"不是复现当前已知漏洞，而是其他平台审计出来的漏洞，按照它的逻辑看看是否存在同样的漏洞，finding #2375",
+		"复现步骤：攻击者发送 HTTP/1.1 请求，payload 为 finding #2375，验证该漏洞在源码中是否存在",
+	} {
+		plan := service.bindMissionFindingReference(
+			ctx,
+			"project-tools",
+			"user-1",
+			message,
+			missionPlan{
+				Mode:       missionModeCodeAudit,
+				FindingIDs: []string{"2375", "external-finding"},
+				Bounded:    true,
+			},
+		)
+		if plan.Mode != missionModeCodeAudit || len(plan.FindingIDs) != 0 ||
+			len(plan.VulnerabilityIDs) != 0 || plan.Bounded {
+			t.Fatalf("外部漏洞参考不应绑定当前项目 finding: message=%q plan=%+v", message, plan)
+		}
+	}
+}
+
 func TestSpecificFindingReferenceRejectsNonAuditMode(t *testing.T) {
 	service, ctx := openProjectToolService(t, true)
 	plan := service.bindMissionFindingReference(
@@ -773,7 +797,7 @@ func TestMissionClarificationMessageIsSpecific(t *testing.T) {
 	}
 }
 
-func TestLegacyOpenCodeAuditResumeRequiresFindingBinding(t *testing.T) {
+func TestLegacyOpenCodeAuditResumeKeepsSourceAudit(t *testing.T) {
 	service := &Service{}
 	state := &missionProgressState{
 		IntentPlan: &missionPlan{
@@ -795,8 +819,94 @@ func TestLegacyOpenCodeAuditResumeRequiresFindingBinding(t *testing.T) {
 		state,
 		RunOptions{ResumeOf: "run-legacy"},
 	)
-	if plan.Mode != missionModeClarify {
-		t.Fatalf("旧开放式代码审计恢复必须要求重新绑定具体漏洞: %+v", plan)
+	if plan.Mode != missionModeCodeAudit ||
+		len(plan.SourceRoots) != 1 ||
+		plan.SourceRoots[0] != "/tmp/source.zip" {
+		t.Fatalf("开放式代码审计应直接恢复源码审计: %+v", plan)
+	}
+}
+
+func TestMissionMessageIncludesProjectWideAttachments(t *testing.T) {
+	service, ctx := openProjectToolService(t, true)
+	root := t.TempDir()
+	service.cfg.Storage.ArtifactRoot = root
+	now := time.Now().UTC()
+	if err := service.db.CreateConversation(ctx, database.Conversation{
+		ID: "conv-project-source", OwnerUserID: "user-1", ProjectID: "project-tools",
+		Title: "源码会话", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("创建源码会话失败: %v", err)
+	}
+	if err := service.db.AddAttachment(ctx, database.Attachment{
+		ID: "att-project-source", ConversationID: "conv-project-source",
+		FileName: "WebSite.zip", StoragePath: "conv-project-source/WebSite.zip",
+		CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("写入项目附件失败: %v", err)
+	}
+	for index := 0; index < 11; index++ {
+		if err := service.db.AddAttachment(ctx, database.Attachment{
+			ID:             fmt.Sprintf("att-recent-%d", index),
+			ConversationID: "conv-project-source",
+			FileName:       fmt.Sprintf("scan-%d.txt", index),
+			StoragePath:    fmt.Sprintf("conv-project-source/scan-%d.txt", index),
+			CreatedAt:      now.Add(time.Duration(index+1) * time.Minute),
+		}); err != nil {
+			t.Fatalf("写入近期普通附件失败: %v", err)
+		}
+	}
+	message := service.missionMessageWithAttachments(ctx, "conv-tools", "验证下面的漏洞是否存在")
+	if !strings.Contains(message, "[本项目最近附件]") ||
+		!strings.Contains(message, filepath.Join(root, "chat_uploads", "conv-project-source", "WebSite.zip")) {
+		t.Fatalf("项目附件未注入当前会话: %s", message)
+	}
+}
+
+func TestResumeCodeAuditRehydratesProjectSourceAttachment(t *testing.T) {
+	service, ctx := openProjectToolService(t, true)
+	root := t.TempDir()
+	service.cfg.Storage.ArtifactRoot = root
+	now := time.Now().UTC()
+	if err := service.db.CreateConversation(ctx, database.Conversation{
+		ID: "conv-resume-source", OwnerUserID: "user-1", ProjectID: "project-tools",
+		Title: "恢复源码", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("创建源码会话失败: %v", err)
+	}
+	if err := service.db.AddAttachment(ctx, database.Attachment{
+		ID: "att-resume-source", ConversationID: "conv-resume-source",
+		FileName: "WebSite.zip", StoragePath: "conv-resume-source/WebSite.zip",
+		CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("写入项目附件失败: %v", err)
+	}
+	state := &missionProgressState{
+		IntentPlan: &missionPlan{
+			Mode:        missionModeCodeAudit,
+			SourceRoots: nil,
+			Confidence:  70,
+		},
+		MissionPhase: missionPhaseSourceAudit,
+	}
+	plan := service.resolveMissionPlan(
+		ctx,
+		"conv-tools",
+		"user-1",
+		"assistant-resume-source",
+		database.Project{
+			ID: "project-tools", OwnerUserID: "user-1", Name: "恢复项目", Status: "active",
+		},
+		database.Conversation{
+			ID: "conv-tools", OwnerUserID: "user-1", ProjectID: "project-tools",
+		},
+		nil,
+		"继续",
+		state,
+		RunOptions{ResumeOf: "run-resume-source"},
+	)
+	want := filepath.Join(root, "chat_uploads", "conv-resume-source", "WebSite.zip")
+	if plan.Mode != missionModeCodeAudit || !containsString(plan.SourceRoots, want) {
+		t.Fatalf("恢复任务应重新注入项目源码附件: %+v", plan)
 	}
 }
 
@@ -852,6 +962,188 @@ func TestMissionInputPathBoundary(t *testing.T) {
 	})
 	if invalid.Mode != missionModeClarify {
 		t.Fatalf("存储根目录外路径必须拒绝: %+v", invalid)
+	}
+}
+
+func TestMissionSourceRootsMergeModelAndRelativePaths(t *testing.T) {
+	relative := "619a290f111113164787937eacd3463c/ca38957640111017399ccd44dd26a92b_WebSite.zip"
+	plan := normalizeExtendedMissionPlan(
+		missionPlan{
+			Mode:        missionModeCodeAudit,
+			SourceRoots: []string{"model-provided-source"},
+		},
+		"源码在 "+relative,
+		missionTestProject(),
+		database.Conversation{},
+		nil,
+		false,
+	)
+	for _, want := range []string{"model-provided-source", relative} {
+		if !containsString(plan.SourceRoots, want) {
+			t.Fatalf("source_roots 缺少 %q: %v", want, plan.SourceRoots)
+		}
+	}
+	if got := extractMissionSourceRoots("源码在 " + relative); !containsString(got, relative) {
+		t.Fatalf("相对源码包路径未识别: %v", got)
+	}
+	recovered := normalizeMissionPlan(
+		missionPlan{Mode: missionModeClarify, Confidence: 50},
+		"代码审计，源码在 "+relative,
+		missionTestProject(),
+		database.Conversation{},
+		nil,
+	)
+	if recovered.Mode != missionModeCodeAudit || !containsString(recovered.SourceRoots, relative) {
+		t.Fatalf("澄清结果应恢复为代码审计: %+v", recovered)
+	}
+	verified := normalizeMissionPlan(
+		missionPlan{Mode: missionModeClarify, Confidence: 50},
+		"验证下面的漏洞是否存在，源码在 "+relative,
+		missionTestProject(),
+		database.Conversation{},
+		nil,
+	)
+	if verified.Mode != missionModeCodeAudit || !containsString(verified.SourceRoots, relative) {
+		t.Fatalf("漏洞验证请求应恢复源码审计: %+v", verified)
+	}
+	lowConfidence := normalizeMissionPlan(
+		missionPlan{Mode: missionModeCodeAudit, Confidence: 50},
+		"代码审计，源码在 "+relative,
+		missionTestProject(),
+		database.Conversation{},
+		nil,
+	)
+	if lowConfidence.Mode != missionModeCodeAudit {
+		t.Fatalf("明确源码审计不应被低置信度拦截: %+v", lowConfidence)
+	}
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
+
+func TestMissionInputPathAllowsRegisteredSameProjectConversationUpload(t *testing.T) {
+	root := t.TempDir()
+	db, err := database.Open(filepath.Join(t.TempDir(), "source-root.db"))
+	if err != nil {
+		t.Fatalf("打开数据库失败: %v", err)
+	}
+	defer db.Close()
+	ctx := execctx.WithUserID(context.Background(), "user-1")
+	now := time.Now().UTC()
+	createProject := func(id string) {
+		if err := db.CreateProject(ctx, database.Project{
+			ID: id, OwnerUserID: "user-1", Name: id, Status: "active",
+			CreatedAt: now, UpdatedAt: now,
+		}); err != nil {
+			t.Fatalf("创建项目失败: %v", err)
+		}
+	}
+	createConversation := func(id, projectID string) {
+		if err := db.CreateConversation(ctx, database.Conversation{
+			ID: id, OwnerUserID: "user-1", ProjectID: projectID, Kind: "normal",
+			Title: id, CreatedAt: now, UpdatedAt: now,
+		}); err != nil {
+			t.Fatalf("创建会话失败: %v", err)
+		}
+	}
+	createProject("project-a")
+	createProject("project-b")
+	createConversation("current-conv", "project-a")
+	createConversation("source-conv", "project-a")
+	createConversation("other-project-conv", "project-b")
+	targetUploads := filepath.Join(root, "chat_uploads", "source-conv")
+	if err := os.MkdirAll(targetUploads, 0o700); err != nil {
+		t.Fatalf("创建上传目录失败: %v", err)
+	}
+	sourcePath := filepath.Join(targetUploads, "WebSite.zip")
+	if err := os.WriteFile(sourcePath, []byte("zip"), 0o600); err != nil {
+		t.Fatalf("写入源码包失败: %v", err)
+	}
+	if err := db.AddAttachment(ctx, database.Attachment{
+		ID: "att-source", ConversationID: "source-conv", FileName: "WebSite.zip",
+		StoragePath: "source-conv/WebSite.zip", SizeBytes: 3, CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("添加上传记录失败: %v", err)
+	}
+	service := &Service{
+		db:  db,
+		cfg: config.Config{Storage: config.StorageConfig{ArtifactRoot: root}},
+	}
+	valid := service.validateMissionInputPaths(ctx, "current-conv", missionPlan{
+		Mode:        missionModeCodeAudit,
+		SourceRoots: []string{"source-conv/WebSite.zip", "./x.png_a_x_00001_2_.aspx"},
+	})
+	if valid.Mode == missionModeClarify {
+		t.Fatalf("同项目已登记跨会话源码应允许: %+v", valid)
+	}
+	resolvedSourcePath, err := filepath.EvalSymlinks(sourcePath)
+	if err != nil {
+		t.Fatalf("解析源码路径失败: %v", err)
+	}
+	if len(valid.SourceRoots) != 1 || valid.SourceRoots[0] != resolvedSourcePath {
+		t.Fatalf("应忽略误提取路径并保留合法源码: %v", valid.SourceRoots)
+	}
+	unregistered := filepath.Join(targetUploads, "project-common.zip")
+	if err := os.WriteFile(unregistered, []byte("zip"), 0o600); err != nil {
+		t.Fatalf("写入项目公共源码失败: %v", err)
+	}
+	common := service.validateMissionInputPaths(ctx, "current-conv", missionPlan{
+		Mode:        missionModeCodeAudit,
+		SourceRoots: []string{"source-conv/project-common.zip"},
+	})
+	if common.Mode == missionModeClarify {
+		t.Fatalf("同项目对话上传文件应可直接读取: %+v", common)
+	}
+
+	otherUploads := filepath.Join(root, "chat_uploads", "other-project-conv")
+	if err := os.MkdirAll(otherUploads, 0o700); err != nil {
+		t.Fatalf("创建跨项目上传目录失败: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(otherUploads, "WebSite.zip"), []byte("zip"), 0o600); err != nil {
+		t.Fatalf("写入跨项目源码失败: %v", err)
+	}
+	if err := db.AddAttachment(ctx, database.Attachment{
+		ID: "att-other", ConversationID: "other-project-conv", FileName: "WebSite.zip",
+		StoragePath: "other-project-conv/WebSite.zip", SizeBytes: 3, CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("添加跨项目上传记录失败: %v", err)
+	}
+	invalid := service.validateMissionInputPaths(ctx, "current-conv", missionPlan{
+		Mode:        missionModeCodeAudit,
+		SourceRoots: []string{"other-project-conv/WebSite.zip"},
+	})
+	if invalid.Mode != missionModeClarify {
+		t.Fatalf("跨项目源码必须拒绝: %+v", invalid)
+	}
+}
+
+func TestCodeValidateUsesActiveProjectScopeAsRuntimeTarget(t *testing.T) {
+	project := database.Project{
+		ID: "project-target-fallback", OwnerUserID: "user-1", Name: "目标回退",
+		Scope: "10.8.0.61", Status: "active",
+	}
+	plan := normalizeExtendedMissionPlan(
+		missionPlan{
+			Mode:        missionModeCodeValidate,
+			SourceRoots: []string{"/tmp/WebSite.zip"},
+			Confidence:  90,
+		},
+		"通过代码审计验证下面的漏洞是否存在",
+		project,
+		database.Conversation{},
+		nil,
+		false,
+	)
+	if plan.Mode == missionModeClarify ||
+		len(plan.PentestTargets) != 1 ||
+		plan.PentestTargets[0] != "10.8.0.61" {
+		t.Fatalf("活动项目 Scope 应作为运行时验证目标: %+v", plan)
 	}
 }
 
@@ -987,7 +1279,10 @@ func TestMissionPolicyAllowsConversationScopedSourcePaths(t *testing.T) {
 		ID: "worker-scoped", Kind: "worker", Mode: subagentModeExecute, Depth: 1,
 	})
 	guidance := service.missionSourceAccessGuidance(ctx)
-	for _, want := range []string{uploads, workspace, sourceZip, `unzip -q ` + sourceZip} {
+	for _, want := range []string{
+		"当前项目公共上传目录", uploads, workspace, sourceZip, `unzip -q ` + sourceZip,
+		"禁止读取其他项目、其他用户",
+	} {
 		if !strings.Contains(guidance, want) {
 			t.Fatalf("Worker 源码访问提示缺少 %q: %s", want, guidance)
 		}

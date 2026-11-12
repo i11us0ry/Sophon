@@ -15,9 +15,8 @@ import (
 )
 
 const (
-	defaultMaxProjectHypotheses = 200
-	maxHypothesesPerPlan        = 20
-	maxFollowUpPerFinding       = 5
+	maxHypothesesPerPlan  = 20
+	maxFollowUpPerFinding = 5
 )
 
 type hypothesisInput struct {
@@ -76,25 +75,23 @@ func (s *Service) planHypothesesTool() tool.BaseTool {
 				return "", fmt.Errorf("单次必须规划 1-%d 个假设", maxHypothesesPerPlan)
 			}
 			maxHypotheses := s.configSnapshot().AgentMaxHypotheses
-			if maxHypotheses <= 0 {
-				maxHypotheses = defaultMaxProjectHypotheses
-			}
 			total, err := s.db.CountProjectHypotheses(ctx, projectID)
 			if err != nil {
 				return "", fmt.Errorf("读取假设数量失败: %w", err)
 			}
-			if total >= maxHypotheses {
-				return fmt.Sprintf(
-					"活跃假设已达到上限 %d。不要再新增假设；请直接执行并用 project_record_fact 写回事实，"+
-						"用 project_record_test 写回 tested_clean/blocked/suspicious/confirmed 测试结果。",
-					maxHypotheses,
-				), nil
+			if maxHypotheses > 0 {
+				if total >= maxHypotheses {
+					return fmt.Sprintf(
+						"活跃假设已达到上限 %d。不要再新增假设；请直接执行并用 project_record_fact 写回事实，"+
+							"用 project_record_test 写回 tested_clean/blocked/suspicious/confirmed 测试结果。",
+						maxHypotheses,
+					), nil
+				}
+				if remaining := maxHypotheses - total; remaining < len(inputs) {
+					inputs = inputs[:remaining]
+				}
 			}
 			skipped := 0
-			if remaining := maxHypotheses - total; remaining < len(inputs) {
-				skipped += len(inputs) - remaining
-				inputs = inputs[:remaining]
-			}
 			planned := 0
 			for _, input := range inputs {
 				assetID, err := s.validateProjectAsset(ctx, projectID, userID, input.AssetID)
@@ -146,7 +143,7 @@ func (s *Service) planHypothesesTool() tool.BaseTool {
 				planned++
 			}
 			message := fmt.Sprintf("测试假设已规划：写入 %d 个，跳过 %d 个。", planned, skipped)
-			if total+planned >= maxHypotheses {
+			if maxHypotheses > 0 && total+planned >= maxHypotheses {
 				message += fmt.Sprintf(
 					" 活跃假设已达到上限 %d；后续不要继续新增假设，直接使用 project_record_fact 和 project_record_test 写回事实与测试结果。",
 					maxHypotheses,
@@ -508,25 +505,44 @@ func (s *Service) seedFollowUpHypotheses(
 	projectID string,
 	finding database.Vulnerability,
 ) {
-	if strings.TrimSpace(projectID) == "" || strings.TrimSpace(finding.ID) == "" {
+	if strings.TrimSpace(projectID) == "" || strings.TrimSpace(finding.ID) == "" ||
+		!shouldGenerateFollowUps(finding) {
 		return
 	}
 	maxHypotheses := s.configSnapshot().AgentMaxHypotheses
-	if maxHypotheses <= 0 {
-		maxHypotheses = defaultMaxProjectHypotheses
-	}
-	total, err := s.db.CountProjectHypotheses(ctx, projectID)
-	if err != nil || total >= maxHypotheses {
-		return
-	}
-	remaining := maxHypotheses - total
 	items := buildFollowUpHypotheses(finding)
-	if len(items) > remaining {
-		items = items[:remaining]
+	if maxHypotheses > 0 {
+		total, err := s.db.CountProjectHypotheses(ctx, projectID)
+		if err != nil || total >= maxHypotheses {
+			return
+		}
+		remaining := maxHypotheses - total
+		if len(items) > remaining {
+			items = items[:remaining]
+		}
 	}
 	for index := range items {
 		items[index].ProjectID = projectID
 		_, _ = s.db.UpsertProjectTestResult(ctx, items[index])
+	}
+}
+
+func shouldGenerateFollowUps(finding database.Vulnerability) bool {
+	switch strings.ToLower(strings.TrimSpace(finding.Status)) {
+	case "fixed", "false_positive", "ignored", "closed", "dismissed", "resolved":
+		return false
+	case "confirmed":
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(finding.VerificationState)) {
+	case "exploitable", "verified":
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(finding.Severity)) {
+	case "critical", "high":
+		return true
+	default:
+		return false
 	}
 }
 

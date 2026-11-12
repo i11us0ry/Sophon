@@ -71,12 +71,11 @@ const (
 	defaultRunMaxToolCalls       = 500
 	defaultRunMaxSubagents       = 12
 	defaultRunMaxDurationSeconds = 90 * 60
-	defaultRunMaxTurnTokens      = 20_000_000
 	maxRunMaxSegments            = 12
 	maxRunMaxToolCalls           = 2_000
 	maxRunMaxSubagents           = 24
 	maxRunMaxDurationSeconds     = 4 * 60 * 60
-	maxRunMaxTurnTokens          = 20_000_000
+	maxRunMaxTurnTokens          = 100_000_000
 )
 
 const (
@@ -395,14 +394,13 @@ var ErrTaskBudgetExhausted = errors.New("任务预算已耗尽")
 type ProgressFunc func(Event) error
 
 type Service struct {
-	mu            sync.RWMutex
-	db            *database.DB
-	cfg           config.Config
-	model         model.ToolCallingChatModel
-	baseTools     []tool.BaseTool
-	tools         []tool.BaseTool
-	maxIterations int
-	knowledge     *knowledgepkg.Service
+	mu        sync.RWMutex
+	db        *database.DB
+	cfg       config.Config
+	model     model.ToolCallingChatModel
+	baseTools []tool.BaseTool
+	tools     []tool.BaseTool
+	knowledge *knowledgepkg.Service
 	// 后台压缩：按会话冷却，避免每轮重复触发。
 	compactMu      sync.Mutex
 	compactLast    map[string]time.Time
@@ -448,15 +446,14 @@ func NewService(
 		return nil, err
 	}
 	service := &Service{
-		db:            db,
-		cfg:           cfg,
-		model:         chatModel,
-		maxIterations: 12,
-		knowledge:     knowledgeService,
-		projectSyncs:  map[string]*projectSyncState{},
-		registry:      newToolRegistry(),
-		toolCache:     map[string]toolCacheEntry{},
-		jobs:          map[string]context.CancelFunc{},
+		db:           db,
+		cfg:          cfg,
+		model:        chatModel,
+		knowledge:    knowledgeService,
+		projectSyncs: map[string]*projectSyncState{},
+		registry:     newToolRegistry(),
+		toolCache:    map[string]toolCacheEntry{},
+		jobs:         map[string]context.CancelFunc{},
 	}
 	if db != nil {
 		if err := EnsureSystemAgentRoles(context.Background(), db); err != nil {
@@ -903,21 +900,24 @@ func (s *Service) RunWithOptions(
 
 	snapshot := s.configSnapshot()
 	maxIterations := snapshot.AgentMaxIterations
-	if maxIterations <= 0 {
-		maxIterations = s.maxIterations
-	}
 	iterationBudget := newModelIterationBudget(maxIterations)
 	// 用户配置的是整个 turn 的总迭代上限；单段使用更小的内部窗口并在段间
 	// 重建受限上下文，避免一次 Run 内无限累积工具结果。
 	segmentLimit := configuredSegmentLimit(maxIterations)
 	maxSegmentsLimit, maxToolCallsLimit := resolveRunLimits(options, intentPlan)
 	autoContinueSegments := !intentPlan.boundedFindingAudit()
-	newAgent := func(limit int, includeTools bool) (*adk.ChatModelAgent, error) {
+	if maxIterations <= 0 &&
+		autoContinueSegments &&
+		options.MaxSegments <= 0 &&
+		intentPlan.MaxSegments <= 0 {
+		maxSegmentsLimit = unlimitedRunIterations()
+	}
+	buildAgent := func(agentCtx context.Context, limit int, includeTools bool) (*adk.ChatModelAgent, error) {
 		toolsConfig := adk.ToolsConfig{}
-		agentModel := model.ToolCallingChatModel(s.model)
+		agentModel := wrapModelTokenBudget(model.ToolCallingChatModel(s.model))
 		if includeTools {
 			toolsConfig.ToolsNodeConfig = compose.ToolsNodeConfig{
-				Tools:               s.activeToolsForMission(ctx, agentMode, missionExecution.Plan, missionExecution.Phase),
+				Tools:               s.activeToolsForMission(agentCtx, agentMode, missionExecution.Plan, missionExecution.Phase),
 				UnknownToolsHandler: s.unknownToolHandler,
 			}
 			if autoContinueSegments {
@@ -929,13 +929,16 @@ func (s *Service) RunWithOptions(
 				)
 			}
 		}
-		return adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+		return adk.NewChatModelAgent(agentCtx, &adk.ChatModelAgentConfig{
 			Name:          "sophon-agent",
-			Instruction:   s.mainAgentInstruction(ctx),
+			Instruction:   s.mainAgentInstruction(agentCtx),
 			Model:         agentModel,
 			MaxIterations: limit,
 			ToolsConfig:   toolsConfig,
 		})
+	}
+	newAgent := func(limit int, includeTools bool) (*adk.ChatModelAgent, error) {
+		return buildAgent(ctx, limit, includeTools)
 	}
 
 	var capture runCapture
@@ -946,6 +949,7 @@ func (s *Service) RunWithOptions(
 	projectID := project.ID
 	overflowRetried := false
 	budgetExhausted := false
+	tokenBudgetClosing := false
 	finalTextMissing := false
 	pausedOnQuestion := false
 	previousProgress := s.missionProgress(ctx, projectID, userID)
@@ -954,20 +958,38 @@ func (s *Service) RunWithOptions(
 	autonomousPentest := missionExecution.Plan.allowsPentest()
 	scope := missionExecution.Scope
 	strategySwitches := 0
+	forceBudgetSummary := func() string {
+		summaryCtx, cancel := tokenBudgetSummaryContext(ctx)
+		defer cancel()
+		return s.forceSynthesis(
+			summaryCtx,
+			conversationID,
+			userID,
+			assistantMessageID,
+			progress,
+			&capture,
+			tokenBudgetSynthesisPrompt,
+			func(limit int, includeTools bool) (*adk.ChatModelAgent, error) {
+				return buildAgent(summaryCtx, limit, includeTools)
+			},
+		)
+	}
+	tokenBudgetNotice := func(limit int) string {
+		return fmt.Sprintf(
+			"本轮 Token 预算已进入收尾阶段（上限 %d），已自动总结当前成果并停止扩展。",
+			limit,
+		)
+	}
 
 	for attempt := 0; ; attempt++ {
 		if attempt >= maxSegmentsLimit {
 			budgetExhausted = true
 			break
 		}
-		if attempt > 0 && s.db != nil {
-			if turnBudget := runTokenBudgetFromContext(ctx).limit; turnBudget > 0 {
-				if usedTokens, tokenErr := s.db.TokenUsageForMessage(ctx, assistantMessageID); tokenErr == nil &&
-					usedTokens >= turnBudget {
-					budgetExhausted = true
-					break
-				}
-			}
+		if attempt > 0 && runTokenBudgetFromContext(ctx).shouldSynthesize() {
+			budgetExhausted = true
+			tokenBudgetClosing = true
+			break
 		}
 		if capture.toolCallCount >= maxToolCallsLimit {
 			budgetExhausted = true
@@ -1050,16 +1072,22 @@ func (s *Service) RunWithOptions(
 		if runErr != nil {
 			if errors.Is(runErr, errRunTokenBudgetExhausted) {
 				budgetExhausted = true
+				tokenBudgetClosing = true
 				tokenBudget := runTokenBudgetFromContext(ctx).limit
 				if tokenBudget <= 0 {
 					tokenBudget = s.turnTokenBudget()
 				}
-				finalText = fmt.Sprintf(
-					"本轮执行因单轮 Token 安全上限（%d）停止。已生成内容和项目进度已保留。",
-					tokenBudget,
-				)
+				notice := tokenBudgetNotice(tokenBudget)
+				summary := forceBudgetSummary()
+				if strings.TrimSpace(summary) == "" {
+					finalText = notice + "已生成内容和项目进度已保留。"
+				} else {
+					finalText = summary + "\n\n---\n\n" + notice
+				}
 				result := combineMissionOutput(stageSummary, finalText)
-				_ = s.saveAssistantContent(ctx, assistantMessageID, result, capture.reasoning.String())
+				saveCtx, saveCancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+				_ = s.saveAssistantContent(saveCtx, assistantMessageID, result, capture.reasoning.String())
+				saveCancel()
 				runStatus = database.AgentRunStatusInterrupted
 				runInterruptionReason = "单轮 Token 安全上限已耗尽"
 				return result, ErrTaskBudgetExhausted
@@ -1297,19 +1325,14 @@ func (s *Service) RunWithOptions(
 		if decision.Allowed {
 			break
 		}
-		if s.db != nil {
-			// 批量任务是可计费子任务，仍保留明确的工具/段/token 预算。
-			if turnBudget := runTokenBudgetFromContext(ctx).limit; turnBudget > 0 {
-				usedTokens, tokenErr := s.db.TokenUsageForMessage(ctx, assistantMessageID)
-				if tokenErr == nil && usedTokens >= turnBudget {
-					decision.Reasons = append(
-						decision.Reasons,
-						fmt.Sprintf("本轮累计 token 已达预算（%d/%d），已停止继续执行", usedTokens, turnBudget),
-					)
-					budgetExhausted = true
-					break
-				}
-			}
+		if budget := runTokenBudgetFromContext(ctx); budget.shouldSynthesize() {
+			decision.Reasons = append(
+				decision.Reasons,
+				"单轮 Token 预算已进入收尾阶段，停止扩展并生成当前成果总结",
+			)
+			budgetExhausted = true
+			tokenBudgetClosing = true
+			break
 		}
 		if budgetExhausted {
 			break
@@ -1389,6 +1412,28 @@ func (s *Service) RunWithOptions(
 		}
 		nextMessages = append(nextMessages, schema.UserMessage(continuationPromptForMission(ctx, decision)))
 		currentMessages = nextMessages
+	}
+
+	if tokenBudgetClosing {
+		if progress != nil {
+			_ = progress(Event{
+				Type:    "finalization_check",
+				Message: "Token 预算接近上限，进入强制总结",
+				Data: map[string]interface{}{
+					"reason": "token_budget",
+					"limit":  runTokenBudgetFromContext(ctx).limit,
+					"used":   runTokenBudgetFromContext(ctx).snapshotUsed(),
+				},
+			})
+		}
+		notice := tokenBudgetNotice(runTokenBudgetFromContext(ctx).limit)
+		if summary := forceBudgetSummary(); strings.TrimSpace(summary) != "" {
+			finalText = summary + "\n\n---\n\n" + notice
+		} else if strings.TrimSpace(finalText) != "" {
+			finalText += "\n\n---\n\n" + notice
+		} else {
+			finalText = notice + "已生成内容和项目进度已保留。"
+		}
 	}
 
 	if strings.TrimSpace(finalText) == "" {
@@ -1877,17 +1922,20 @@ func (s *Service) configSnapshot() config.Config {
 	return s.cfg
 }
 
-// turnTokenBudget 限制单轮（同一助手消息）累计消耗，避免续跑段无限叠加。
+// turnTokenBudget 返回 0 表示不限制单轮累计 Token。
 func (s *Service) turnTokenBudget() int {
 	configured := s.configSnapshot().AgentMaxTurnTokens
-	// 0 表示使用安全兜底；正整数可显式收紧缩放。
 	if configured <= 0 {
-		return defaultRunMaxTurnTokens
+		return 0
 	}
 	if configured > maxRunMaxTurnTokens {
 		return maxRunMaxTurnTokens
 	}
 	return configured
+}
+
+func unlimitedRunIterations() int {
+	return int(^uint(0) >> 1)
 }
 
 func (s *Service) HITLDefaultEnabled() bool {
@@ -3039,6 +3087,7 @@ type runTokenBudget struct {
 	used    int
 	cancel  context.CancelFunc
 	overrun bool
+	warned  bool
 }
 
 func withRunTokenBudget(ctx context.Context, limit int, cancel context.CancelFunc) context.Context {
@@ -3083,6 +3132,56 @@ func (b *runTokenBudget) exceeded() bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.overrun
+}
+
+func (b *runTokenBudget) shouldSynthesize() bool {
+	if b == nil {
+		return false
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.shouldSynthesizeLocked()
+}
+
+func (b *runTokenBudget) shouldSynthesizeLocked() bool {
+	if b.limit <= 0 {
+		return false
+	}
+	reserve := max(1, int(math.Ceil(float64(b.limit)*0.02)))
+	return b.used >= b.limit-reserve
+}
+
+func (b *runTokenBudget) warningMessage() string {
+	if b == nil {
+		return ""
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.warned || b.overrun || !b.shouldSynthesizeLocked() {
+		return ""
+	}
+	b.warned = true
+	return fmt.Sprintf(
+		"【系统 Token 预算提醒】本轮 Token 预算仅剩约 %d（已使用 %d/%d）。立即停止扩展和低价值尝试，禁止调用新工具；尽快统计当前已完成工作、已验证结论、关键证据、未完成项和阻塞原因，直接给出可交付总结并结束任务。",
+		b.limit-b.used,
+		b.used,
+		b.limit,
+	)
+}
+
+func (b *runTokenBudget) snapshotUsed() int {
+	if b == nil {
+		return 0
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.used
+}
+
+func tokenBudgetSummaryContext(parent context.Context) (context.Context, context.CancelFunc) {
+	ctx := context.WithoutCancel(parent)
+	ctx = context.WithValue(ctx, runTokenBudgetKey{}, &runTokenBudget{})
+	return context.WithTimeout(ctx, 90*time.Second)
 }
 
 func newUsageTracker(
@@ -3262,7 +3361,13 @@ func buildModel(ctx context.Context, cfg config.Config) (model.ToolCallingChatMo
 	if cfg.AgentMock {
 		return newMockModel(), nil
 	}
-	if strings.TrimSpace(cfg.LLMAPIKey) == "" {
+	apiKeys := config.NormalizeLLMAPIKeys(cfg.LLMAPIKeys)
+	if len(apiKeys) == 0 {
+		if legacy := strings.TrimSpace(cfg.LLMAPIKey); legacy != "" {
+			apiKeys = []string{legacy}
+		}
+	}
+	if len(apiKeys) == 0 {
 		return nil, fmt.Errorf("LLM API Key 未配置且 Mock 模式未启用")
 	}
 	timeout := time.Duration(cfg.LLMTimeoutSeconds) * time.Second
@@ -3278,14 +3383,18 @@ func buildModel(ctx context.Context, cfg config.Config) (model.ToolCallingChatMo
 	if err != nil {
 		return nil, fmt.Errorf("create outbound policy client: %w", err)
 	}
-	httpClient.Transport = newLLMRetryTransport(httpClient.Transport)
+	var keyPool *llmKeyPool
+	if len(apiKeys) > 1 {
+		keyPool = newLLMKeyPool(apiKeys, cfg.LLMProvider)
+	}
+	httpClient.Transport = newLLMRetryTransport(httpClient.Transport, keyPool)
 	if strings.EqualFold(strings.TrimSpace(cfg.LLMProvider), "anthropic") {
 		var baseURL *string
 		if value := strings.TrimSpace(cfg.LLMBaseURL); value != "" {
 			baseURL = &value
 		}
 		chatModel, err := claude.NewChatModel(ctx, &claude.Config{
-			APIKey:     cfg.LLMAPIKey,
+			APIKey:     apiKeys[0],
 			BaseURL:    baseURL,
 			Model:      cfg.LLMModel,
 			MaxTokens:  4096,
@@ -3297,7 +3406,7 @@ func buildModel(ctx context.Context, cfg config.Config) (model.ToolCallingChatMo
 		return chatModel, nil
 	}
 	chatModel, err := openai.NewChatModel(ctx, &openai.ChatModelConfig{
-		APIKey:     cfg.LLMAPIKey,
+		APIKey:     apiKeys[0],
 		BaseURL:    cfg.LLMBaseURL,
 		Model:      cfg.LLMModel,
 		Timeout:    timeout,

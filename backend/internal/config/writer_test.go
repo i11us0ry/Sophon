@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -63,5 +64,31 @@ func TestUpdateFilePrunesOldBackups(t *testing.T) {
 	}
 	if len(backups) != maxConfigBackups {
 		t.Fatalf("备份数量应为 %d，实际 %d", maxConfigBackups, len(backups))
+	}
+}
+
+func TestUpdateFileWithOptionsSkipsSensitiveBackup(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yml")
+	if err := os.WriteFile(path, []byte("agent:\n  llm:\n    api_key: old-key\n"), 0o600); err != nil {
+		t.Fatalf("写入测试配置失败: %v", err)
+	}
+	if err := UpdateFileWithOptions(path, []FieldUpdate{
+		{Path: []string{"agent", "llm", "api_keys"}, Value: []string{"new-key"}},
+	}, UpdateOptions{SkipBackup: true}); err != nil {
+		t.Fatalf("敏感配置更新失败: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("读取配置失败: %v", err)
+	}
+	if !strings.Contains(string(raw), "- new-key") {
+		t.Fatalf("敏感配置未写入: %s", raw)
+	}
+	backups, err := filepath.Glob(path + ".bak.*")
+	if err != nil {
+		t.Fatalf("查找备份失败: %v", err)
+	}
+	if len(backups) != 0 {
+		t.Fatalf("敏感配置不应生成明文备份: %v", backups)
 	}
 }

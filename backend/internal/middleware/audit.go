@@ -171,9 +171,21 @@ func summarizeAuditBody(route string, body []byte) string {
 	if len(body) == 0 || route == "/api/chat/stream" {
 		return ""
 	}
+	if sensitiveAuditBodyRoute(route) {
+		return "***"
+	}
 	summary, ok := redact.JSON(body)
 	if !ok {
 		return ""
 	}
 	return summary
+}
+
+func sensitiveAuditBodyRoute(route string) bool {
+	switch route {
+	case "/api/settings/llm/keys":
+		return true
+	default:
+		return false
+	}
 }

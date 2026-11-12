@@ -30,9 +30,9 @@ agent:
   mock: true # 学习阶段用 Mock；接入真实模型改为 false
   context_max_chars: 24000
   context_max_tokens: 0 # 0=按 context_max_chars 估算；>0 时按估算 token 数裁剪历史
-  max_iterations: 40 # Agent ReAct 最大迭代轮数
-  max_turn_tokens: 20000000 # 单轮累计 token 硬上限；0 也回退到该安全值
-  max_hypotheses: 200 # 项目活跃测试假设上限（仅统计 untested/running/suspicious）
+  max_iterations: 40 # Agent ReAct 最大迭代轮数；0=不限
+  max_turn_tokens: 50000000 # 单轮累计 token 上限；0=不限，最高可配置 100000000
+  max_hypotheses: 200 # 项目活跃测试假设上限；0=不限
   subagent_max_concurrency: 2 # Planner/Worker 子 Agent 最大并发数
   subagent_max_tool_calls: 80 # 单个 Planner/Worker 最大工具调用次数
   subagent_max_duration_seconds: 1800 # 单个 Planner/Worker 最长实际耗时
@@ -40,7 +40,8 @@ agent:
   subagent_max_processes: 8 # 单次受限进程组允许的最大进程数
   llm:
     base_url: https://api.deepseek.com/v1
-    api_key: "" # 直接写在这里，无需再配环境变量
+    api_key: "" # 兼容旧版单 Key 配置；配置 api_keys 后忽略此项
+    api_keys: [] # 可配置多个 Key，请求失败时按列表顺序切换
     model: deepseek-chat
     allow_private_network: false # 本地 Ollama/私网模型地址需要显式开启
     timeout_seconds: 120

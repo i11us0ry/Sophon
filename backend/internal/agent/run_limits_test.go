@@ -37,6 +37,12 @@ func TestRunBudgetClampsOversizedOptions(t *testing.T) {
 	}
 }
 
+func TestRunTurnTokenSafetyBounds(t *testing.T) {
+	if maxRunMaxTurnTokens != 100_000_000 {
+		t.Fatalf("可配置单轮 Token 上限应为 100,000,000，实际 %d", maxRunMaxTurnTokens)
+	}
+}
+
 func TestRunBudgetUsesMissionPlanLimitsForPentest(t *testing.T) {
 	plan := missionPlan{
 		Mode:         missionModePentest,

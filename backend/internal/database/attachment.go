@@ -67,6 +67,67 @@ func (db *DB) ListRecentAttachments(
 	return items, nil
 }
 
+// ListRecentProjectAttachments 返回项目内所有对话的最近附件，按时间正序。
+func (db *DB) ListRecentProjectAttachments(
+	ctx context.Context,
+	projectID string,
+	ownerUserID string,
+	limit int,
+) ([]Attachment, error) {
+	projectID = strings.TrimSpace(projectID)
+	ownerUserID = strings.TrimSpace(ownerUserID)
+	if projectID == "" || ownerUserID == "" {
+		return nil, nil
+	}
+	if limit <= 0 || limit > 50 {
+		limit = 5
+	}
+	rows, err := db.QueryContext(
+		ctx,
+		`SELECT a.id, a.conversation_id, COALESCE(a.message_id, ''), a.file_name,
+		        a.mime_type, a.size_bytes, a.storage_path, a.text_content, a.created_at
+		 FROM attachments a
+		 JOIN conversations c ON c.id = a.conversation_id
+		 WHERE c.project_id = ? AND c.owner_user_id = ?
+		 ORDER BY a.created_at DESC, a.rowid DESC
+		 LIMIT ?`,
+		projectID,
+		ownerUserID,
+		limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]Attachment, 0, limit)
+	for rows.Next() {
+		var item Attachment
+		var createdAt int64
+		if err := rows.Scan(
+			&item.ID,
+			&item.ConversationID,
+			&item.MessageID,
+			&item.FileName,
+			&item.MimeType,
+			&item.SizeBytes,
+			&item.StoragePath,
+			&item.TextContent,
+			&createdAt,
+		); err != nil {
+			return nil, err
+		}
+		item.CreatedAt = time.Unix(createdAt, 0)
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for left, right := 0, len(items)-1; left < right; left, right = left+1, right-1 {
+		items[left], items[right] = items[right], items[left]
+	}
+	return items, nil
+}
+
 func (db *DB) queryAttachments(
 	ctx context.Context,
 	conversationID string,

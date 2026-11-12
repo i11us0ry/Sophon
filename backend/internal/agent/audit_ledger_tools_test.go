@@ -96,6 +96,9 @@ func TestProjectAuditLedgerRecordsScopeMatrixRescanAndCheckpoint(t *testing.T) {
 		case auditSubjectCheckpoint:
 			hasCheckpoint = true
 		case auditSubjectCell:
+			if fact.MemoryKind != memoryAuditCellKind || fact.Priority != memoryAuditCellPriority {
+				t.Fatalf("审计矩阵应使用独立记忆层级: %+v", fact)
+			}
 			if fact.ObjectKey == "not_audited" {
 				cellCount++
 			}

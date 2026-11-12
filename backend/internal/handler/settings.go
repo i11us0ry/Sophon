@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"time"
 
 	agentpkg "sophon/internal/agent"
 	"sophon/internal/config"
@@ -16,11 +17,17 @@ import (
 )
 
 type SettingsHandler struct {
-	mu         sync.RWMutex
-	cfg        config.Config
-	knowledge  *knowledgepkg.Service
-	agent      *agentpkg.Service
-	configPath string
+	mu             sync.RWMutex
+	cfg            config.Config
+	knowledge      *knowledgepkg.Service
+	agent          *agentpkg.Service
+	configPath     string
+	llmKeyStatusMu sync.Mutex
+	llmKeyStatuses map[string]llmKeyStatus
+
+	llmKeyProbeMu      sync.Mutex
+	llmKeyProbeLast    map[string]time.Time
+	llmKeyProbeRunning map[string]bool
 }
 
 func NewSettingsHandler(
@@ -29,10 +36,13 @@ func NewSettingsHandler(
 	agentService *agentpkg.Service,
 ) *SettingsHandler {
 	return &SettingsHandler{
-		cfg:        cfg,
-		knowledge:  knowledgeService,
-		agent:      agentService,
-		configPath: strings.TrimSpace(cfg.ConfigPath),
+		cfg:                cfg,
+		knowledge:          knowledgeService,
+		agent:              agentService,
+		configPath:         strings.TrimSpace(cfg.ConfigPath),
+		llmKeyStatuses:     map[string]llmKeyStatus{},
+		llmKeyProbeLast:    map[string]time.Time{},
+		llmKeyProbeRunning: map[string]bool{},
 	}
 }
 
@@ -56,6 +66,7 @@ func (h *SettingsHandler) AIStatus(c *gin.Context) {
 	envFields := map[string]string{
 		"llm.provider":               "SOPHON_LLM_PROVIDER",
 		"llm.apiKey":                 "SOPHON_LLM_API_KEY",
+		"llm.apiKeys":                "SOPHON_LLM_API_KEYS",
 		"llm.baseUrl":                "SOPHON_LLM_BASE_URL",
 		"llm.model":                  "SOPHON_LLM_MODEL",
 		"llm.allowPrivateNetwork":    "SOPHON_LLM_ALLOW_PRIVATE_NETWORK",
@@ -82,6 +93,13 @@ func (h *SettingsHandler) AIStatus(c *gin.Context) {
 			envLocked = append(envLocked, field)
 		}
 	}
+	if config.EnvLocked("SOPHON_LLM_API_KEY") {
+		envLocked = append(envLocked, "llm.apiKeys")
+	}
+	if config.EnvLocked("SOPHON_LLM_API_KEYS") {
+		envLocked = append(envLocked, "llm.apiKey")
+	}
+	llmAPIKeys := effectiveLLMAPIKeys(cfg)
 
 	c.JSON(http.StatusOK, gin.H{
 		"configPath": h.configPath,
@@ -98,10 +116,12 @@ func (h *SettingsHandler) AIStatus(c *gin.Context) {
 				"provider":            cfg.LLMProvider,
 				"baseUrl":             cfg.LLMBaseURL,
 				"apiKey":              config.MaskSecret(cfg.LLMAPIKey),
+				"apiKeys":             maskedLLMAPIKeys(llmAPIKeys),
+				"apiKeyCount":         len(llmAPIKeys),
 				"model":               cfg.LLMModel,
 				"allowPrivateNetwork": cfg.LLMAllowPrivateNetwork,
 				"timeoutSeconds":      cfg.LLMTimeoutSeconds,
-				"configured":          strings.TrimSpace(cfg.LLMAPIKey) != "",
+				"configured":          len(llmAPIKeys) > 0,
 				"mock":                cfg.AgentMock,
 			},
 			"agent": gin.H{
@@ -146,6 +166,7 @@ type settingsLLMRequest struct {
 	Provider            *string `json:"provider"`
 	BaseURL             *string `json:"baseUrl"`
 	APIKey              *string `json:"apiKey"`
+	APIKeys             *string `json:"apiKeys"`
 	Model               *string `json:"model"`
 	AllowPrivateNetwork *bool   `json:"allowPrivateNetwork"`
 	TimeoutSeconds      *int    `json:"timeoutSeconds"`
@@ -255,16 +276,34 @@ func (h *SettingsHandler) Update(c *gin.Context) {
 				updates = append(updates, config.FieldUpdate{Path: []string{"agent", "llm", "base_url"}, Value: value})
 			}
 		}
-		if request.LLM.APIKey != nil {
-			value := strings.TrimSpace(*request.LLM.APIKey)
-			changed := value != "" && !strings.Contains(value, "****") && value != next.LLMAPIKey
-			apply, abort := lockState("llm.apiKey", "SOPHON_LLM_API_KEY", changed)
-			if abort {
+		if request.LLM.APIKeys != nil || request.LLM.APIKey != nil {
+			raw := ""
+			if request.LLM.APIKeys != nil {
+				raw = *request.LLM.APIKeys
+			} else if request.LLM.APIKey != nil {
+				raw = *request.LLM.APIKey
+			}
+			keys, changed, errText := parseSettingsLLMAPIKeys(raw)
+			if errText != "" {
+				badRequest(c, "invalid_settings", errText)
 				return
 			}
-			if apply && changed {
-				next.LLMAPIKey = value
-				updates = append(updates, config.FieldUpdate{Path: []string{"agent", "llm", "api_key"}, Value: value})
+			if changed {
+				current := effectiveLLMAPIKeys(next)
+				changed = !sameStrings(current, keys)
+			}
+			if changed {
+				if config.EnvLocked("SOPHON_LLM_API_KEYS") || config.EnvLocked("SOPHON_LLM_API_KEY") {
+					badRequest(c, "settings_env_locked", "字段 llm.apiKeys 由环境变量锁定，请修改环境变量")
+					return
+				}
+				next.LLMAPIKeys = keys
+				next.LLMAPIKey = keys[0]
+				updates = append(
+					updates,
+					config.FieldUpdate{Path: []string{"agent", "llm", "api_keys"}, Value: keys},
+					config.FieldUpdate{Path: []string{"agent", "llm", "api_key"}, Value: ""},
+				)
 			}
 		}
 		if request.LLM.Model != nil {
@@ -346,8 +385,8 @@ func (h *SettingsHandler) Update(c *gin.Context) {
 		}
 		if request.Agent.MaxIterations != nil {
 			value := *request.Agent.MaxIterations
-			if value < 1 || value > 1000 {
-				badRequest(c, "invalid_settings", "最大迭代数需在 1-1000 之间")
+			if value < 0 || value > 1000 {
+				badRequest(c, "invalid_settings", "最大迭代数需在 0-1000 之间，0 表示不限")
 				return
 			}
 			apply, abort := lockState("agent.maxIterations", "SOPHON_AGENT_MAX_ITERATIONS", value != next.AgentMaxIterations)
@@ -361,8 +400,8 @@ func (h *SettingsHandler) Update(c *gin.Context) {
 		}
 		if request.Agent.MaxTurnTokens != nil {
 			value := *request.Agent.MaxTurnTokens
-			if value < 0 || value > 20000000 {
-				badRequest(c, "invalid_settings", "单轮 token 上限需在 0-20000000 之间")
+			if value < 0 || value > 100000000 {
+				badRequest(c, "invalid_settings", "单轮 token 上限需在 0-100000000 之间")
 				return
 			}
 			apply, abort := lockState("agent.maxTurnTokens", "SOPHON_AGENT_MAX_TURN_TOKENS", value != next.AgentMaxTurnTokens)
@@ -376,8 +415,8 @@ func (h *SettingsHandler) Update(c *gin.Context) {
 		}
 		if request.Agent.MaxHypotheses != nil {
 			value := *request.Agent.MaxHypotheses
-			if value < 10 || value > 2000 {
-				badRequest(c, "invalid_settings", "活跃假设上限需在 10-2000 之间")
+			if value < 0 || value > 2000 {
+				badRequest(c, "invalid_settings", "活跃假设上限需在 0-2000 之间，0 表示不限")
 				return
 			}
 			apply, abort := lockState("agent.maxHypotheses", "SOPHON_AGENT_MAX_HYPOTHESES", value != next.AgentMaxHypotheses)
@@ -682,4 +721,63 @@ func splitList(value string) []string {
 		}
 	}
 	return result
+}
+
+func effectiveLLMAPIKeys(cfg config.Config) []string {
+	keys := config.NormalizeLLMAPIKeys(cfg.LLMAPIKeys)
+	if len(keys) > 0 {
+		return keys
+	}
+	if value := strings.TrimSpace(cfg.LLMAPIKey); value != "" {
+		return []string{value}
+	}
+	return nil
+}
+
+func maskedLLMAPIKeys(keys []string) []string {
+	result := make([]string, 0, len(keys))
+	for _, key := range keys {
+		result = append(result, config.MaskSecret(key))
+	}
+	return result
+}
+
+func parseSettingsLLMAPIKeys(raw string) ([]string, bool, string) {
+	raw = strings.ReplaceAll(raw, "\r\n", "\n")
+	if strings.TrimSpace(raw) == "" || strings.Contains(raw, "****") {
+		return nil, false, ""
+	}
+	lines := strings.Split(raw, "\n")
+	keys := make([]string, 0, len(lines))
+	seen := make(map[string]bool, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || seen[line] {
+			continue
+		}
+		if len(line) > 4096 {
+			return nil, false, "单个 API Key 不能超过 4096 个字符"
+		}
+		seen[line] = true
+		keys = append(keys, line)
+		if len(keys) > 20 {
+			return nil, false, "最多配置 20 个 API Key"
+		}
+	}
+	if len(keys) == 0 {
+		return nil, false, ""
+	}
+	return keys, true, ""
+}
+
+func sameStrings(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }

@@ -233,6 +233,9 @@ func (s *Service) spawnFindingFollowUpIntents(
 	if finding == nil || strings.TrimSpace(finding.AssetID) == "" {
 		return nil
 	}
+	if !shouldGenerateFollowUps(*finding) {
+		return nil
+	}
 	findingNode, err := s.materializeFindingNode(ctx, projectID, finding)
 	if err != nil {
 		return err

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"sophon/internal/config"
 	"sophon/internal/outbound"
 
 	"github.com/gin-gonic/gin"
@@ -68,12 +69,22 @@ func (h *SettingsHandler) ListModels(c *gin.Context) {
 
 	apiKey := strings.TrimSpace(request.APIKey)
 	explicitKey := apiKey != "" && !strings.Contains(apiKey, "****")
+	if explicitKey {
+		if keys := config.ParseLLMAPIKeys(apiKey); len(keys) > 0 {
+			apiKey = keys[0]
+		} else {
+			explicitKey = false
+			apiKey = ""
+		}
+	}
 	if !explicitKey {
 		if strings.TrimRight(baseURL, "/") != strings.TrimRight(current.LLMBaseURL, "/") {
 			badRequest(c, "api_key_required_for_new_base_url", "切换 API 地址时必须填写对应的 API Key")
 			return
 		}
-		apiKey = strings.TrimSpace(current.LLMAPIKey)
+		if keys := effectiveLLMAPIKeys(current); len(keys) > 0 {
+			apiKey = keys[0]
+		}
 	}
 	if apiKey == "" {
 		badRequest(c, "missing_llm_api_key", "API Key 不能为空")

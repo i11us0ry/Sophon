@@ -38,8 +38,9 @@ func TestNormalizeAgentMaxHypotheses(t *testing.T) {
 		input int
 		want  int
 	}{
-		{0, 10},
-		{1, 10},
+		{0, 0},
+		{-1, 0},
+		{1, 1},
 		{200, 200},
 		{2000, 2000},
 		{5000, 2000},
@@ -48,6 +49,22 @@ func TestNormalizeAgentMaxHypotheses(t *testing.T) {
 		if got := normalizeAgentMaxHypotheses(item.input); got != item.want {
 			t.Fatalf("normalizeAgentMaxHypotheses(%d) = %d, want %d", item.input, got, item.want)
 		}
+	}
+}
+
+func TestZeroAgentLimitsRemainUnlimited(t *testing.T) {
+	t.Setenv("SOPHON_AGENT_MAX_TURN_TOKENS", "")
+	t.Setenv("SOPHON_AGENT_MAX_ITERATIONS", "")
+	t.Setenv("SOPHON_AGENT_MAX_HYPOTHESES", "")
+	zero := 0
+	if got := pickIntAllowZero("SOPHON_AGENT_MAX_TURN_TOKENS", &zero, 40); got != 0 {
+		t.Fatalf("Token 0 应为不限，实际 %d", got)
+	}
+	if got := pickIntAllowZero("SOPHON_AGENT_MAX_ITERATIONS", &zero, 40); got != 0 {
+		t.Fatalf("迭代 0 应为不限，实际 %d", got)
+	}
+	if got := normalizeAgentMaxHypotheses(pickIntAllowZero("SOPHON_AGENT_MAX_HYPOTHESES", &zero, 200)); got != 0 {
+		t.Fatalf("假设 0 应为不限，实际 %d", got)
 	}
 }
 

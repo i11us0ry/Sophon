@@ -147,6 +147,9 @@ func (s *Service) rankProjectFacts(
 		if priority <= 0 {
 			priority = importance
 		}
+		if isAuditCellFact(fact) {
+			priority = math.Min(priority, float64(memoryAuditCellPriority)/100)
+		}
 		evidence := memoryEvidenceScore(fact)
 		kind := memoryKindScore(fact)
 		var score float64

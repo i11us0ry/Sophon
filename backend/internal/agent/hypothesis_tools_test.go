@@ -91,6 +91,40 @@ func TestProjectFindingSeedsFollowUpHypotheses(t *testing.T) {
 	}
 }
 
+func TestLowConfidenceObservedFindingDoesNotSeedFollowUps(t *testing.T) {
+	service, ctx := openProjectToolService(t, true)
+	service.seedFollowUpHypotheses(ctx, "project-tools", database.Vulnerability{
+		ID:                "finding-low-noise",
+		ProjectID:         "project-tools",
+		AssetID:           "asset-low-noise",
+		Title:             "普通观察项",
+		VulnerabilityType: "business-logic",
+		Severity:          "medium",
+		Status:            "open",
+		VerificationState: "observed",
+		Confidence:        60,
+	})
+	items, err := service.db.ListProjectHypotheses(ctx, "project-tools", "untested", 20)
+	if err != nil {
+		t.Fatalf("读取后续假设失败: %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("低置信普通 finding 不应自动生成后续假设: %+v", items)
+	}
+}
+
+func TestTerminalHighSeverityFindingDoesNotSeedFollowUps(t *testing.T) {
+	for _, status := range []string{"fixed", "false_positive", "ignored", "closed", "dismissed", "resolved"} {
+		if shouldGenerateFollowUps(database.Vulnerability{
+			Status:            status,
+			VerificationState: "verified",
+			Severity:          "critical",
+		}) {
+			t.Fatalf("终止状态 %s 不应生成后续方向", status)
+		}
+	}
+}
+
 func TestUploadHypothesisRejectsBundledHandlers(t *testing.T) {
 	service, ctx := openProjectToolService(t, true)
 	now := time.Now().UTC()

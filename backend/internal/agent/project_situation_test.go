@@ -4,6 +4,9 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
+
+	"sophon/internal/database"
 )
 
 func TestProjectSituationIncludesGoalsIntentsFactsFindings(t *testing.T) {
@@ -92,6 +95,40 @@ func TestProjectSituationTruncatesLongFact(t *testing.T) {
 	}
 	if len([]rune(situation)) > situationTotalRunes+50 {
 		t.Fatalf("态势快照超过预算：%d 字", len([]rune(situation)))
+	}
+}
+
+func TestProjectSituationExcludesAuditCellsFromCriticalMemory(t *testing.T) {
+	service, ctx := openProjectToolService(t, true)
+	now := time.Now().UTC()
+	for _, fact := range []database.ProjectFact{
+		{
+			ID: "fact-critical", ProjectID: "project-tools", Key: "note/critical-control",
+			Summary: "必须遵守的关键控制", FactType: "note", Priority: 95, Pinned: true,
+			Confidence: 95, CreatedAt: now, UpdatedAt: now,
+		},
+		{
+			ID: "fact-audit-cell", ProjectID: "project-tools", Key: "business/audit-cell-test",
+			Summary: "审计矩阵单元不应进入强制记忆", FactType: "constraint",
+			MemoryKind: "constraint", Priority: 90, Confidence: 90, CreatedAt: now, UpdatedAt: now,
+		},
+	} {
+		if _, err := service.db.UpsertProjectFact(ctx, fact); err != nil {
+			t.Fatalf("写入事实失败: %v", err)
+		}
+	}
+	situation := service.projectSituation(ctx, "project-tools", "user-1")
+	start := strings.Index(situation, "强制记忆")
+	end := strings.Index(situation, "事实索引")
+	if start < 0 || end <= start {
+		t.Fatalf("态势包缺少强制记忆或事实索引：\n%s", situation)
+	}
+	critical := situation[start:end]
+	if strings.Contains(critical, "business/audit-cell-test") {
+		t.Fatalf("审计矩阵单元不应进入强制记忆：\n%s", critical)
+	}
+	if !strings.Contains(critical, "note/critical-control") {
+		t.Fatalf("普通关键事实应进入强制记忆：\n%s", critical)
 	}
 }
 

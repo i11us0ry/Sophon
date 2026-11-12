@@ -1059,18 +1059,6 @@ onUnmounted(() => {
             <span>INPUT / HISTORY</span>
             <strong>{{ t('nav.chat') }}</strong>
           </div>
-          <button
-            class="conversation-list-toggle"
-            type="button"
-            :title="t('chat.collapseConversationList')"
-            :aria-label="t('chat.collapseConversationList')"
-            :aria-expanded="!conversationListCollapsed"
-            @click="toggleConversationList"
-          >
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M15 6l-6 6 6 6" />
-            </svg>
-          </button>
         </div>
         <div class="conversation-header-actions">
           <span class="conversation-count">{{ chat.conversations.length }}</span>
@@ -1218,21 +1206,32 @@ onUnmounted(() => {
       </div>
     </aside>
 
+    <button
+      class="conversation-toggle-rail"
+      :class="{ collapsed: conversationListCollapsed }"
+      type="button"
+      :title="
+        conversationListCollapsed
+          ? t('chat.expandConversationList')
+          : t('chat.collapseConversationList')
+      "
+      :aria-label="
+        conversationListCollapsed
+          ? t('chat.expandConversationList')
+          : t('chat.collapseConversationList')
+      "
+      :aria-expanded="!conversationListCollapsed"
+      @click="toggleConversationList"
+    >
+      <svg v-if="conversationListCollapsed" viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M9 6l6 6-6 6" />
+      </svg>
+      <svg v-else viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M15 6l-6 6 6 6" />
+      </svg>
+    </button>
+
     <div class="chat-panel">
-      <button
-        v-if="conversationListCollapsed && !chatFullscreen"
-        class="conversation-list-expand"
-        type="button"
-        :title="t('chat.expandConversationList')"
-        :aria-label="t('chat.expandConversationList')"
-        :aria-expanded="!conversationListCollapsed"
-        @click="toggleConversationList"
-      >
-        <svg viewBox="0 0 24 24" aria-hidden="true">
-          <path d="M9 6l6 6-6 6" />
-        </svg>
-        <span>{{ t('chat.expandConversationList') }}</span>
-      </button>
       <div v-if="chat.error" class="alert error">{{ chat.error }}</div>
       <div v-if="notice" class="alert ok">{{ notice }}</div>
       <div v-if="projectInactive" class="alert warn">
@@ -3179,6 +3178,7 @@ onUnmounted(() => {
   --chat-output: var(--success);
   --chat-panel: color-mix(in srgb, var(--surface) 94%, #0b0b10);
   --chat-line: color-mix(in srgb, var(--border-strong) 72%, transparent);
+  position: relative;
   grid-template-columns: 270px minmax(0, 1fr);
   grid-template-rows: minmax(0, 1fr);
   gap: 10px;
@@ -3903,6 +3903,10 @@ onUnmounted(() => {
   display: none;
 }
 
+.chat-layout.chat-layout-fullscreen .conversation-toggle-rail {
+  display: none;
+}
+
 .chat-layout.chat-layout-fullscreen .chat-panel {
   grid-column: 1 / -1;
   grid-row: 1 / -1;
@@ -3948,8 +3952,8 @@ onUnmounted(() => {
 
 @media (max-width: 760px) {
   .chat-layout {
-    grid-template-columns: 1fr;
-    grid-template-rows: auto minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 230px) minmax(0, 1fr);
     gap: 8px;
   }
 
@@ -4025,30 +4029,38 @@ onUnmounted(() => {
   gap: 3px;
 }
 
-.conversation-list-toggle {
+.conversation-toggle-rail {
+  position: absolute;
+  top: 50%;
+  left: calc(270px + 5px);
+  z-index: 6;
   display: grid;
-  flex: 0 0 25px;
-  width: 25px;
-  height: 25px;
+  width: 30px;
+  height: 30px;
   padding: 0;
-  border: 1px solid var(--border);
-  border-radius: 3px;
-  color: var(--text-muted);
-  background: color-mix(in srgb, var(--field-bg) 68%, transparent);
+  border: 1px solid color-mix(in srgb, var(--chat-work) 34%, var(--border));
+  border-radius: 50%;
+  color: var(--chat-work);
+  background: color-mix(in srgb, var(--surface) 92%, var(--chat-work));
+  box-shadow: 0 5px 16px rgba(0, 0, 0, 0.28);
   cursor: pointer;
   place-items: center;
+  transform: translate(-50%, -50%);
 }
 
-.conversation-list-toggle:hover {
-  border-color: color-mix(in srgb, var(--chat-work) 45%, var(--border));
-  color: var(--chat-work);
-  background: color-mix(in srgb, var(--chat-work) 7%, var(--field-bg));
+.conversation-toggle-rail:hover {
+  border-color: color-mix(in srgb, var(--chat-work) 58%, var(--border));
+  background: color-mix(in srgb, var(--chat-work) 12%, var(--surface));
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.38);
 }
 
-.conversation-list-toggle svg,
-.conversation-list-expand svg {
-  width: 14px;
-  height: 14px;
+.conversation-toggle-rail.collapsed {
+  left: 15px;
+}
+
+.conversation-toggle-rail svg {
+  width: 13px;
+  height: 13px;
   fill: none;
   stroke: currentColor;
   stroke-width: 1.8;
@@ -4058,6 +4070,7 @@ onUnmounted(() => {
 
 .chat-layout.chat-layout-conversation-collapsed {
   grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
   gap: 0;
 }
 
@@ -4066,12 +4079,23 @@ onUnmounted(() => {
 }
 
 .chat-layout.chat-layout-conversation-collapsed .chat-panel {
-  grid-column: 1 / -1;
   justify-self: stretch;
   width: 100%;
   min-width: 0;
   max-width: none;
   margin-inline: 0;
+}
+
+.chat-layout.chat-layout-fullscreen,
+.chat-layout.chat-layout-fullscreen.chat-layout-conversation-collapsed {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-areas: "chat";
+  grid-template-rows: minmax(0, 1fr);
+  gap: 0;
+}
+
+.chat-layout.chat-layout-fullscreen .chat-panel {
+  grid-area: chat;
 }
 
 .chat-layout.chat-layout-conversation-collapsed .message-list {
@@ -4102,36 +4126,22 @@ onUnmounted(() => {
   box-sizing: border-box;
 }
 
-.conversation-list-expand {
-  display: inline-flex;
-  flex: 0 0 auto;
-  gap: 5px;
-  align-items: center;
-  align-self: flex-start;
-  width: fit-content;
-  min-height: 28px;
-  padding: 4px 8px;
-  border: 1px solid color-mix(in srgb, var(--chat-work) 30%, var(--border));
-  border-radius: 3px;
-  color: var(--chat-work);
-  background: color-mix(in srgb, var(--chat-work) 5%, var(--chat-panel));
-  font-size: 9px;
-  cursor: pointer;
-}
-
-.conversation-list-expand:hover {
-  border-color: color-mix(in srgb, var(--chat-work) 60%, var(--border));
-  background: color-mix(in srgb, var(--chat-work) 10%, var(--chat-panel));
-}
-
 @media (max-width: 760px) {
   .chat-layout.chat-layout-conversation-collapsed {
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: minmax(0, 1fr);
   }
 
-  .conversation-list-expand {
-    min-height: 27px;
+  .conversation-toggle-rail {
+    top: calc(230px + 4px);
+    left: 50%;
+    transform: translate(-50%, -50%);
+  }
+
+  .conversation-toggle-rail.collapsed {
+    top: 50%;
+    left: 15px;
+    transform: translate(-50%, -50%);
   }
 }
 </style>

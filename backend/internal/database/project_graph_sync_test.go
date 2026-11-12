@@ -193,3 +193,71 @@ func TestSyncProjectGraphPreservesExplicitIntentFactYield(t *testing.T) {
 		t.Fatalf("事实节点应保留唯一显式 yields 边，实际 %d", yieldCount)
 	}
 }
+
+func TestSyncProjectGraphDoesNotAddRepeatedFindingProvesEdges(t *testing.T) {
+	db := openGraphSyncTestDB(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	project := Project{
+		ID: "proj-proves-prune", OwnerUserID: "user-1", Name: "proves-prune",
+		Status: "active", CreatedAt: now, UpdatedAt: now,
+	}
+	if err := db.CreateProject(ctx, project); err != nil {
+		t.Fatalf("创建项目失败: %v", err)
+	}
+	if err := db.CreateVulnerability(ctx, Vulnerability{
+		ID: "finding-proves", ProjectID: project.ID, OwnerUserID: "user-1",
+		Title: "测试漏洞", Severity: "high", Status: "open", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("创建漏洞失败: %v", err)
+	}
+	first, err := db.UpsertProjectGraphNode(ctx, GraphNode{
+		ID: "intent-first", ProjectID: project.ID, Kind: "intent", Title: "第一个意图",
+		Status: "open", CreatedAt: now, UpdatedAt: now,
+	})
+	if err != nil {
+		t.Fatalf("创建首个意图失败: %v", err)
+	}
+	if _, err := db.SyncProjectGraph(ctx, project); err != nil {
+		t.Fatalf("首次同步失败: %v", err)
+	}
+	if _, err := db.UpsertProjectGraphNode(ctx, GraphNode{
+		ID: "intent-second", ProjectID: project.ID, Kind: "intent", Title: "第二个意图",
+		Status: "open", CreatedAt: now.Add(time.Second), UpdatedAt: now.Add(time.Second),
+	}); err != nil {
+		t.Fatalf("创建第二个意图失败: %v", err)
+	}
+	if _, err := db.SyncProjectGraph(ctx, project); err != nil {
+		t.Fatalf("第二次同步失败: %v", err)
+	}
+	edges, err := db.ListProjectGraphEdges(ctx, project.ID)
+	if err != nil {
+		t.Fatalf("读取图边失败: %v", err)
+	}
+	var findingNodeID string
+	nodes, err := db.ListProjectGraphNodes(ctx, project.ID)
+	if err != nil {
+		t.Fatalf("读取节点失败: %v", err)
+	}
+	for _, node := range nodes {
+		if node.Kind == "finding" {
+			findingNodeID = node.ID
+			break
+		}
+	}
+	if findingNodeID == "" {
+		t.Fatal("未找到 finding 节点")
+	}
+	proves := make([]GraphEdge, 0)
+	for _, edge := range edges {
+		if edge.Rel == "proves" && edge.DstID == findingNodeID {
+			proves = append(proves, edge)
+		}
+	}
+	if len(proves) != 1 {
+		t.Fatalf("finding 应只保留一条 proves 边，实际 %+v", proves)
+	}
+	if proves[0].SrcID != first.ID {
+		t.Fatalf("已有 proves 边不应被新意图替换，期望 %s，实际 %+v", first.ID, proves[0])
+	}
+}

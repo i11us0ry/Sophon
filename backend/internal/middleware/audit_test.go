@@ -95,3 +95,13 @@ func TestAuditResourceForWorkspaceFile(t *testing.T) {
 		t.Fatalf("工作区文件审计资源错误: type=%s id=%s", resourceType, resourceID)
 	}
 }
+
+func TestSummarizeAuditBodyRedactsLLMKeyRoutes(t *testing.T) {
+	body := []byte(`{"apiKeys":"sk-secret-one\nsk-secret-two"}`)
+	if got := summarizeAuditBody("/api/settings/llm/keys", body); got != "***" {
+		t.Fatalf("LLM Key 请求体必须完全屏蔽，实际 %q", got)
+	}
+	if got := summarizeAuditBody("/api/settings/ai", []byte(`{"llm":{"apiKeys":"sk-secret"}}`)); strings.Contains(got, "sk-secret") {
+		t.Fatalf("LLM 设置审计不能泄露 Key: %q", got)
+	}
+}

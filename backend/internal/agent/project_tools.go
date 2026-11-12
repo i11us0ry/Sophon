@@ -1428,7 +1428,7 @@ func (s *Service) recordFactTool() tool.BaseTool {
 			now := time.Now().UTC()
 			priority := int(request.Priority)
 			if priority <= 0 {
-				priority = confidence
+				priority = memoryDefaultPriority
 			}
 			if priority > 100 {
 				priority = 100

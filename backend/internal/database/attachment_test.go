@@ -94,3 +94,49 @@ func TestListRecentAttachmentsReturnsNewestLast(t *testing.T) {
 		t.Fatalf("最近附件应按时间正序返回: %+v", items)
 	}
 }
+
+func TestListRecentProjectAttachmentsIncludesSameProjectConversations(t *testing.T) {
+	db := openConversationTestDB(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	for _, project := range []Project{
+		{ID: "project-uploads", OwnerUserID: "user-1", Name: "上传项目", Status: "active", CreatedAt: now, UpdatedAt: now},
+		{ID: "project-other", OwnerUserID: "user-1", Name: "其他项目", Status: "active", CreatedAt: now, UpdatedAt: now},
+	} {
+		if err := db.CreateProject(ctx, project); err != nil {
+			t.Fatalf("创建项目失败: %v", err)
+		}
+	}
+	for _, conversation := range []Conversation{
+		{ID: "conv-upload-a", OwnerUserID: "user-1", ProjectID: "project-uploads", Title: "A", CreatedAt: now, UpdatedAt: now},
+		{ID: "conv-upload-b", OwnerUserID: "user-1", ProjectID: "project-uploads", Title: "B", CreatedAt: now, UpdatedAt: now},
+		{ID: "conv-upload-other", OwnerUserID: "user-1", ProjectID: "project-other", Title: "C", CreatedAt: now, UpdatedAt: now},
+	} {
+		if err := db.CreateConversation(ctx, conversation); err != nil {
+			t.Fatalf("创建对话失败: %v", err)
+		}
+	}
+	for index, item := range []struct {
+		id             string
+		conversationID string
+	}{
+		{"att-project-a", "conv-upload-a"},
+		{"att-project-b", "conv-upload-b"},
+		{"att-other", "conv-upload-other"},
+	} {
+		if err := db.AddAttachment(ctx, Attachment{
+			ID: item.id, ConversationID: item.conversationID, FileName: item.id + ".zip",
+			StoragePath: filepath.Join(item.conversationID, item.id+".zip"),
+			CreatedAt:   now.Add(time.Duration(index) * time.Second),
+		}); err != nil {
+			t.Fatalf("写入附件失败: %v", err)
+		}
+	}
+	items, err := db.ListRecentProjectAttachments(ctx, "project-uploads", "user-1", 10)
+	if err != nil {
+		t.Fatalf("读取项目附件失败: %v", err)
+	}
+	if len(items) != 2 || items[0].ID != "att-project-a" || items[1].ID != "att-project-b" {
+		t.Fatalf("项目附件范围错误: %+v", items)
+	}
+}

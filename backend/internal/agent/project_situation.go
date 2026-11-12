@@ -224,8 +224,8 @@ func (s *Service) projectSituationForContext(
 	}
 
 	criticalFacts := make([]database.ProjectFact, 0)
-	for _, fact := range facts {
-		if strings.TrimSpace(fact.ContradictedBy) != "" {
+	for _, fact := range rankedFacts {
+		if isAuditCellFact(fact) {
 			continue
 		}
 		if fact.Pinned || fact.Priority >= 85 || memoryKindScore(fact) >= 0.9 {

@@ -259,8 +259,14 @@ func (db *DB) SyncProjectGraph(ctx context.Context, project Project) (GraphSyncR
 			}
 			rel, anchor = "yields", latestOfKind(node.AssetID, "intent", "goal")
 		case "finding":
+			if hasIncomingGraphEdge(edgeSet, node.ID, "proves") {
+				continue
+			}
 			rel, anchor = "proves", latestOfKind(node.AssetID, "intent", "goal")
 		case "hint":
+			if hasIncomingGraphEdge(edgeSet, node.ID, "hints") {
+				continue
+			}
 			rel, anchor = "hints", latestOfKind(node.AssetID, "goal", "intent")
 		default:
 			continue

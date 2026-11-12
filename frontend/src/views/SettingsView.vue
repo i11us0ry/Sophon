@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
 
-import { apiGet, apiPost, apiPut } from '../api/client'
+import { apiDelete, apiGet, apiPost, apiPut } from '../api/client'
 import PageTitleRobot from '../components/PageTitleRobot.vue'
 import { useI18n } from '../i18n'
 import { useAuthStore, type User } from '../stores/auth'
@@ -66,6 +66,14 @@ interface SaveResponse {
   requiresRestart: string[]
 }
 
+interface LLMKeyItem {
+  id: string
+  masked: string
+  status: string
+  message?: string
+  checkedAt?: string
+}
+
 interface StorageCategory {
   name: string
   label: string
@@ -87,7 +95,13 @@ const editable = ref(false)
 const writable = computed(() => editable.value && canWriteSettings.value)
 const envLocked = ref<string[]>([])
 const restartHints = ref<string[]>([])
-const apiKeyInput = ref('')
+const llmKeys = ref<LLMKeyItem[]>([])
+const llmKeysLoading = ref(false)
+const llmKeySaving = ref(false)
+const llmKeyTesting = ref(false)
+const deletingLLMKeyId = ref('')
+const newLLMKeysInput = ref('')
+const llmKeyAddOpen = ref(false)
 const activeSection = ref<
   'basic' | 'llm' | 'proxy' | 'agent' | 'tools' | 'security' | 'storage' | 'intercept'
 >('basic')
@@ -315,7 +329,7 @@ async function load() {
     form.proxyUsername = values.proxy.username
     form.proxyNoProxy = values.proxy.noProxy
     proxyPasswordInput.value = ''
-    apiKeyInput.value = ''
+    await loadLLMKeys()
   } catch (err) {
     error.value = err instanceof Error ? err.message : t('message.readSettingsFailed')
   } finally {
@@ -340,7 +354,6 @@ async function save() {
       llm: {
         provider: form.provider,
         baseUrl: form.baseUrl.trim(),
-        apiKey: apiKeyInput.value.trim(),
         model: form.model.trim(),
         allowPrivateNetwork: form.llmAllowPrivate,
         timeoutSeconds: Number(form.llmTimeout),
@@ -398,7 +411,7 @@ async function fetchModels() {
     }>('/settings/llm/models', {
       provider: form.provider,
       baseUrl: form.baseUrl.trim(),
-      apiKey: apiKeyInput.value.trim(),
+      apiKey: '',
     })
     if (!response.success) {
       modelOptions.value = []
@@ -421,6 +434,111 @@ function selectModel(event: Event) {
   if (value) {
     form.model = value
   }
+}
+
+async function loadLLMKeys() {
+  if (!canReadSettings.value) {
+    llmKeys.value = []
+    return
+  }
+  llmKeysLoading.value = true
+  try {
+    const response = await apiGet<{ items: LLMKeyItem[] }>('/settings/llm/keys')
+    llmKeys.value = response.items ?? []
+  } catch (err) {
+    llmKeys.value = []
+    throw err
+  } finally {
+    llmKeysLoading.value = false
+  }
+}
+
+async function addLLMKeys() {
+  const keys = newLLMKeysInput.value.trim()
+  if (!keys || llmKeySaving.value) {
+    return
+  }
+  llmKeySaving.value = true
+  error.value = ''
+  notice.value = ''
+  try {
+    const response = await apiPost<{ items: LLMKeyItem[] }>('/settings/llm/keys', { apiKeys: keys })
+    llmKeys.value = response.items ?? []
+    newLLMKeysInput.value = ''
+    llmKeyAddOpen.value = false
+    notice.value = t('settings.llmKeysAdded')
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : t('settings.llmKeysAddFailed')
+  } finally {
+    llmKeySaving.value = false
+  }
+}
+
+function openLLMKeyAdd() {
+  if (locked('llm.apiKeys') || !writable.value) {
+    return
+  }
+  llmKeyAddOpen.value = true
+}
+
+function cancelLLMKeyAdd() {
+  llmKeyAddOpen.value = false
+  newLLMKeysInput.value = ''
+}
+
+async function removeLLMKey(item: LLMKeyItem) {
+  if (deletingLLMKeyId.value) {
+    return
+  }
+  if (!window.confirm(t('settings.llmKeyDeleteConfirm', { key: item.masked }))) {
+    return
+  }
+  deletingLLMKeyId.value = item.id
+  error.value = ''
+  notice.value = ''
+  try {
+    await apiDelete(`/settings/llm/keys/${encodeURIComponent(item.id)}`)
+    await loadLLMKeys()
+    notice.value = t('settings.llmKeyDeleted')
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : t('settings.llmKeyDeleteFailed')
+  } finally {
+    deletingLLMKeyId.value = ''
+  }
+}
+
+async function testLLMKeys() {
+  if (llmKeyTesting.value || !llmKeys.value.length) {
+    return
+  }
+  llmKeyTesting.value = true
+  error.value = ''
+  notice.value = ''
+  try {
+    const response = await apiPost<{ items: LLMKeyItem[] }>('/settings/llm/keys/test')
+    const byID = new Map((response.items ?? []).map((item) => [item.id, item]))
+    llmKeys.value = llmKeys.value.map((item) => ({ ...item, ...(byID.get(item.id) ?? {}) }))
+    notice.value = t('settings.llmKeysTested')
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : t('settings.llmKeysTestFailed')
+  } finally {
+    llmKeyTesting.value = false
+  }
+}
+
+function llmKeyStatusLabel(item: LLMKeyItem) {
+  switch (item.status) {
+    case 'healthy':
+      return t('settings.llmKeyStatusHealthy')
+    case 'error':
+      return t('settings.llmKeyStatusError')
+    default:
+      return t('settings.llmKeyStatusUnknown')
+  }
+}
+
+function llmKeyStatusClass(item: LLMKeyItem) {
+  return item.status === 'healthy' ? 'ok' : item.status === 'error' ? 'error' : 'muted'
 }
 
 async function changePassword() {
@@ -771,15 +889,88 @@ onMounted(async () => {
           />
           <span>{{ t('settings.llmAllowPrivateNetwork') }}</span>
         </label>
-        <label class="field">
-          <span>{{ t('settings.apiKey') }}</span>
-          <input
-            v-model="apiKeyInput"
-            type="password"
-            :placeholder="locked('llm.apiKey') ? t('settings.apiKeyEnv') : t('settings.apiKeyKeep')"
-            :disabled="locked('llm.apiKey') || !writable"
-          />
-        </label>
+        <div class="field">
+          <div class="llm-key-toolbar">
+            <span>{{ t('settings.apiKey') }}</span>
+            <button
+              class="button compact"
+              type="button"
+              :disabled="!canWriteSettings || llmKeyTesting || !llmKeys.length"
+              @click="testLLMKeys"
+            >
+              {{ llmKeyTesting ? t('settings.llmKeyTesting') : t('settings.llmKeyTestAll') }}
+            </button>
+          </div>
+          <p class="field-hint">{{ t('settings.apiKeyFailoverHint') }}</p>
+          <p v-if="llmKeysLoading" class="field-hint">{{ t('settings.llmKeysLoading') }}</p>
+          <div v-else-if="llmKeys.length" class="llm-key-list">
+            <div v-for="item in llmKeys" :key="item.id" class="llm-key-row">
+              <code class="llm-key-mask">{{ item.masked }}</code>
+              <span class="llm-key-status" :class="llmKeyStatusClass(item)">
+                {{ llmKeyStatusLabel(item) }}
+              </span>
+              <small v-if="item.message && item.status === 'error'" class="llm-key-message">
+                {{ item.message }}
+              </small>
+              <button
+                class="button compact danger"
+                type="button"
+                :disabled="
+                  !!deletingLLMKeyId || locked('llm.apiKeys') || !writable
+                "
+                @click="removeLLMKey(item)"
+              >
+                {{ deletingLLMKeyId === item.id ? t('settings.llmKeyDeleting') : t('common.delete') }}
+              </button>
+            </div>
+          </div>
+          <p v-else class="field-hint">{{ t('settings.llmKeysEmpty') }}</p>
+          <div v-if="!llmKeyAddOpen && !llmKeysLoading" class="settings-inline-actions">
+            <button
+              class="button compact"
+              type="button"
+              :disabled="locked('llm.apiKeys') || !writable"
+              @click="openLLMKeyAdd"
+            >
+              {{ t('settings.llmKeyAdd') }}
+            </button>
+          </div>
+          <div v-else class="llm-key-add-form">
+            <textarea
+              v-model="newLLMKeysInput"
+              rows="3"
+              spellcheck="false"
+              :placeholder="
+                locked('llm.apiKeys') ? t('settings.apiKeyEnv') : t('settings.llmKeyAddPlaceholder')
+              "
+              :disabled="locked('llm.apiKeys') || !writable || llmKeySaving"
+            ></textarea>
+            <div class="settings-inline-actions">
+              <button
+                class="button compact"
+                type="button"
+                :disabled="
+                  locked('llm.apiKeys') ||
+                  !writable ||
+                  llmKeySaving ||
+                  !newLLMKeysInput.trim()
+                "
+                @click="addLLMKeys"
+              >
+                {{ llmKeySaving ? t('common.saving') : t('settings.llmKeyAdd') }}
+              </button>
+              <button
+                class="button compact"
+                type="button"
+                :disabled="llmKeySaving"
+                @click="cancelLLMKeyAdd"
+              >
+                {{ t('common.cancel') }}
+              </button>
+              <small class="field-hint">{{ t('settings.llmKeyAddHint') }}</small>
+            </div>
+          </div>
+        </div>
         <label class="field">
           <span>{{ t('settings.model') }}</span>
           <div class="model-row">
@@ -916,7 +1107,7 @@ onMounted(async () => {
           <input
             v-model.number="form.maxIterations"
             type="number"
-            min="1"
+            min="0"
             max="1000"
             :disabled="locked('agent.maxIterations') || !writable"
           />
@@ -928,7 +1119,7 @@ onMounted(async () => {
             v-model.number="form.maxTurnTokens"
             type="number"
             min="0"
-            max="20000000"
+            max="100000000"
             :disabled="locked('agent.maxTurnTokens') || !writable"
           />
           <small class="field-hint">{{ t('settings.maxTurnTokensHint') }}</small>
@@ -938,7 +1129,7 @@ onMounted(async () => {
           <input
             v-model.number="form.maxHypotheses"
             type="number"
-            min="10"
+            min="0"
             max="2000"
             :disabled="locked('agent.maxHypotheses') || !writable"
           />
@@ -1896,6 +2087,77 @@ onMounted(async () => {
   margin-top: 5px;
 }
 
+.llm-key-toolbar,
+.settings-inline-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.llm-key-list {
+  display: grid;
+  gap: 6px;
+}
+
+.llm-key-add-form {
+  display: grid;
+  gap: 6px;
+}
+
+.llm-key-row {
+  display: grid;
+  grid-template-columns: minmax(140px, 1fr) auto auto;
+  gap: 8px;
+  align-items: center;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--field-bg);
+}
+
+.llm-key-mask {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text-secondary);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.llm-key-status {
+  padding: 2px 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.llm-key-status.ok {
+  border-color: color-mix(in srgb, var(--success) 48%, var(--border));
+  color: var(--success);
+}
+
+.llm-key-status.error {
+  border-color: color-mix(in srgb, var(--danger) 48%, var(--border));
+  color: var(--danger);
+}
+
+.llm-key-status.muted {
+  color: var(--text-muted);
+}
+
+.llm-key-message {
+  grid-column: 1 / 2;
+  color: var(--danger);
+  font-size: 10px;
+  font-weight: 400;
+}
+
+.settings-inline-actions {
+  justify-content: flex-start;
+}
+
 .settings-save-row {
   position: sticky;
   bottom: 0;
@@ -1907,6 +2169,16 @@ onMounted(async () => {
   border-radius: 4px;
   background: color-mix(in srgb, var(--config-panel) 94%, transparent);
   backdrop-filter: blur(10px);
+}
+
+@media (max-width: 720px) {
+  .llm-key-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .llm-key-message {
+    grid-column: 1 / -1;
+  }
 }
 
 .password-strength {

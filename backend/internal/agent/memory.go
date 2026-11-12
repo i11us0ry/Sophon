@@ -16,6 +16,9 @@ const (
 	// 可能相关阈值：达到该值仍单独新增，但在审计里记录相似度便于复盘。
 	memoryRelatedThreshold  = 0.60
 	memoryDefaultImportance = 60
+	memoryDefaultPriority   = 50
+	memoryAuditCellKind     = "audit_cell"
+	memoryAuditCellPriority = 60
 )
 
 // memoryDecision 描述一次记忆写决策，用于审计与工具回执。
@@ -185,14 +188,28 @@ func (s *Service) consolidateFact(
 	if candidates, searchErr := s.searchProjectMemories(ctx, projectID, source.AssetID, source.Summary, 5); searchErr == nil {
 		for index := range candidates {
 			candidate := candidates[index]
-			if !strings.EqualFold(strings.TrimSpace(candidate.FactType), strings.TrimSpace(source.FactType)) {
+			sameStructuredIdentity := structuredFactIdentityEqual(source, candidate)
+			sameFactType := strings.EqualFold(
+				strings.TrimSpace(candidate.FactType),
+				strings.TrimSpace(source.FactType),
+			)
+			sameFactFamily := projectFactFamily(source) != "" &&
+				strings.EqualFold(projectFactFamily(source), projectFactFamily(candidate))
+			if !sameStructuredIdentity && !sameFactType {
+				continue
+			}
+			if sameStructuredIdentity && !sameFactType && !sameFactFamily {
 				continue
 			}
 			if structuredFactsConflict(source, candidate) {
 				continue
 			}
 			similarity := memorySimilarity(source.Summary, candidate.Summary)
-			if similarity < memorySemanticMergeThreshold {
+			threshold := memorySemanticMergeThreshold
+			if sameStructuredIdentity {
+				threshold = 0.75
+			}
+			if similarity < threshold {
 				continue
 			}
 			// 语义合并同样要求新证据或更高置信度，避免覆盖可信记忆。
@@ -277,6 +294,33 @@ func structuredFactsConflict(left, right database.ProjectFact) bool {
 		strings.EqualFold(left.SubjectKey, right.SubjectKey) &&
 		strings.EqualFold(left.Predicate, right.Predicate) &&
 		!strings.EqualFold(leftObject, rightObject)
+}
+
+func structuredFactIdentityEqual(left, right database.ProjectFact) bool {
+	if strings.TrimSpace(left.SubjectType) == "" ||
+		strings.TrimSpace(left.SubjectKey) == "" ||
+		strings.TrimSpace(left.Predicate) == "" ||
+		strings.TrimSpace(right.SubjectType) == "" ||
+		strings.TrimSpace(right.SubjectKey) == "" ||
+		strings.TrimSpace(right.Predicate) == "" {
+		return false
+	}
+	return strings.EqualFold(left.SubjectType, right.SubjectType) &&
+		strings.EqualFold(left.SubjectKey, right.SubjectKey) &&
+		strings.EqualFold(left.Predicate, right.Predicate)
+}
+
+func projectFactFamily(fact database.ProjectFact) string {
+	key := strings.ToLower(strings.TrimSpace(fact.Key))
+	if index := strings.Index(key, "/"); index > 0 {
+		return key[:index]
+	}
+	return strings.ToLower(strings.TrimSpace(fact.FactType))
+}
+
+func isAuditCellFact(fact database.ProjectFact) bool {
+	return strings.EqualFold(strings.TrimSpace(fact.MemoryKind), memoryAuditCellKind) ||
+		strings.HasPrefix(strings.ToLower(strings.TrimSpace(fact.Key)), "business/audit-cell-")
 }
 
 func (s *Service) findStructuredFactConflict(
