@@ -30,7 +30,7 @@ func TestTokenUsageForMessage(t *testing.T) {
 		t.Fatalf("创建会话失败: %v", err)
 	}
 	for _, item := range []TokenUsage{
-		{ID: "u1", ConversationID: "c1", UserID: "user-1", MessageID: "m1", PromptTokens: 100, CompletionTokens: 20, TotalTokens: 120, Kind: "chat", CreatedAt: now},
+		{ID: "u1", ConversationID: "c1", UserID: "user-1", MessageID: "m1", PromptTokens: 100, CacheReadTokens: 60, CompletionTokens: 20, TotalTokens: 120, Kind: "chat", CreatedAt: now},
 		{ID: "u2", ConversationID: "c1", UserID: "user-1", MessageID: "m1", PromptTokens: 200, CompletionTokens: 30, TotalTokens: 230, Kind: "chat", CreatedAt: now},
 		{ID: "u3", ConversationID: "c1", UserID: "user-1", MessageID: "m2", PromptTokens: 900, CompletionTokens: 90, TotalTokens: 990, Kind: "chat", CreatedAt: now},
 		{ID: "u4", ConversationID: "c1", UserID: "user-1", MessageID: "m1", PromptTokens: 300, CompletionTokens: 40, TotalTokens: 340, Kind: "subagent", CreatedAt: now},
@@ -61,6 +61,71 @@ func TestTokenUsageForMessage(t *testing.T) {
 		PromptTokens: 10, CompletionTokens: 5, TotalTokens: 15, Kind: "chat", CreatedAt: now,
 	}); err == nil {
 		t.Fatal("跨用户写入 Token 应被拒绝")
+	}
+}
+
+func TestDashboardTokenStats(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "dashboard-tokens.db"))
+	if err != nil {
+		t.Fatalf("打开数据库失败: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ctx := context.Background()
+	now := time.Now().UTC()
+	if err := db.CreateProject(ctx, Project{
+		ID: "project-token-stats", OwnerUserID: "user-1", Name: "token stats",
+		Status: "active", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("创建项目失败: %v", err)
+	}
+	for _, conversationID := range []string{"conversation-token-a", "conversation-token-b"} {
+		if err := db.CreateConversation(ctx, Conversation{
+			ID: conversationID, OwnerUserID: "user-1", ProjectID: "project-token-stats",
+			Title: conversationID, CreatedAt: now, UpdatedAt: now,
+		}); err != nil {
+			t.Fatalf("创建会话失败: %v", err)
+		}
+	}
+	for _, item := range []TokenUsage{
+		{
+			ID: "token-a", ConversationID: "conversation-token-a", UserID: "user-1",
+			MessageID: "message-a", PromptTokens: 100, CacheReadTokens: 80,
+			CompletionTokens: 20, TotalTokens: 120, Kind: "chat", Model: "model-a", CreatedAt: now,
+		},
+		{
+			ID: "token-b", ConversationID: "conversation-token-b", UserID: "user-1",
+			MessageID: "message-b", PromptTokens: 50, CacheReadTokens: 10,
+			CompletionTokens: 10, TotalTokens: 60, Kind: "subagent", Model: "model-a", CreatedAt: now,
+		},
+		{
+			ID: "token-old", ConversationID: "conversation-token-a", UserID: "user-1",
+			MessageID: "message-old", PromptTokens: 999, CacheReadTokens: 999,
+			CompletionTokens: 1, TotalTokens: 1000, Kind: "chat", Model: "model-a",
+			CreatedAt: now.AddDate(0, 0, -40),
+		},
+	} {
+		if err := db.AddTokenUsage(ctx, item); err != nil {
+			t.Fatalf("写入 Token 记录失败: %v", err)
+		}
+	}
+	stats, err := db.DashboardTokenStats(ctx, "user-1", 30, "", false)
+	if err != nil {
+		t.Fatalf("读取 Token 统计失败: %v", err)
+	}
+	if stats.InputTokens != 150 || stats.CacheReadTokens != 90 ||
+		stats.OutputTokens != 30 || stats.TotalTokens != 180 ||
+		stats.TaskCount != 2 || stats.Calls != 2 {
+		t.Fatalf("Token 统计错误: %+v", stats)
+	}
+	if len(stats.Models) != 1 || stats.Models[0].Model != "model-a" || len(stats.Daily) != 1 {
+		t.Fatalf("Token 模型或每日分桶错误: %+v", stats)
+	}
+	legacy, err := db.DashboardTokenStats(ctx, "user-1", 30, "model-a", true)
+	if err != nil {
+		t.Fatalf("读取旧版 Token 统计失败: %v", err)
+	}
+	if legacy.CacheReadTokens != 0 || legacy.InputTokens != 150 {
+		t.Fatalf("旧版缓存命中应显示为 0: %+v", legacy)
 	}
 }
 

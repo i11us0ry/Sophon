@@ -5,7 +5,13 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
+	"strconv"
 	"strings"
+
+	"golang.org/x/net/idna"
+	"golang.org/x/net/publicsuffix"
 )
 
 var (
@@ -46,6 +52,186 @@ func IsSupportedAssetKind(kind string) bool {
 	return supportedAssetKinds[strings.ToLower(strings.TrimSpace(kind))]
 }
 
+func NormalizeAssetValue(kind string, value string) (string, error) {
+	kind = strings.ToLower(strings.TrimSpace(kind))
+	value = strings.TrimSpace(value)
+	switch kind {
+	case "domain":
+		return normalizeDomainAssetValue(value)
+	case "ip":
+		ip := net.ParseIP(strings.Trim(value, "[]"))
+		if ip == nil {
+			return "", fmt.Errorf("IP 资产值不是有效 IP 地址")
+		}
+		return ip.String(), nil
+	case "url":
+		return normalizeURLAssetValue(value)
+	case "port":
+		port, err := strconv.Atoi(value)
+		if err != nil || port < 1 || port > 65535 {
+			return "", fmt.Errorf("端口资产值必须在 1-65535 之间")
+		}
+		return strconv.Itoa(port), nil
+	case "host":
+		return normalizeHostAssetValue(value)
+	default:
+		return "", fmt.Errorf("资产类型只能是 ip、domain、url、port 或 host")
+	}
+}
+
+func normalizeDomainAssetValue(value string) (string, error) {
+	value = strings.TrimSpace(strings.TrimSuffix(value, "."))
+	if value == "" || strings.Contains(value, "://") ||
+		strings.ContainsAny(value, " \t\r\n/\\@?#") {
+		return "", fmt.Errorf("域名资产值格式不合法")
+	}
+	wildcard := strings.HasPrefix(value, "*.")
+	hostValue := value
+	if wildcard {
+		hostValue = strings.TrimPrefix(hostValue, "*.")
+	}
+	host, port, err := splitAssetHostPort(hostValue)
+	if err != nil {
+		return "", err
+	}
+	if wildcard && port != "" {
+		return "", fmt.Errorf("通配域名不能包含端口")
+	}
+	host = strings.TrimSuffix(strings.ToLower(host), ".")
+	if net.ParseIP(strings.Trim(host, "[]")) != nil {
+		return "", fmt.Errorf("IP 地址必须使用 ip 类型")
+	}
+	asciiHost, err := idna.Lookup.ToASCII(host)
+	if err != nil || !validHostLabels(asciiHost, false) {
+		return "", fmt.Errorf("域名资产值包含非法标签")
+	}
+	suffix, icann := publicsuffix.PublicSuffix(asciiHost)
+	if suffix == "" || suffix == asciiHost {
+		return "", fmt.Errorf("域名资产值不能是公共后缀本身")
+	}
+	if !icann && !strings.Contains(suffix, ".") {
+		return "", fmt.Errorf("域名资产值没有可注册后缀")
+	}
+	if _, err := publicsuffix.EffectiveTLDPlusOne(asciiHost); err != nil {
+		return "", fmt.Errorf("域名资产值没有有效注册域")
+	}
+	normalized := asciiHost
+	if wildcard {
+		normalized = "*." + normalized
+	}
+	if port != "" {
+		normalized = net.JoinHostPort(normalized, port)
+	}
+	return strings.ToLower(normalized), nil
+}
+
+func normalizeURLAssetValue(value string) (string, error) {
+	if value == "" || strings.ContainsAny(value, " \t\r\n") {
+		return "", fmt.Errorf("URL 资产值格式不合法")
+	}
+	parsed, err := url.Parse(value)
+	if err != nil ||
+		(parsed.Scheme != "http" && parsed.Scheme != "https") ||
+		parsed.Hostname() == "" ||
+		parsed.User != nil {
+		return "", fmt.Errorf("URL 资产值必须是有效的 HTTP/HTTPS 地址")
+	}
+	host := parsed.Hostname()
+	if net.ParseIP(strings.Trim(host, "[]")) == nil && !validHostLabels(host, true) {
+		return "", fmt.Errorf("URL 资产值主机名不合法")
+	}
+	if port := parsed.Port(); port != "" {
+		if number, err := strconv.Atoi(port); err != nil || number < 1 || number > 65535 {
+			return "", fmt.Errorf("URL 资产值端口不合法")
+		}
+	}
+	parsed.Scheme = strings.ToLower(parsed.Scheme)
+	parsed.Host = strings.ToLower(parsed.Host)
+	return parsed.String(), nil
+}
+
+func normalizeHostAssetValue(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", fmt.Errorf("主机资产值格式不合法")
+	}
+	if _, network, err := net.ParseCIDR(value); err == nil {
+		return network.String(), nil
+	}
+	if strings.ContainsAny(value, " \t\r\n/\\@?#") {
+		return "", fmt.Errorf("主机资产值格式不合法")
+	}
+	if ip := net.ParseIP(strings.Trim(value, "[]")); ip != nil {
+		return ip.String(), nil
+	}
+	host, port, err := splitAssetHostPort(value)
+	if err != nil {
+		return "", err
+	}
+	host = strings.TrimSuffix(strings.ToLower(host), ".")
+	if ip := net.ParseIP(strings.Trim(host, "[]")); ip != nil {
+		host = ip.String()
+	} else {
+		asciiHost, err := idna.Lookup.ToASCII(host)
+		if err != nil || !validHostLabels(asciiHost, true) {
+			return "", fmt.Errorf("主机资产值格式不合法")
+		}
+		host = asciiHost
+	}
+	if port != "" {
+		return net.JoinHostPort(host, port), nil
+	}
+	return host, nil
+}
+
+func splitAssetHostPort(value string) (string, string, error) {
+	if strings.Count(value, ":") == 0 {
+		return value, "", nil
+	}
+	if strings.HasPrefix(value, "[") {
+		host, port, err := net.SplitHostPort(value)
+		if err != nil || !validAssetPort(port) {
+			return "", "", fmt.Errorf("资产值端口不合法")
+		}
+		return host, port, nil
+	}
+	if strings.Count(value, ":") != 1 {
+		return "", "", fmt.Errorf("资产值主机格式不合法")
+	}
+	host, port, err := net.SplitHostPort(value)
+	if err != nil || host == "" || !validAssetPort(port) {
+		return "", "", fmt.Errorf("资产值端口不合法")
+	}
+	return host, port, nil
+}
+
+func validAssetPort(value string) bool {
+	port, err := strconv.Atoi(value)
+	return err == nil && port >= 1 && port <= 65535
+}
+
+func validHostLabels(host string, allowUnderscore bool) bool {
+	host = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
+	if host == "" || len(host) > 253 || strings.ContainsAny(host, " \t\r\n/\\@?#:") {
+		return false
+	}
+	for _, label := range strings.Split(host, ".") {
+		if label == "" || len(label) > 63 || strings.HasPrefix(label, "-") || strings.HasSuffix(label, "-") {
+			return false
+		}
+		for _, char := range label {
+			if (char >= 'a' && char <= 'z') ||
+				(char >= '0' && char <= '9') ||
+				char == '-' ||
+				(allowUnderscore && char == '_') {
+				continue
+			}
+			return false
+		}
+	}
+	return true
+}
+
 func normalizeAssetRecord(item *Asset) error {
 	item.ID = strings.TrimSpace(item.ID)
 	item.ProjectID = strings.TrimSpace(item.ProjectID)
@@ -68,6 +254,11 @@ func normalizeAssetRecord(item *Asset) error {
 	if item.Value == "" || len([]rune(item.Value)) > assetValueMaxRunes {
 		return fmt.Errorf("%w: 资产值不能为空且不能超过 %d 个字符", ErrInvalidAsset, assetValueMaxRunes)
 	}
+	normalizedValue, err := NormalizeAssetValue(item.Kind, item.Value)
+	if err != nil {
+		return fmt.Errorf("%w: %s", ErrInvalidAsset, err.Error())
+	}
+	item.Value = normalizedValue
 	if item.Status == "" {
 		item.Status = "unknown"
 	}

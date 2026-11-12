@@ -1071,6 +1071,9 @@ func (db *DB) ListAssets(ctx context.Context, ownerUserID string) ([]Asset, erro
 		}
 		item.CreatedAt = time.Unix(createdAt, 0)
 		item.UpdatedAt = time.Unix(updatedAt, 0)
+		if !validStoredAsset(item) {
+			continue
+		}
 		items = append(items, item)
 	}
 	return items, rows.Err()
@@ -1151,7 +1154,10 @@ func (db *DB) ListAssetsFiltered(
 	ctx context.Context,
 	filter AssetFilter,
 ) ([]Asset, int, error) {
-	clauses := []string{"owner_user_id = ?"}
+	clauses := []string{
+		"owner_user_id = ?",
+		"LOWER(TRIM(kind)) IN ('domain', 'ip', 'url', 'port', 'host')",
+	}
 	args := []interface{}{filter.OwnerUserID}
 	if value := strings.TrimSpace(filter.ProjectID); value != "" {
 		clauses = append(clauses, "project_id = ?")
@@ -1174,23 +1180,13 @@ func (db *DB) ListAssetsFiltered(
 		args = append(args, pattern, pattern, pattern)
 	}
 	where := " WHERE " + strings.Join(clauses, " AND ")
-	var total int
-	if err := db.QueryRowContext(
-		ctx,
-		`SELECT COUNT(*) FROM assets`+where,
-		args...,
-	).Scan(&total); err != nil {
-		return nil, 0, err
-	}
-	limit, offset := normalizeProjectPage(filter.Limit, filter.Offset)
 	rows, err := db.QueryContext(
 		ctx,
 		`SELECT id, project_id, owner_user_id, name, kind, value, status,
 			criticality, risk_score, created_at, updated_at
 		 FROM assets`+where+`
-		 ORDER BY updated_at DESC, rowid DESC
-		 LIMIT ? OFFSET ?`,
-		append(args, limit, offset)...,
+		 ORDER BY updated_at DESC, rowid DESC`,
+		args...,
 	)
 	if err != nil {
 		return nil, 0, err
@@ -1218,12 +1214,32 @@ func (db *DB) ListAssetsFiltered(
 		}
 		item.CreatedAt = time.Unix(createdAt, 0)
 		item.UpdatedAt = time.Unix(updatedAt, 0)
+		if !validStoredAsset(item) {
+			continue
+		}
 		items = append(items, item)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, 0, err
 	}
-	return items, total, nil
+	total := len(items)
+	limit, offset := normalizeProjectPage(filter.Limit, filter.Offset)
+	if offset >= total {
+		return []Asset{}, total, nil
+	}
+	end := offset + limit
+	if end > total {
+		end = total
+	}
+	return items[offset:end], total, nil
+}
+
+func validStoredAsset(item Asset) bool {
+	if !IsSupportedAssetKind(item.Kind) {
+		return false
+	}
+	_, err := NormalizeAssetValue(item.Kind, item.Value)
+	return err == nil
 }
 
 func (db *DB) GetAsset(ctx context.Context, id, ownerUserID string) (*Asset, error) {

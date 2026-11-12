@@ -27,6 +27,7 @@ const (
 type summaryCallResult struct {
 	Text             string
 	PromptTokens     int
+	CacheReadTokens  int
 	CompletionTokens int
 	TotalTokens      int
 	Estimated        bool
@@ -142,7 +143,7 @@ func (s *Service) summarizeHistory(
 }
 
 func (s *Service) generateHistorySummary(ctx context.Context, folded string) (string, error) {
-	text, _, _, _, err := s.callStructuredSummary(ctx, folded, "")
+	text, _, _, _, _, err := s.callStructuredSummary(ctx, folded, "")
 	return text, err
 }
 
@@ -151,9 +152,9 @@ func (s *Service) callStructuredSummary(
 	ctx context.Context,
 	folded string,
 	transcriptPath string,
-) (string, int, int, bool, error) {
+) (string, int, int, int, bool, error) {
 	if s.model == nil || strings.TrimSpace(folded) == "" {
-		return "", 0, 0, true, fmt.Errorf("摘要模型不可用")
+		return "", 0, 0, 0, true, fmt.Errorf("摘要模型不可用")
 	}
 	chatModel := s.model
 	if withoutTools, err := chatModel.WithTools(nil); err == nil && withoutTools != nil {
@@ -170,21 +171,29 @@ func (s *Service) callStructuredSummary(
 		schema.UserMessage(prompt),
 	})
 	if err != nil {
-		return "", 0, 0, true, err
+		return "", 0, 0, 0, true, err
 	}
 	if message == nil {
-		return "", 0, 0, true, fmt.Errorf("摘要模型未返回内容")
+		return "", 0, 0, 0, true, fmt.Errorf("摘要模型未返回内容")
 	}
 	promptTokens := estimateTextTokensV2(folded) + estimateTextTokensV2(summarySections) + 32
+	cacheReadTokens := 0
 	completionTokens := estimateTextTokensV2(message.Content)
 	estimated := true
 	if message.ResponseMeta != nil && message.ResponseMeta.Usage != nil {
 		usage := message.ResponseMeta.Usage
 		promptTokens = usage.PromptTokens
+		cacheReadTokens = usage.PromptTokenDetails.CachedTokens
 		completionTokens = usage.CompletionTokens
 		estimated = false
 	}
-	return strings.TrimSpace(message.Content), promptTokens, completionTokens, estimated, nil
+	if cacheReadTokens < 0 {
+		cacheReadTokens = 0
+	}
+	if cacheReadTokens > promptTokens {
+		cacheReadTokens = promptTokens
+	}
+	return strings.TrimSpace(message.Content), promptTokens, cacheReadTokens, completionTokens, estimated, nil
 }
 
 // summarizeOlderMessages 结构化压缩一段历史；失败时回退为头尾截断的拼接摘要，绝不中断调用方。
@@ -209,7 +218,7 @@ func (s *Service) summarizeText(
 		outputRunes = summaryOutputRunesMinor
 	}
 	started := time.Now()
-	text, promptTokens, completionTokens, estimated, err := s.callStructuredSummary(
+	text, promptTokens, cacheReadTokens, completionTokens, estimated, err := s.callStructuredSummary(
 		ctx,
 		folded,
 		transcriptPath,
@@ -234,6 +243,7 @@ func (s *Service) summarizeText(
 	return summaryCallResult{
 		Text:             text,
 		PromptTokens:     promptTokens,
+		CacheReadTokens:  cacheReadTokens,
 		CompletionTokens: completionTokens,
 		TotalTokens:      total,
 		Estimated:        estimated,

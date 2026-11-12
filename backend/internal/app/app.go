@@ -240,6 +240,7 @@ func New(cfg config.Config) (*App, error) {
 
 	protected.GET("/rbac/me", rbacHandler.Me)
 	protected.GET("/dashboard/summary", dashboardHandler.Summary)
+	protected.GET("/dashboard/tokens", dashboardHandler.Tokens)
 	protected.GET("/context/metrics", contextHandler.Metrics)
 	protected.GET("/context/compactions", contextHandler.Compactions)
 	protected.GET("/observability/metrics", observabilityHandler.Metrics)

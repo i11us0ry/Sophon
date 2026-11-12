@@ -222,7 +222,7 @@ func isMaxIterationsError(err error) bool {
 
 func maxIterationsResult(capture *runCapture, limit int) string {
 	notice := fmt.Sprintf(
-		"已达到 Agent 最大迭代轮数（%d），本轮已停止。请回复“继续”以接着处理，或在设置中调高最大迭代轮数。",
+		"已达到单次 Agent 迭代上限（%d），本轮已停止。请回复“继续”以接着处理，或在设置中调高最大迭代轮数。",
 		limit,
 	)
 	if capture == nil {
@@ -233,6 +233,65 @@ func maxIterationsResult(capture *runCapture, limit int) string {
 		return notice
 	}
 	return partial + "\n\n---\n" + notice
+}
+
+func (s *Service) finalizeRetestAtIterationLimit(
+	ctx context.Context,
+	conversationID string,
+	projectID string,
+	userID string,
+	plan missionPlan,
+	capture *runCapture,
+	limit int,
+) (bool, string) {
+	if s == nil ||
+		s.db == nil ||
+		plan.Mode != missionModeRetest ||
+		len(plan.RetestIDs) == 0 ||
+		(capture != nil && capture.hasToolCall("project_retest_finding")) {
+		return false, ""
+	}
+	notes := fmt.Sprintf(
+		"达到单次复测迭代上限（%d），现有工具证据不足以完成针对性验证；需要补充凭据、有效标识或可复核响应后再继续。",
+		limit,
+	)
+	evidence := "系统在达到单次复测迭代上限时自动写回 inconclusive，未继续扩展验证范围。"
+	if capture != nil {
+		evidence += fmt.Sprintf(
+			" 本轮记录 %d 次工具调用、%d 次已完成工具结果。",
+			capture.toolCallCount,
+			capture.completedToolResults,
+		)
+	}
+	completed := 0
+	for _, retestID := range plan.RetestIDs {
+		run, err := s.db.GetVulnerabilityRetest(ctx, retestID, userID)
+		if err != nil || run == nil || run.Status != "running" {
+			continue
+		}
+		if _, _, err := s.db.CompleteVulnerabilityRetest(
+			ctx,
+			retestID,
+			userID,
+			conversationID,
+			projectID,
+			"insufficient_evidence",
+			notes,
+			evidence,
+			nil,
+		); err == nil {
+			completed++
+		}
+	}
+	if completed == 0 {
+		return false, ""
+	}
+	markMissionObjectiveComplete(
+		ctx,
+		"",
+		"复测达到单次迭代上限，已自动写回 insufficient_evidence",
+	)
+	return true, notes
 }
 
 // failedRunMessage 保证异常中断也有一条可读、可继续的助手消息。
@@ -615,7 +674,6 @@ func (s *Service) RunWithOptions(
 	if intentPlan.boundedFindingAudit() {
 		ctx, cancelBounded = context.WithTimeout(ctx, boundedFindingMaxDuration)
 		defer cancelBounded()
-		ctx = withRunTokenBudget(ctx, min(s.turnTokenBudget(), boundedFindingMaxTokens), cancelBounded)
 	}
 	roleDefaultMode := agentModeAuto
 	if strings.TrimSpace(conversation.AgentRoleID) != "" {
@@ -848,21 +906,33 @@ func (s *Service) RunWithOptions(
 	if maxIterations <= 0 {
 		maxIterations = s.maxIterations
 	}
+	iterationBudget := newModelIterationBudget(maxIterations)
 	// 用户配置的是整个 turn 的总迭代上限；单段使用更小的内部窗口并在段间
 	// 重建受限上下文，避免一次 Run 内无限累积工具结果。
 	segmentLimit := configuredSegmentLimit(maxIterations)
+	maxSegmentsLimit, maxToolCallsLimit := resolveRunLimits(options, intentPlan)
+	autoContinueSegments := !intentPlan.boundedFindingAudit()
 	newAgent := func(limit int, includeTools bool) (*adk.ChatModelAgent, error) {
 		toolsConfig := adk.ToolsConfig{}
+		agentModel := model.ToolCallingChatModel(s.model)
 		if includeTools {
 			toolsConfig.ToolsNodeConfig = compose.ToolsNodeConfig{
 				Tools:               s.activeToolsForMission(ctx, agentMode, missionExecution.Plan, missionExecution.Phase),
 				UnknownToolsHandler: s.unknownToolHandler,
 			}
+			if autoContinueSegments {
+				agentModel = wrapModelIterationBudget(agentModel, iterationBudget)
+			} else {
+				agentModel = wrapModelIterationBudget(
+					agentModel,
+					newModelIterationBudget(limit),
+				)
+			}
 		}
 		return adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
 			Name:          "sophon-agent",
 			Instruction:   s.mainAgentInstruction(ctx),
-			Model:         s.model,
+			Model:         agentModel,
 			MaxIterations: limit,
 			ToolsConfig:   toolsConfig,
 		})
@@ -881,8 +951,6 @@ func (s *Service) RunWithOptions(
 	previousProgress := s.missionProgress(ctx, projectID, userID)
 	noProgressRounds := 0
 	segmentCount := 0
-	maxSegmentsLimit, maxToolCallsLimit := resolveRunLimits(options, intentPlan)
-	autoContinueSegments := !intentPlan.boundedFindingAudit()
 	autonomousPentest := missionExecution.Plan.allowsPentest()
 	scope := missionExecution.Scope
 	strategySwitches := 0
@@ -997,11 +1065,10 @@ func (s *Service) RunWithOptions(
 				return result, ErrTaskBudgetExhausted
 			}
 			if isMaxIterationsError(runErr) {
-				if autoContinueSegments {
-					if attempt+1 >= maxSegmentsLimit {
-						budgetExhausted = true
-						break
-					}
+				iterationExhausted := iterationBudget.IsExhausted()
+				if autoContinueSegments &&
+					!iterationExhausted &&
+					attempt+1 < maxSegmentsLimit {
 					if text := segmentCapture.finalText(); text != "" {
 						finalText = text
 					}
@@ -1039,10 +1106,70 @@ func (s *Service) RunWithOptions(
 					currentMessages = nextMessages
 					continue
 				}
-				result := maxIterationsResult(segmentCapture, maxIterations)
-				if strings.TrimSpace(segmentCapture.finalText()) == "" && finalText != "" {
-					result = finalText + "\n\n---\n" + maxIterationsResult(nil, maxIterations)
+				if autoContinueSegments && attempt+1 >= maxSegmentsLimit {
+					budgetExhausted = true
 				}
+				terminal, terminalReason := s.finalizeRetestAtIterationLimit(
+					ctx,
+					conversationID,
+					projectID,
+					userID,
+					intentPlan,
+					&capture,
+					segmentLimit,
+				)
+				summary := s.forceSynthesis(
+					ctx,
+					conversationID,
+					userID,
+					assistantMessageID,
+					progress,
+					&capture,
+					iterationBudgetSynthesisPrompt,
+					newAgent,
+				)
+				limit := segmentLimit
+				if iterationExhausted {
+					limit = maxIterations
+				}
+				if strings.TrimSpace(summary) == "" {
+					summary = maxIterationsResult(segmentCapture, limit)
+				} else {
+					summary += "\n\n---\n\n" + fmt.Sprintf(
+						"已达到 Agent 迭代预算（%d/%d），本轮在强制总结后停止。",
+						limit,
+						limit,
+					)
+				}
+				if terminal {
+					result := summary
+					if strings.TrimSpace(terminalReason) != "" {
+						result = "复测结论：insufficient_evidence\n\n" + terminalReason + "\n\n---\n\n" + result
+					}
+					if err := s.saveAssistantContent(
+						ctx,
+						assistantMessageID,
+						result,
+						capture.reasoning.String(),
+					); err != nil {
+						return result, err
+					}
+					if progress != nil {
+						_ = progress(Event{
+							Type:    "response",
+							Message: result,
+							Data: map[string]interface{}{
+								"finalized":         true,
+								"stoppedReason":     "max_iterations",
+								"terminalWriteback": true,
+								"result":            "insufficient_evidence",
+							},
+						})
+					}
+					runStatus = database.AgentRunStatusCompleted
+					return result, nil
+				}
+				result := summary
 				if err := s.saveAssistantContent(
 					ctx,
 					assistantMessageID,
@@ -1062,7 +1189,11 @@ func (s *Service) RunWithOptions(
 					})
 				}
 				runStatus = database.AgentRunStatusInterrupted
-				runInterruptionReason = "达到 Agent 最大迭代轮数"
+				if iterationExhausted {
+					runInterruptionReason = fmt.Sprintf("达到 Agent 迭代预算上限（%d）", maxIterations)
+				} else {
+					runInterruptionReason = fmt.Sprintf("达到单段执行窗口（%d）", segmentLimit)
+				}
 				return result, nil
 			}
 			if finalText == "" {
@@ -1426,6 +1557,50 @@ func (s *Service) runAgentSegment(
 			return capture, err
 		}
 	}
+}
+
+func (s *Service) forceSynthesis(
+	ctx context.Context,
+	conversationID string,
+	userID string,
+	assistantMessageID string,
+	progress ProgressFunc,
+	capture *runCapture,
+	prompt string,
+	newAgent func(int, bool) (*adk.ChatModelAgent, error),
+) string {
+	messages, err := s.buildModelMessages(ctx, conversationID, userID)
+	if err != nil {
+		log.Printf("agent: 构建强制总结上下文失败 conversation=%s: %v", conversationID, err)
+		return ""
+	}
+	messages = append(messages, schema.UserMessage(prompt))
+	agent, err := newAgent(2, false)
+	if err != nil {
+		log.Printf("agent: 创建强制总结 Agent 失败 conversation=%s: %v", conversationID, err)
+		return ""
+	}
+	resultCapture, err := s.runAgentSegment(
+		ctx,
+		agent,
+		conversationID,
+		userID,
+		assistantMessageID,
+		messages,
+		progress,
+	)
+	if resultCapture != nil && capture != nil {
+		capture.mergeEvidence(resultCapture)
+		capture.reasoning.WriteString(resultCapture.reasoning.String())
+		capture.thinking = append(capture.thinking, resultCapture.thinking...)
+	}
+	if err != nil {
+		log.Printf("agent: 强制总结轮失败 conversation=%s: %v", conversationID, err)
+	}
+	if resultCapture == nil {
+		return ""
+	}
+	return strings.TrimSpace(resultCapture.finalText())
 }
 
 // runCapture 收集一轮 Agent 运行输出：实时正文、推理内容与中间思考文本。
@@ -2937,6 +3112,7 @@ func (t *usageTracker) record(ctx context.Context, message *schema.Message) {
 	}
 
 	promptTokens := t.promptEstimate
+	cacheReadTokens := 0
 	completionTokens := estimateTextTokens(message.Content)
 	for _, call := range message.ToolCalls {
 		completionTokens += estimateTextTokens(call.Function.Arguments)
@@ -2947,12 +3123,19 @@ func (t *usageTracker) record(ctx context.Context, message *schema.Message) {
 	if message.ResponseMeta != nil && message.ResponseMeta.Usage != nil {
 		usage := message.ResponseMeta.Usage
 		promptTokens = usage.PromptTokens
+		cacheReadTokens = usage.PromptTokenDetails.CachedTokens
 		completionTokens = usage.CompletionTokens
 		totalTokens = usage.TotalTokens
 		if totalTokens <= 0 {
 			totalTokens = promptTokens + completionTokens
 		}
 		estimated = false
+	}
+	if cacheReadTokens < 0 {
+		cacheReadTokens = 0
+	}
+	if cacheReadTokens > promptTokens {
+		cacheReadTokens = promptTokens
 	}
 	if totalTokens <= 0 {
 		return
@@ -2967,6 +3150,7 @@ func (t *usageTracker) record(ctx context.Context, message *schema.Message) {
 		UserID:           t.userID,
 		MessageID:        t.messageID,
 		PromptTokens:     promptTokens,
+		CacheReadTokens:  cacheReadTokens,
 		CompletionTokens: completionTokens,
 		TotalTokens:      totalTokens,
 		Estimated:        estimated,

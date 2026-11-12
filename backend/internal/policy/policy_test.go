@@ -569,7 +569,7 @@ func TestEngineAppliesConfiguredInterceptRules(t *testing.T) {
 	}
 	if err := db.CreateAsset(ctx, database.Asset{
 		ID: "asset-intercept", ProjectID: "project-intercept", OwnerUserID: "user-1",
-		Name: "target", Kind: "domain", Value: "target.example",
+		Name: "target", Kind: "domain", Value: "target.example.com",
 		Status: "active", Criticality: "medium", CreatedAt: now, UpdatedAt: now,
 	}); err != nil {
 		t.Fatalf("创建资产失败: %v", err)
@@ -583,7 +583,7 @@ func TestEngineAppliesConfiguredInterceptRules(t *testing.T) {
 	}
 	engine := NewEngine(db)
 	decision, err := engine.Evaluate(ctx, "project-intercept", "user-1", "sophon-tool-runner", "exec", map[string]interface{}{
-		"command": "curl http://target.example/health",
+		"command": "curl http://target.example.com/health",
 	})
 	if err != nil || decision.Kind != DecisionAllow {
 		t.Fatalf("allow 规则应跳过能力审批: decision=%+v err=%v", decision, err)
@@ -608,7 +608,7 @@ func TestEngineAppliesConfiguredInterceptRules(t *testing.T) {
 		t.Fatalf("写入审批规则失败: %v", err)
 	}
 	decision, err = engine.Evaluate(ctx, "project-intercept", "user-1", "mcp-server", "nmap", map[string]interface{}{
-		"target": "target.example",
+		"target": "target.example.com",
 	})
 	if err != nil || decision.Kind != DecisionRequireApproval {
 		t.Fatalf("ask 规则应要求人工审批: decision=%+v err=%v", decision, err)

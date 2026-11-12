@@ -560,12 +560,16 @@ func TestInferFindingAssetKindReturnsSupportedKinds(t *testing.T) {
 		"https://a.com/x": "url",
 		"10.0.0.1":        "ip",
 		"a.com":           "domain",
-		"opaque target":   "url",
-		"internal target": "url",
+		"443":             "port",
+		"10.0.0.0/24":     "host",
+		"internal-host":   "host",
+		"opaque target":   "",
+		"internal target": "",
+		"src/WebSite/bin/Kingdee.BOS.FileServer.Web.dll : Kingdee.BOS.FileServer.Web.FileService.Upload2Attachment rva=0x2D24": "",
 	}
 	for value, expected := range testCases {
 		kind := inferFindingAssetKind(value)
-		if kind != expected || !database.IsSupportedAssetKind(kind) {
+		if kind != expected || (kind != "" && !database.IsSupportedAssetKind(kind)) {
 			t.Fatalf("目标 %q 类型错误: got=%q want=%q", value, kind, expected)
 		}
 	}

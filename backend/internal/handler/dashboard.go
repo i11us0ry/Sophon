@@ -2,6 +2,8 @@ package handler
 
 import (
 	"net/http"
+	"strconv"
+	"strings"
 
 	"sophon/internal/database"
 	"sophon/internal/middleware"
@@ -15,6 +17,37 @@ type DashboardHandler struct {
 
 func NewDashboardHandler(db *database.DB) *DashboardHandler {
 	return &DashboardHandler{db: db}
+}
+
+func (h *DashboardHandler) Tokens(c *gin.Context) {
+	user := middleware.UserFromContext(c)
+	if user == nil {
+		unauthorized(c)
+		return
+	}
+	days, _ := strconv.Atoi(c.Query("days"))
+	version := strings.ToLower(strings.TrimSpace(c.DefaultQuery("version", "new")))
+	legacy := version == "old"
+	stats, err := h.db.DashboardTokenStats(
+		c.Request.Context(),
+		user.ID,
+		days,
+		strings.TrimSpace(c.Query("model")),
+		legacy,
+	)
+	if err != nil {
+		internalError(c, "dashboard_tokens_failed", "读取 Token 统计失败")
+		return
+	}
+	source := "token_usage"
+	if legacy {
+		source = "activity"
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"version": version,
+		"source":  source,
+		"stats":   stats,
+	})
 }
 
 func (h *DashboardHandler) Summary(c *gin.Context) {
@@ -39,6 +72,7 @@ func (h *DashboardHandler) Summary(c *gin.Context) {
 		},
 		"tokens": gin.H{
 			"prompt":     summary.PromptTokens,
+			"cacheRead":  summary.CacheReadTokens,
 			"completion": summary.CompletionTokens,
 			"total":      summary.TotalTokens,
 			"estimated":  summary.EstimatedTokens,

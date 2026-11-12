@@ -191,12 +191,19 @@ func TestAssetValidationEnforcesSupportedKindsOnCreateAndUpdate(t *testing.T) {
 		UpdatedAt:   now,
 	}
 
+	validValues := map[string]string{
+		"ip":     "10.0.0.1",
+		"domain": "example.com",
+		"url":    "https://example.com/path",
+		"port":   "443",
+		"host":   "internal-host",
+	}
 	for _, kind := range []string{"ip", "domain", "url", "port", "host"} {
 		item := base
 		item.ID = "asset-kind-" + kind
 		item.Name = "合法类型 " + kind
 		item.Kind = kind
-		item.Value = kind + "-value"
+		item.Value = validValues[kind]
 		if err := db.CreateAsset(context.Background(), item); err != nil {
 			t.Fatalf("创建类型 %q 失败: %v", kind, err)
 		}
@@ -213,11 +220,13 @@ func TestAssetValidationEnforcesSupportedKindsOnCreateAndUpdate(t *testing.T) {
 	}
 
 	base.Kind = "port"
+	base.Value = "8443"
 	base.UpdatedAt = now.Add(time.Minute)
 	if err := db.UpdateAsset(context.Background(), base); err != nil {
 		t.Fatalf("编辑为 port 失败: %v", err)
 	}
 	base.Kind = "host"
+	base.Value = "internal-host-updated"
 	base.UpdatedAt = now.Add(2 * time.Minute)
 	if err := db.UpdateAsset(context.Background(), base); err != nil {
 		t.Fatalf("编辑为 host 失败: %v", err)
@@ -226,6 +235,87 @@ func TestAssetValidationEnforcesSupportedKindsOnCreateAndUpdate(t *testing.T) {
 	base.UpdatedAt = now.Add(3 * time.Minute)
 	if err := db.UpdateAsset(context.Background(), base); !errors.Is(err, ErrInvalidAsset) {
 		t.Fatalf("编辑为非法类型应被拒绝，实际 %v", err)
+	}
+}
+
+func TestNormalizeAssetValueRejectsFalseDomainCandidates(t *testing.T) {
+	validDomains := []string{
+		"example.com",
+		"api.example.com:8443",
+		"*.example.com",
+		"foo.co.uk",
+		"foo.github.io",
+	}
+	for _, value := range validDomains {
+		if _, err := NormalizeAssetValue("domain", value); err != nil {
+			t.Fatalf("合法域名 %q 被拒绝: %v", value, err)
+		}
+	}
+	invalidDomains := []string{
+		"src/WebSite/bin/Kingdee.BOS.FileServer.Web.dll",
+		"Kingdee.BOS.FileServer.Web.dll",
+		"FileService.svc",
+		"com",
+		"foo.local",
+		"opaque target",
+		"10.0.0.1",
+	}
+	for _, value := range invalidDomains {
+		if _, err := NormalizeAssetValue("domain", value); err == nil {
+			t.Fatalf("无效域名 %q 不应通过", value)
+		}
+	}
+	if _, err := NormalizeAssetValue("url", "src/WebSite"); err == nil {
+		t.Fatal("源码路径不应作为 URL 资产")
+	}
+}
+
+func TestAssetListsHideUnsupportedAndInvalidLegacyRecords(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "asset-list-validation.db"))
+	if err != nil {
+		t.Fatalf("打开数据库失败: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ctx := context.Background()
+	now := time.Now().UTC()
+	for _, item := range []struct {
+		id    string
+		kind  string
+		value string
+	}{
+		{id: "asset-valid", kind: "domain", value: "example.com"},
+		{id: "asset-other", kind: "other", value: "src/WebSite/kdagent.aspx"},
+		{
+			id:    "asset-false-domain",
+			kind:  "domain",
+			value: "src/WebSite/bin/Kingdee.BOS.FileServer.Web.dll : Kingdee.BOS.FileServer.Web.FileService.Upload2Attachment rva=0x2D24",
+		},
+	} {
+		if _, err := db.ExecContext(
+			ctx,
+			`INSERT INTO assets (
+				id, project_id, owner_user_id, name, kind, value, status,
+				criticality, risk_score, created_at, updated_at
+			) VALUES (?, 'legacy-project', 'user-1', ?, ?, ?, 'active', 'medium', 0, ?, ?)`,
+			item.id,
+			item.value,
+			item.kind,
+			item.value,
+			now.Unix(),
+			now.Unix(),
+		); err != nil {
+			t.Fatalf("写入历史资产失败: %v", err)
+		}
+	}
+	items, total, err := db.ListAssetsFiltered(ctx, AssetFilter{
+		OwnerUserID: "user-1",
+		Limit:       20,
+	})
+	if err != nil {
+		t.Fatalf("读取资产列表失败: %v", err)
+	}
+	if total != 1 || len(items) != 1 || items[0].ID != "asset-valid" {
+		t.Fatalf("资产列表应隐藏非法历史记录: total=%d items=%+v", total, items)
 	}
 }
 

@@ -3,8 +3,6 @@ package handler
 import (
 	"errors"
 	"fmt"
-	"net"
-	"net/url"
 	"strings"
 	"time"
 
@@ -606,33 +604,22 @@ func normalizeBatchAsset(raw string) (string, string, bool) {
 	if value == "" {
 		return "", "", false
 	}
-	lower := strings.ToLower(value)
-	if strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://") {
-		parsed, err := url.Parse(value)
-		if err != nil || parsed.Hostname() == "" {
-			return "", "", false
-		}
-		parsed.Scheme = strings.ToLower(parsed.Scheme)
-		parsed.Host = strings.ToLower(parsed.Host)
-		return "url", parsed.String(), true
+	if normalized, err := database.NormalizeAssetValue("url", value); err == nil {
+		return "url", normalized, true
 	}
-	hostValue := strings.Trim(value, "[]")
-	if host, port, err := net.SplitHostPort(hostValue); err == nil {
-		host = strings.Trim(host, "[]")
-		kind := "domain"
-		if net.ParseIP(host) != nil {
-			kind = "ip"
-		}
-		return kind, net.JoinHostPort(strings.ToLower(host), port), true
+	if normalized, err := database.NormalizeAssetValue("ip", value); err == nil {
+		return "ip", normalized, true
 	}
-	if net.ParseIP(hostValue) != nil {
-		return "ip", hostValue, true
+	if normalized, err := database.NormalizeAssetValue("domain", value); err == nil {
+		return "domain", normalized, true
 	}
-	parsed, err := url.Parse("http://" + hostValue)
-	if err != nil || parsed.Hostname() == "" || strings.ContainsAny(parsed.Hostname(), " /") {
-		return "", "", false
+	if normalized, err := database.NormalizeAssetValue("port", value); err == nil {
+		return "port", normalized, true
 	}
-	return "domain", strings.ToLower(parsed.Host), true
+	if normalized, err := database.NormalizeAssetValue("host", value); err == nil {
+		return "host", normalized, true
+	}
+	return "", "", false
 }
 
 func batchAssetKey(kind, value string) string {

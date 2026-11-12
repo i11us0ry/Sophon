@@ -54,7 +54,6 @@ const (
 	boundedFindingMaxSegments  = 2
 	boundedFindingMaxToolCalls = 60
 	boundedFindingMaxDuration  = 15 * time.Minute
-	boundedFindingMaxTokens    = 1_000_000
 )
 
 const intentRouterSystemPrompt = `你是 Sophon 的任务意图路由器，只做分类，不执行用户任务。
@@ -460,6 +459,16 @@ func (s *Service) resolveMissionPlan(
 	); handled {
 		return plan
 	}
+	if plan, handled := s.manualRetestRoleMissionPlan(
+		ctx,
+		userID,
+		project,
+		conversation,
+		assets,
+		message,
+	); handled {
+		return plan
+	}
 	message = s.missionMessageWithAttachments(ctx, conversationID, message)
 	plan, latency, err := s.callIntentRouter(
 		ctx,
@@ -536,6 +545,51 @@ func (s *Service) retestButtonMissionPlan(
 		Confidence:         100,
 		Reason:             "漏洞复测按钮已绑定运行中的复测任务和授权目标",
 		Source:             "retest_button",
+		RouterMode:         missionModeRetest,
+	}, true
+}
+
+func (s *Service) manualRetestRoleMissionPlan(
+	ctx context.Context,
+	userID string,
+	project database.Project,
+	conversation database.Conversation,
+	assets []database.Asset,
+	message string,
+) (missionPlan, bool) {
+	if strings.TrimSpace(conversation.Kind) == "retest" ||
+		strings.TrimSpace(conversation.AgentRoleID) != SystemRetestAgentID {
+		return missionPlan{}, false
+	}
+	if s == nil || s.db == nil {
+		return clarifyMissionPlan("漏洞复测服务不可用"), true
+	}
+	candidates := normalizeUniqueStrings(extractMissionVulnerabilityIDs(message))
+	validIDs := make([]string, 0, len(candidates))
+	for _, findingID := range candidates {
+		vulnerability, err := s.db.GetVulnerability(ctx, findingID, userID)
+		if err == nil && vulnerability != nil && vulnerability.ProjectID == project.ID {
+			validIDs = append(validIDs, vulnerability.ID)
+		}
+	}
+	if len(validIDs) == 0 {
+		return clarifyMissionPlan("漏洞复测需要明确提供当前项目中的有效 finding ID"), true
+	}
+	return missionPlan{
+		Mode:               missionModeRetest,
+		Tasks:              []string{missionModeRetest},
+		Stages:             []string{missionPhaseRetest},
+		PentestTargets:     explicitMissionTargets(message, conversation, assets),
+		VulnerabilityIDs:   validIDs,
+		Objective:          "复测用户指定的当前项目漏洞并提交结构化结论",
+		CompletionCriteria: "取得针对性验证证据，并调用 project_retest_finding 写回结论后立即结束",
+		AllowFollowUps:     false,
+		MaxSegments:        boundedFindingMaxSegments,
+		MaxToolCalls:       boundedFindingMaxToolCalls,
+		Bounded:            true,
+		Confidence:         100,
+		Reason:             "当前角色为漏洞复测且消息绑定了当前项目中的有效 finding ID",
+		Source:             "retest_role",
 		RouterMode:         missionModeRetest,
 	}, true
 }

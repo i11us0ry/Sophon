@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { RouterLink } from 'vue-router'
 
 import { apiGet } from '../api/client'
@@ -21,12 +21,56 @@ interface Summary {
   }
   tokens: {
     prompt: number
+    cacheRead?: number
     completion: number
     total: number
     estimated: boolean
   }
   vulnerabilityStatus: Record<string, number>
   vulnerabilitySeverity: Record<string, number>
+}
+
+interface TokenDay {
+  date: string
+  inputTokens: number
+  cacheReadTokens: number
+  outputTokens: number
+}
+
+interface TokenModel {
+  model: string
+  calls: number
+  tasks: number
+  inputTokens: number
+  cacheReadTokens: number
+  outputTokens: number
+}
+
+interface TokenStats {
+  inputTokens: number
+  cacheReadTokens: number
+  outputTokens: number
+  totalTokens: number
+  taskCount: number
+  calls: number
+  estimated: boolean
+  days: number
+  models: TokenModel[]
+  daily: TokenDay[]
+}
+
+interface TokenTooltipBar {
+  date: string
+  input: number
+  cache: number
+  output: number
+  total: number
+}
+
+interface TokenTooltipState {
+  x: number
+  y: number
+  bar: TokenTooltipBar
 }
 
 interface RowDefinition {
@@ -56,12 +100,28 @@ const ASSET_CRITICALITY_ROWS: RowDefinition[] = [
 ]
 
 const summary = ref<Summary | null>(null)
+const tokenStats = ref<TokenStats | null>(null)
+const tokenVersion = ref<'old' | 'new'>('new')
+const tokenDays = ref(30)
+const tokenModel = ref('')
+const tokenSource = ref('token_usage')
+const tokenLoading = ref(false)
+const tokenError = ref('')
+const tokenTooltip = ref<TokenTooltipState | null>(null)
 const loading = ref(false)
 const error = ref('')
 const now = ref(new Date())
 const lastUpdated = ref<Date | null>(null)
 const refreshSeconds = ref(30)
 let clockTimer: number | undefined
+
+const TOKEN_RANGES = [
+  { days: 7, label: 'dashboard.tokenRange7' },
+  { days: 30, label: 'dashboard.tokenRange30' },
+  { days: 90, label: 'dashboard.tokenRange90' },
+  { days: 180, label: 'dashboard.tokenRange180' },
+  { days: 365, label: 'dashboard.tokenRange365' },
+]
 
 const severityRows = computed<DistributionRow[]>(() =>
   buildRows(SEVERITY_ROWS, summary.value?.vulnerabilitySeverity),
@@ -81,6 +141,14 @@ const SEVERITY_COLORS: Record<string, string> = {
   medium: '#ffbc33',
   low: '#03c3ec',
   info: '#8592a3',
+}
+
+const ASSET_COLORS: Record<string, string> = {
+  critical: '#ff8a4c',
+  high: '#ffd166',
+  medium: '#35c8dc',
+  low: '#4fd6a0',
+  info: '#7f91aa',
 }
 
 function countOf(counts: Record<string, number> | undefined, key: string) {
@@ -116,7 +184,7 @@ const assetGradient = computed(() => {
       continue
     }
     const next = cursor + (row.count / total) * 100
-    parts.push(`${SEVERITY_COLORS[row.key] ?? 'var(--text-muted)'} ${cursor}% ${next}%`)
+    parts.push(`${ASSET_COLORS[row.key] ?? 'var(--text-muted)'} ${cursor}% ${next}%`)
     cursor = next
   }
   return parts.length ? `conic-gradient(${parts.join(', ')})` : 'conic-gradient(var(--border) 0 100%)'
@@ -173,8 +241,150 @@ const lastUpdatedText = computed(() =>
     : '-',
 )
 
+const tokenInputUncached = computed(() =>
+  Math.max((tokenStats.value?.inputTokens ?? 0) - (tokenStats.value?.cacheReadTokens ?? 0), 0),
+)
+const tokenCacheRead = computed(() => tokenStats.value?.cacheReadTokens ?? 0)
+const tokenOutput = computed(() => tokenStats.value?.outputTokens ?? 0)
+const tokenTotal = computed(() => tokenStats.value?.totalTokens ?? 0)
+const tokenHitRate = computed(() => {
+  const input = tokenStats.value?.inputTokens ?? 0
+  return input > 0 ? Math.round((tokenCacheRead.value / input) * 100) : 0
+})
+const tokenChartRows = computed(() => {
+  const rows = tokenStats.value?.daily ?? []
+  return rows.map((item) => {
+    const input = Math.max(item.inputTokens - item.cacheReadTokens, 0)
+    const cache = Math.max(item.cacheReadTokens, 0)
+    const output = Math.max(item.outputTokens, 0)
+    return {
+      date: item.date,
+      input,
+      cache,
+      output,
+      total: input + cache + output,
+    }
+  })
+})
+const tokenChartMax = computed(() =>
+  tokenChartRows.value.reduce((maximum, item) => Math.max(maximum, item.total), 0),
+)
+const tokenChartGeometry = computed(() => {
+  const rows = tokenChartRows.value
+  const width = Math.max(720, rows.length * 42)
+  const height = 210
+  const top = 14
+  const bottom = 28
+  const plotHeight = height - top - bottom
+  const step = rows.length > 0 ? width / rows.length : width
+  const barWidth = Math.min(24, Math.max(8, step * 0.54))
+  const maximum = Math.max(tokenChartMax.value, 1)
+  const cellCount = 6
+  const cellGap = 2
+  const cellHeight = plotHeight / cellCount
+  return {
+    width,
+    height,
+    top,
+    bottom,
+    plotHeight,
+    bars: rows.map((item, index) => {
+      const inputHeight = (item.input / maximum) * plotHeight
+      const cacheHeight = (item.cache / maximum) * plotHeight
+      const outputHeight = (item.output / maximum) * plotHeight
+      const x = index * step + (step - barWidth) / 2
+      const inputY = top + plotHeight - inputHeight
+      const outputY = inputY - outputHeight
+      const cacheY = outputY - cacheHeight
+      const shellWidth = barWidth + 10
+      const terminalWidth = Math.max(8, Math.round(barWidth * 0.48))
+      return {
+        ...item,
+        x,
+        barWidth,
+        shellX: x - 5,
+        shellY: top,
+        shellWidth,
+        shellHeight: plotHeight,
+        terminalX: x + (barWidth - terminalWidth) / 2,
+        terminalY: top - 6,
+        terminalWidth,
+        terminalHeight: 6,
+        cells: Array.from({ length: cellCount }, (_, cellIndex) => ({
+          x: x - 3,
+          y: top + cellIndex * cellHeight + cellGap / 2,
+          width: barWidth + 6,
+          height: cellHeight - cellGap,
+        })),
+        cellGaps: Array.from({ length: cellCount - 1 }, (_, cellIndex) => ({
+          x1: x - 4,
+          x2: x + barWidth + 4,
+          y: top + (cellIndex + 1) * cellHeight,
+        })),
+        inputY,
+        inputHeight,
+        outputY,
+        outputHeight,
+        cacheY,
+        cacheHeight,
+      }
+    }),
+  }
+})
+
 function formatNumber(value: number) {
   return value.toLocaleString(locale.value)
+}
+
+function formatTokenCompact(value: number) {
+  if (!Number.isFinite(value) || value <= 0) {
+    return '0'
+  }
+  if (value >= 1_000_000_000) {
+    return `${(value / 1_000_000_000).toFixed(1)}B`
+  }
+  if (value >= 1_000_000) {
+    return `${(value / 1_000_000).toFixed(1)}M`
+  }
+  if (value >= 1_000) {
+    return `${(value / 1_000).toFixed(1)}k`
+  }
+  return String(value)
+}
+
+function tokenModelLabel(model: string) {
+  return model.trim() || t('dashboard.tokenDefaultModel')
+}
+
+function showTokenTooltip(event: MouseEvent | FocusEvent, bar: TokenTooltipBar) {
+  const width = 230
+  const height = 150
+  let x = 0
+  let y = 0
+  if (event instanceof MouseEvent) {
+    x = event.clientX + 14
+    y = event.clientY + 14
+  } else {
+    const rect = (event.currentTarget as SVGGElement | null)?.getBoundingClientRect()
+    x = rect ? rect.right + 10 : 12
+    y = rect ? rect.top - 8 : 12
+  }
+  tokenTooltip.value = {
+    x: Math.min(Math.max(x, 8), Math.max(8, window.innerWidth - width - 8)),
+    y: Math.min(Math.max(y, 8), Math.max(8, window.innerHeight - height - 8)),
+    bar,
+  }
+}
+
+function moveTokenTooltip(event: MouseEvent) {
+  if (!tokenTooltip.value) {
+    return
+  }
+  showTokenTooltip(event, tokenTooltip.value.bar)
+}
+
+function hideTokenTooltip() {
+  tokenTooltip.value = null
 }
 
 function formatBytes(value: number) {
@@ -229,6 +439,7 @@ async function load() {
   error.value = ''
   try {
     summary.value = await apiGet<Summary>('/dashboard/summary')
+    await loadTokenStats()
   } catch (err) {
     error.value = err instanceof Error ? err.message : '读取仪表盘数据失败'
   } finally {
@@ -238,6 +449,35 @@ async function load() {
     refreshSeconds.value = 30
   }
 }
+
+async function loadTokenStats() {
+  tokenLoading.value = true
+  tokenError.value = ''
+  try {
+    const query = new URLSearchParams({
+      days: String(tokenDays.value),
+      version: tokenVersion.value,
+    })
+    if (tokenModel.value) {
+      query.set('model', tokenModel.value)
+    }
+    const response = await apiGet<{
+      version: string
+      source: string
+      stats: TokenStats
+    }>(`/dashboard/tokens?${query.toString()}`)
+    tokenStats.value = response.stats
+    tokenSource.value = response.source
+  } catch (err) {
+    tokenError.value = err instanceof Error ? err.message : t('dashboard.tokenLoadFailed')
+  } finally {
+    tokenLoading.value = false
+  }
+}
+
+watch([tokenVersion, tokenDays, tokenModel], () => {
+  void loadTokenStats()
+})
 
 onMounted(() => {
   now.value = new Date()
@@ -572,6 +812,246 @@ onUnmounted(() => {
       </div>
     </section>
 
+    <section v-if="summary" class="factory-stage token-stage">
+      <header class="stage-rail">
+        <span class="stage-index">04</span>
+        <span class="stage-title">LLM TOKEN</span>
+        <span class="stage-meta">{{ tokenSource.toUpperCase() }}</span>
+      </header>
+
+      <article class="token-console" :class="{ loading: tokenLoading }">
+        <header class="token-console-head">
+          <div class="token-title">
+            <span class="token-bolt" aria-hidden="true">ϟ</span>
+            <div>
+              <h2>{{ t('dashboard.tokenTitle') }}</h2>
+              <small>{{ tokenSource }}</small>
+            </div>
+          </div>
+          <div class="token-segments" :aria-label="t('dashboard.tokenVersion')">
+            <button
+              type="button"
+              :class="{ active: tokenVersion === 'old' }"
+              @click="tokenVersion = 'old'"
+            >
+              {{ t('dashboard.tokenVersionOld') }}
+            </button>
+            <button
+              type="button"
+              :class="{ active: tokenVersion === 'new' }"
+              @click="tokenVersion = 'new'"
+            >
+              {{ t('dashboard.tokenVersionNew') }}
+            </button>
+          </div>
+          <div class="token-models" :aria-label="t('dashboard.tokenModel')">
+            <button
+              type="button"
+              :class="{ active: tokenModel === '' }"
+              @click="tokenModel = ''"
+            >
+              {{ t('dashboard.tokenAllModels') }}
+            </button>
+            <button
+              v-for="model in tokenStats?.models ?? []"
+              :key="model.model || '__default__'"
+              type="button"
+              :class="{ active: tokenModel === (model.model || '__default__') }"
+              @click="tokenModel = model.model || '__default__'"
+            >
+              {{ tokenModelLabel(model.model) }}
+              <small v-if="model.model === ''">{{ t('dashboard.tokenDefaultBadge') }}</small>
+            </button>
+          </div>
+        </header>
+
+        <p v-if="tokenError" class="token-error">{{ tokenError }}</p>
+
+        <div class="token-layout">
+          <section class="token-metrics">
+            <div class="token-total">
+              <small>{{ t('dashboard.tokenTotal') }}</small>
+              <strong>{{ formatTokenCompact(tokenTotal) }}</strong>
+              <span>{{ t('dashboard.tokenTasks', { count: tokenStats?.taskCount ?? 0 }) }}</span>
+            </div>
+
+            <div class="token-metric-list">
+              <div class="token-metric input">
+                <header>
+                  <span>{{ t('dashboard.tokenUncachedInput') }}</span>
+                  <strong>{{ formatTokenCompact(tokenInputUncached) }}</strong>
+                </header>
+                <i :style="{ width: `${tokenTotal > 0 ? (tokenInputUncached / tokenTotal) * 100 : 0}%` }"></i>
+              </div>
+              <div class="token-metric cache">
+                <header>
+                  <span>{{ t('dashboard.tokenCacheHit') }}</span>
+                  <strong>{{ formatTokenCompact(tokenCacheRead) }}</strong>
+                </header>
+                <i :style="{ width: `${tokenTotal > 0 ? (tokenCacheRead / tokenTotal) * 100 : 0}%` }"></i>
+              </div>
+              <div class="token-metric output">
+                <header>
+                  <span>{{ t('dashboard.tokenOutput') }}</span>
+                  <strong>{{ formatTokenCompact(tokenOutput) }}</strong>
+                </header>
+                <i :style="{ width: `${tokenTotal > 0 ? (tokenOutput / tokenTotal) * 100 : 0}%` }"></i>
+              </div>
+            </div>
+
+            <div class="token-hit-rate">
+              <span>{{ t('dashboard.tokenCacheRate') }}</span>
+              <strong>{{ tokenHitRate }}%</strong>
+            </div>
+            <span v-if="tokenStats?.estimated" class="token-estimated">
+              {{ t('dashboard.estimated') }}
+            </span>
+          </section>
+
+          <section class="token-chart-panel">
+            <header>
+              <div class="token-legend">
+                <span class="input"><i></i>{{ t('dashboard.tokenInput') }}</span>
+                <span class="output"><i></i>{{ t('dashboard.tokenOutput') }}</span>
+                <span class="cache"><i></i>{{ t('dashboard.tokenCacheRead') }}</span>
+              </div>
+              <div class="token-ranges">
+                <button
+                  v-for="range in TOKEN_RANGES"
+                  :key="range.days"
+                  type="button"
+                  :class="{ active: tokenDays === range.days }"
+                  @click="tokenDays = range.days"
+                >
+                  {{ t(range.label) }}
+                </button>
+              </div>
+            </header>
+
+            <div v-if="tokenChartRows.length === 0" class="token-chart-empty">
+              {{ t('dashboard.tokenNoData') }}
+            </div>
+            <div v-else class="token-chart-scroll">
+              <svg
+                class="token-chart"
+                :viewBox="`0 0 ${tokenChartGeometry.width} ${tokenChartGeometry.height}`"
+                role="img"
+                :aria-label="t('dashboard.tokenChartLabel')"
+              >
+                <line
+                  v-for="line in 4"
+                  :key="line"
+                  class="token-grid-line"
+                  x1="0"
+                  :x2="tokenChartGeometry.width"
+                  :y1="tokenChartGeometry.top + (tokenChartGeometry.plotHeight / 4) * (line - 1)"
+                  :y2="tokenChartGeometry.top + (tokenChartGeometry.plotHeight / 4) * (line - 1)"
+                />
+                <g
+                  v-for="(bar, index) in tokenChartGeometry.bars"
+                  :key="bar.date"
+                  tabindex="0"
+                  role="img"
+                  class="token-battery"
+                  :class="{ full: tokenChartMax > 0 && bar.total === tokenChartMax }"
+                  :aria-label="`${bar.date} ${t('dashboard.tokenTotal')} ${formatNumber(bar.total)}`"
+                  @mouseenter="showTokenTooltip($event, bar)"
+                  @mousemove="moveTokenTooltip"
+                  @mouseleave="hideTokenTooltip"
+                  @focus="showTokenTooltip($event, bar)"
+                  @blur="hideTokenTooltip"
+                >
+                  <rect
+                    class="token-battery-shell"
+                    :x="bar.shellX"
+                    :y="bar.shellY"
+                    :width="bar.shellWidth"
+                    :height="bar.shellHeight"
+                    rx="4"
+                  />
+                  <rect
+                    class="token-battery-terminal"
+                    :x="bar.terminalX"
+                    :y="bar.terminalY"
+                    :width="bar.terminalWidth"
+                    :height="bar.terminalHeight"
+                    rx="2"
+                  />
+                  <rect
+                    v-for="(cell, cellIndex) in bar.cells"
+                    :key="`cell-${cellIndex}`"
+                    class="token-battery-cell"
+                    :x="cell.x"
+                    :y="cell.y"
+                    :width="cell.width"
+                    :height="cell.height"
+                    rx="1.5"
+                  />
+                  <rect
+                    class="token-bar input"
+                    :x="bar.x"
+                    :y="bar.inputY"
+                    :width="bar.barWidth"
+                    :height="bar.inputHeight"
+                    rx="1"
+                  />
+                  <rect
+                    class="token-bar output"
+                    :x="bar.x"
+                    :y="bar.outputY"
+                    :width="bar.barWidth"
+                    :height="bar.outputHeight"
+                    rx="1"
+                  />
+                  <rect
+                    class="token-bar cache"
+                    :x="bar.x"
+                    :y="bar.cacheY"
+                    :width="bar.barWidth"
+                    :height="bar.cacheHeight"
+                    rx="1"
+                  />
+                  <line
+                    v-for="(gap, gapIndex) in bar.cellGaps"
+                    :key="`gap-${gapIndex}`"
+                    class="token-battery-gap"
+                    :x1="gap.x1"
+                    :x2="gap.x2"
+                    :y1="gap.y"
+                    :y2="gap.y"
+                  />
+                  <text
+                    v-if="tokenChartRows.length <= 14 || index % Math.ceil(tokenChartRows.length / 8) === 0"
+                    class="token-axis-label"
+                    :x="bar.x + bar.barWidth / 2"
+                    :y="tokenChartGeometry.height - 7"
+                    text-anchor="middle"
+                  >
+                    {{ bar.date.slice(5) }}
+                  </text>
+                </g>
+              </svg>
+            </div>
+          </section>
+        </div>
+      </article>
+
+      <div
+        v-if="tokenTooltip"
+        class="token-chart-tooltip"
+        role="tooltip"
+        :style="{ left: `${tokenTooltip.x}px`, top: `${tokenTooltip.y}px` }"
+      >
+        <strong>{{ tokenTooltip.bar.date }}</strong>
+        <dl>
+          <div><dt>{{ t('dashboard.tokenInput') }}</dt><dd>{{ formatNumber(tokenTooltip.bar.input) }}</dd></div>
+          <div><dt>{{ t('dashboard.tokenCacheRead') }}</dt><dd>{{ formatNumber(tokenTooltip.bar.cache) }}</dd></div>
+          <div><dt>{{ t('dashboard.tokenOutput') }}</dt><dd>{{ formatNumber(tokenTooltip.bar.output) }}</dd></div>
+          <div class="total"><dt>{{ t('dashboard.tokenTotal') }}</dt><dd>{{ formatNumber(tokenTooltip.bar.total) }}</dd></div>
+        </dl>
+      </div>
+    </section>
+
     <footer v-if="summary" class="screen-footer">
       <span><i class="footer-dot"></i>{{ t('dashboard.dataSource') }}</span>
       <span>{{ t('dashboard.lastUpdated') }} {{ lastUpdatedText }}</span>
@@ -895,6 +1375,56 @@ onUnmounted(() => {
   --tone-to: #6e7681;
 }
 
+.asset-overview .bar-critical {
+  --tone-from: #ff8a4c;
+  --tone-to: #ff8a4c;
+}
+
+.asset-overview .bar-high {
+  --tone-from: #ffd166;
+  --tone-to: #ffd166;
+}
+
+.asset-overview .bar-medium {
+  --tone-from: #35c8dc;
+  --tone-to: #35c8dc;
+}
+
+.asset-overview .bar-low {
+  --tone-from: #4fd6a0;
+  --tone-to: #4fd6a0;
+}
+
+.asset-overview .bar-info {
+  --tone-from: #7f91aa;
+  --tone-to: #7f91aa;
+}
+
+.severity-panel .bar-critical {
+  --tone-from: #ff3e1d;
+  --tone-to: #ff3e1d;
+}
+
+.severity-panel .bar-high {
+  --tone-from: #ffab00;
+  --tone-to: #ffab00;
+}
+
+.severity-panel .bar-medium {
+  --tone-from: #ffbc33;
+  --tone-to: #ffbc33;
+}
+
+.severity-panel .bar-low {
+  --tone-from: #03c3ec;
+  --tone-to: #03c3ec;
+}
+
+.severity-panel .bar-info {
+  --tone-from: #8592a3;
+  --tone-to: #8592a3;
+}
+
 @media (max-width: 520px) {
   .dist-list li {
     grid-template-columns: 8px minmax(48px, auto) minmax(0, 1fr) 34px;
@@ -1163,14 +1693,16 @@ onUnmounted(() => {
 }
 
 .screen-panel {
+  --panel-accent: var(--stage-output);
+  --panel-mark: 'S';
   position: relative;
   min-width: 0;
   padding: 34px 18px 22px;
-  border: 1px solid color-mix(in srgb, var(--success) 16%, var(--border));
+  border: 1px solid color-mix(in srgb, var(--panel-accent) 20%, var(--border));
   border-radius: 8px;
   background: var(--surface);
   box-shadow:
-    inset 0 1px 0 color-mix(in srgb, var(--success) 18%, transparent),
+    inset 0 1px 0 color-mix(in srgb, var(--panel-accent) 18%, transparent),
     0 8px 22px rgba(20, 20, 29, 0.2);
 }
 
@@ -1178,7 +1710,7 @@ onUnmounted(() => {
   position: absolute;
   top: 12px;
   left: 18px;
-  color: color-mix(in srgb, var(--success) 72%, var(--text-muted));
+  color: color-mix(in srgb, var(--panel-accent) 72%, var(--text-muted));
   font-family: var(--mono);
   font-size: 8px;
   font-weight: 600;
@@ -1195,7 +1727,7 @@ onUnmounted(() => {
   content: '';
   background-image: repeating-linear-gradient(
     90deg,
-    color-mix(in srgb, var(--success) 55%, transparent) 0 7px,
+    color-mix(in srgb, var(--panel-accent) 55%, transparent) 0 7px,
     transparent 7px 11px
   );
   opacity: 0.38;
@@ -1205,6 +1737,21 @@ onUnmounted(() => {
 .severity-panel,
 .system-overview {
   grid-column: span 4;
+}
+
+.asset-overview {
+  --panel-accent: #35c8dc;
+  --panel-mark: 'A';
+}
+
+.severity-panel {
+  --panel-accent: #ff6b4a;
+  --panel-mark: '!';
+}
+
+.system-overview {
+  --panel-accent: #7f91aa;
+  --panel-mark: 'S';
 }
 
 .screen-panel-header {
@@ -1229,11 +1776,11 @@ onUnmounted(() => {
   height: 16px;
   flex: 0 0 auto;
   place-items: center;
-  content: '✓';
-  border: 1px solid color-mix(in srgb, var(--success) 52%, var(--border));
+  content: var(--panel-mark);
+  border: 1px solid color-mix(in srgb, var(--panel-accent) 52%, var(--border));
   border-radius: 4px;
-  color: var(--success);
-  background: color-mix(in srgb, var(--success) 10%, transparent);
+  color: var(--panel-accent);
+  background: color-mix(in srgb, var(--panel-accent) 10%, transparent);
   font-family: var(--mono);
   font-size: 9px;
   font-weight: 700;
@@ -1259,6 +1806,7 @@ onUnmounted(() => {
 .asset-ring {
   width: 138px;
   height: 138px;
+  box-shadow: 0 0 24px color-mix(in srgb, #35c8dc 10%, transparent);
 }
 
 .asset-ring-core,
@@ -1298,7 +1846,7 @@ onUnmounted(() => {
   display: grid;
   gap: 3px;
   padding: 9px 10px;
-  border-left: 3px solid var(--accent);
+  border-left: 3px solid var(--panel-accent);
   background: var(--surface-soft);
 }
 
@@ -1317,6 +1865,16 @@ onUnmounted(() => {
   margin: 10px 0 0;
   color: var(--text-muted);
   font-size: 11px;
+}
+
+.asset-overview .panel-total {
+  border-color: color-mix(in srgb, #35c8dc 34%, var(--border));
+  color: #35c8dc;
+}
+
+.severity-panel .panel-total {
+  border-color: color-mix(in srgb, #ff6b4a 34%, var(--border));
+  color: #ff6b4a;
 }
 
 .system-gauges {
@@ -1391,10 +1949,10 @@ onUnmounted(() => {
   gap: 22px;
   margin-bottom: 18px;
   padding: 14px;
-  border: 1px solid var(--border);
+  border: 1px solid color-mix(in srgb, #ff6b4a 22%, var(--border));
   border-radius: var(--radius);
-  background: var(--surface-soft);
-  box-shadow: inset 0 0 0 1px var(--border);
+  background: color-mix(in srgb, #ff6b4a 4%, var(--surface-soft));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, #ff6b4a 12%, var(--border));
 }
 
 .severity-donut {
@@ -1404,6 +1962,7 @@ onUnmounted(() => {
   flex: 0 0 auto;
   place-items: center;
   border-radius: 50%;
+  box-shadow: 0 0 24px color-mix(in srgb, #ff6b4a 10%, transparent);
 }
 
 .severity-donut-core {
@@ -2503,13 +3062,13 @@ onUnmounted(() => {
 .screen-panel {
   min-height: 330px;
   padding: 35px 16px 22px;
-  border: 1px solid color-mix(in srgb, var(--stage-output) 22%, var(--border));
+  border: 1px solid color-mix(in srgb, var(--panel-accent) 26%, var(--border));
   border-radius: 5px;
   background:
-    linear-gradient(180deg, color-mix(in srgb, var(--stage-output) 5%, transparent), transparent 22%),
+    linear-gradient(180deg, color-mix(in srgb, var(--panel-accent) 6%, transparent), transparent 22%),
     var(--factory-panel);
   box-shadow:
-    inset 0 1px 0 color-mix(in srgb, var(--stage-output) 16%, transparent),
+    inset 0 1px 0 color-mix(in srgb, var(--panel-accent) 16%, transparent),
     0 7px 20px rgba(0, 0, 0, 0.18);
   transition:
     border-color 0.15s ease,
@@ -2517,16 +3076,16 @@ onUnmounted(() => {
 }
 
 .screen-panel:hover {
-  border-color: color-mix(in srgb, var(--stage-output) 42%, var(--border));
+  border-color: color-mix(in srgb, var(--panel-accent) 46%, var(--border));
   box-shadow:
-    inset 0 1px 0 color-mix(in srgb, var(--stage-output) 20%, transparent),
+    inset 0 1px 0 color-mix(in srgb, var(--panel-accent) 20%, transparent),
     0 10px 24px rgba(0, 0, 0, 0.22);
 }
 
 .screen-panel::before {
   top: 12px;
   left: 16px;
-  color: color-mix(in srgb, var(--stage-output) 78%, var(--text-muted));
+  color: color-mix(in srgb, var(--panel-accent) 78%, var(--text-muted));
   font-size: 7px;
 }
 
@@ -2536,7 +3095,7 @@ onUnmounted(() => {
   left: 16px;
   background-image: repeating-linear-gradient(
     90deg,
-    color-mix(in srgb, var(--stage-output) 54%, transparent) 0 7px,
+    color-mix(in srgb, var(--panel-accent) 54%, transparent) 0 7px,
     transparent 7px 12px
   );
 }
@@ -2557,6 +3116,434 @@ onUnmounted(() => {
 .screen-footer {
   padding: 8px 4px 0;
   border-top: 1px solid color-mix(in srgb, var(--border) 72%, transparent);
+}
+
+.token-stage {
+  --stage-color: #4fd1c5;
+}
+
+.token-console {
+  min-width: 0;
+  padding: 16px;
+  border: 1px solid color-mix(in srgb, #4fd1c5 28%, var(--border));
+  border-radius: var(--radius);
+  background:
+    linear-gradient(90deg, color-mix(in srgb, #4fd1c5 4%, transparent), transparent 36%),
+    var(--surface);
+  transition: opacity 0.2s ease;
+}
+
+.token-console.loading {
+  opacity: 0.68;
+}
+
+.token-console-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 16px;
+  margin-bottom: 16px;
+}
+
+.token-title {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 180px;
+}
+
+.token-title h2 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.token-title small {
+  color: var(--text-muted);
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 9px;
+}
+
+.token-bolt {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid color-mix(in srgb, #4fd1c5 46%, var(--border));
+  border-radius: 50%;
+  color: #4fd1c5;
+  font-size: 19px;
+}
+
+.token-segments,
+.token-ranges {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--field-bg);
+}
+
+.token-segments button,
+.token-ranges button,
+.token-models button {
+  border: 0;
+  color: var(--text-muted);
+  background: transparent;
+  cursor: pointer;
+}
+
+.token-segments button {
+  padding: 4px 8px;
+  border-radius: 2px;
+  font-size: 10px;
+}
+
+.token-segments button.active {
+  color: var(--text-primary);
+  background: var(--surface-soft);
+}
+
+.token-models {
+  display: flex;
+  flex: 1;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 4px;
+  min-width: 180px;
+}
+
+.token-models button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  font-size: 10px;
+}
+
+.token-models button:hover,
+.token-models button.active {
+  border-color: color-mix(in srgb, #4fd1c5 34%, var(--border));
+  color: var(--text-primary);
+  background: color-mix(in srgb, #4fd1c5 9%, var(--surface-soft));
+}
+
+.token-models button small {
+  color: #4fd1c5;
+  font-size: 8px;
+}
+
+.token-error {
+  margin: 0 0 12px;
+  color: var(--danger);
+  font-size: 11px;
+}
+
+.token-layout {
+  display: grid;
+  grid-template-columns: minmax(220px, 270px) minmax(0, 1fr);
+  gap: 24px;
+  align-items: stretch;
+}
+
+.token-metrics {
+  display: flex;
+  flex-direction: column;
+  gap: 15px;
+  min-width: 0;
+}
+
+.token-total > small {
+  display: block;
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.token-total > strong {
+  display: block;
+  margin-top: 2px;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: clamp(28px, 3vw, 40px);
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: 0;
+}
+
+.token-total > span {
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.token-metric-list {
+  display: grid;
+  gap: 11px;
+}
+
+.token-metric header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 4px;
+  font-size: 10px;
+}
+
+.token-metric header span {
+  color: var(--text-muted);
+}
+
+.token-metric header strong {
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 11px;
+}
+
+.token-metric > i {
+  display: block;
+  min-width: 0;
+  height: 4px;
+  border-radius: 2px;
+}
+
+.token-metric.input > i {
+  background: #4ea1ff;
+}
+
+.token-metric.cache > i {
+  background: #45d6a4;
+}
+
+.token-metric.output > i {
+  background: #a78bfa;
+}
+
+.token-hit-rate {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.token-hit-rate strong {
+  color: #45d6a4;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 14px;
+}
+
+.token-estimated {
+  width: fit-content;
+  padding: 2px 6px;
+  border: 1px solid color-mix(in srgb, var(--warning) 35%, var(--border));
+  border-radius: 3px;
+  color: var(--warning);
+  font-size: 9px;
+}
+
+.token-chart-panel {
+  min-width: 0;
+  padding-left: 20px;
+  border-left: 1px solid var(--border);
+}
+
+.token-chart-panel > header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+  margin-bottom: 10px;
+}
+
+.token-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  color: var(--text-muted);
+  font-size: 9px;
+}
+
+.token-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.token-legend i {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+}
+
+.token-legend .input i {
+  background: #4ea1ff;
+}
+
+.token-legend .output i {
+  background: #a78bfa;
+}
+
+.token-legend .cache i {
+  background: #45d6a4;
+}
+
+.token-ranges button {
+  padding: 3px 7px;
+  border-radius: 2px;
+  font-size: 9px;
+}
+
+.token-ranges button.active {
+  color: var(--text-primary);
+  background: var(--surface-soft);
+}
+
+.token-chart-scroll {
+  min-width: 0;
+  overflow-x: auto;
+}
+
+.token-chart {
+  display: block;
+  width: 100%;
+  min-width: 640px;
+  height: 210px;
+}
+
+.token-grid-line {
+  stroke: color-mix(in srgb, var(--border) 72%, transparent);
+  stroke-dasharray: 3 5;
+  stroke-width: 1;
+}
+
+.token-battery-shell {
+  fill: color-mix(in srgb, var(--field-bg) 80%, transparent);
+  stroke: color-mix(in srgb, var(--text-muted) 28%, var(--border));
+  stroke-width: 1.2;
+}
+
+.token-battery-terminal {
+  fill: color-mix(in srgb, var(--text-muted) 45%, var(--border));
+}
+
+.token-battery-cell {
+  fill: color-mix(in srgb, var(--field-bg) 72%, transparent);
+  stroke: color-mix(in srgb, var(--text-muted) 18%, var(--border));
+  stroke-width: 0.7;
+}
+
+.token-battery-gap {
+  stroke: var(--surface);
+  stroke-linecap: butt;
+  stroke-width: 2;
+}
+
+.token-battery.full .token-battery-shell {
+  stroke: #45d6a4;
+  filter: drop-shadow(0 0 4px color-mix(in srgb, #45d6a4 40%, transparent));
+}
+
+.token-battery.full .token-battery-terminal {
+  fill: #45d6a4;
+}
+
+.token-bar.input {
+  fill: #4ea1ff;
+}
+
+.token-bar.output {
+  fill: #a78bfa;
+}
+
+.token-bar.cache {
+  fill: #45d6a4;
+}
+
+.token-axis-label {
+  fill: var(--text-muted);
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 8px;
+}
+
+.token-chart g {
+  outline: none;
+}
+
+.token-chart g:focus-visible .token-bar {
+  filter: brightness(1.2);
+  stroke: var(--text-primary);
+  stroke-width: 1;
+}
+
+.token-chart-tooltip {
+  position: fixed;
+  z-index: 1200;
+  width: 230px;
+  padding: 10px 11px;
+  border: 1px solid color-mix(in srgb, #4fd1c5 38%, var(--border));
+  border-radius: 4px;
+  color: var(--text-primary);
+  background: color-mix(in srgb, var(--surface) 96%, transparent);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+  pointer-events: none;
+}
+
+.token-chart-tooltip > strong {
+  display: block;
+  margin-bottom: 7px;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 10px;
+}
+
+.token-chart-tooltip dl {
+  display: grid;
+  gap: 5px;
+  margin: 0;
+}
+
+.token-chart-tooltip dl > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.token-chart-tooltip dt,
+.token-chart-tooltip dd {
+  margin: 0;
+}
+
+.token-chart-tooltip dd {
+  color: var(--text-primary);
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+.token-chart-tooltip .total {
+  padding-top: 5px;
+  border-top: 1px solid var(--border);
+  color: var(--text-secondary);
+}
+
+.token-chart-tooltip .total dd {
+  color: #4fd1c5;
+  font-weight: 700;
+}
+
+.token-chart-empty {
+  display: grid;
+  place-items: center;
+  min-height: 210px;
+  border: 1px dashed var(--border);
+  border-radius: 3px;
+  color: var(--text-muted);
+  font-size: 11px;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -2598,6 +3585,17 @@ onUnmounted(() => {
 
   .system-overview {
     grid-column: span 2;
+  }
+
+  .token-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .token-chart-panel {
+    padding-top: 16px;
+    padding-left: 0;
+    border-top: 1px solid var(--border);
+    border-left: 0;
   }
 }
 
@@ -2754,6 +3752,19 @@ onUnmounted(() => {
   .kpi-grid,
   .command-band {
     grid-template-columns: 1fr;
+  }
+
+  .token-console {
+    padding: 12px;
+  }
+
+  .token-models {
+    flex-basis: 100%;
+    justify-content: flex-start;
+  }
+
+  .token-chart {
+    min-width: 560px;
   }
 
   .kpi-card {

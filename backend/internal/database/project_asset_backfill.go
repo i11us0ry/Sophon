@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"fmt"
 	"net"
-	"net/url"
 	"strings"
 	"time"
 )
@@ -342,6 +341,10 @@ func ensureProjectAsset(
 
 	now := time.Now().UTC()
 	assetID := newID()
+	kind := inferAssetKind(value)
+	if kind == "" {
+		return "", nil
+	}
 	if _, err := tx.ExecContext(
 		ctx,
 		`INSERT INTO assets (
@@ -352,7 +355,7 @@ func ensureProjectAsset(
 		projectID,
 		ownerUserID,
 		value,
-		inferAssetKind(value),
+		kind,
 		value,
 		riskScore,
 		now.Unix(),
@@ -365,30 +368,23 @@ func ensureProjectAsset(
 
 func inferAssetKind(value string) string {
 	value = strings.TrimSpace(value)
-	lower := strings.ToLower(value)
-	if _, _, err := net.ParseCIDR(value); err == nil {
-		return "cidr"
-	}
-	if strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://") {
+	if _, err := NormalizeAssetValue("url", value); err == nil {
 		return "url"
 	}
-	if host, _, err := net.SplitHostPort(value); err == nil {
-		if net.ParseIP(strings.Trim(host, "[]")) != nil {
-			return "ip"
-		}
-		return "domain"
-	}
-	if net.ParseIP(strings.Trim(value, "[]")) != nil {
+	if _, err := NormalizeAssetValue("ip", value); err == nil {
 		return "ip"
 	}
-	if parsed, err := url.Parse(value); err == nil && parsed.Hostname() != "" {
-		if net.ParseIP(parsed.Hostname()) != nil {
-			return "ip"
-		}
+	if _, err := NormalizeAssetValue("domain", value); err == nil {
 		return "domain"
 	}
-	if strings.Contains(value, ".") && !strings.ContainsAny(value, " /\\") {
-		return "domain"
+	if _, err := NormalizeAssetValue("port", value); err == nil {
+		return "port"
 	}
-	return "other"
+	if _, _, err := net.ParseCIDR(value); err == nil {
+		return "host"
+	}
+	if host, err := NormalizeAssetValue("host", value); err == nil && !strings.Contains(host, ".") {
+		return "host"
+	}
+	return ""
 }

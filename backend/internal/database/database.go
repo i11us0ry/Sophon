@@ -768,6 +768,7 @@ func (db *DB) migrate(ctx context.Context) error {
 			user_id TEXT NOT NULL,
 			message_id TEXT NOT NULL DEFAULT '',
 			prompt_tokens INTEGER NOT NULL DEFAULT 0,
+			cache_read_tokens INTEGER NOT NULL DEFAULT 0,
 			completion_tokens INTEGER NOT NULL DEFAULT 0,
 			total_tokens INTEGER NOT NULL DEFAULT 0,
 			estimated INTEGER NOT NULL DEFAULT 0,
@@ -1088,9 +1089,10 @@ func (db *DB) migrate(ctx context.Context) error {
 		}
 	}
 	tokenUsageColumns := map[string]string{
-		"project_id": "ALTER TABLE token_usage ADD COLUMN project_id TEXT NOT NULL DEFAULT ''",
-		"kind":       "ALTER TABLE token_usage ADD COLUMN kind TEXT NOT NULL DEFAULT 'chat'",
-		"model":      "ALTER TABLE token_usage ADD COLUMN model TEXT NOT NULL DEFAULT ''",
+		"project_id":        "ALTER TABLE token_usage ADD COLUMN project_id TEXT NOT NULL DEFAULT ''",
+		"kind":              "ALTER TABLE token_usage ADD COLUMN kind TEXT NOT NULL DEFAULT 'chat'",
+		"model":             "ALTER TABLE token_usage ADD COLUMN model TEXT NOT NULL DEFAULT ''",
+		"cache_read_tokens": "ALTER TABLE token_usage ADD COLUMN cache_read_tokens INTEGER NOT NULL DEFAULT 0",
 	}
 	for column, statement := range tokenUsageColumns {
 		if err := db.ensureColumn(ctx, "token_usage", column, statement); err != nil {

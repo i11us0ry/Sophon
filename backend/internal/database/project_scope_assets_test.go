@@ -87,7 +87,7 @@ func TestSyncProjectScopeAssetsIsIdempotent(t *testing.T) {
 	if kinds["*.example.com"] != "domain" {
 		t.Fatalf("通配域名类型错误: %#v", kinds)
 	}
-	if kinds["10.0.0.0/24"] != "cidr" {
+	if kinds["10.0.0.0/24"] != "host" {
 		t.Fatalf("CIDR 类型错误: %#v", kinds)
 	}
 	if kinds["203.0.113.10"] != "ip" {

@@ -284,6 +284,7 @@ func (s *Service) compactConversation(
 			ConversationID:   conversationID,
 			UserID:           userID,
 			PromptTokens:     result.PromptTokens,
+			CacheReadTokens:  result.CacheReadTokens,
 			CompletionTokens: result.CompletionTokens,
 			TotalTokens:      result.TotalTokens,
 			Estimated:        result.Estimated,

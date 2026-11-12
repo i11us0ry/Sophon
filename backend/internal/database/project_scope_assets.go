@@ -154,6 +154,11 @@ func (db *DB) SyncProjectScopeAssets(
 		if name == "" {
 			name = item.Value
 		}
+		kind := inferAssetKind(item.Value)
+		if kind == "" {
+			result.Skipped++
+			continue
+		}
 		if _, err := tx.ExecContext(
 			ctx,
 			`INSERT INTO assets (
@@ -164,7 +169,7 @@ func (db *DB) SyncProjectScopeAssets(
 			projectID,
 			ownerUserID,
 			name,
-			inferAssetKind(item.Value),
+			kind,
 			item.Value,
 			now.Unix(),
 			now.Unix(),
@@ -248,29 +253,6 @@ func isHostnameCandidate(value string) bool {
 	if _, _, err := net.ParseCIDR(value); err == nil {
 		return false
 	}
-	if strings.HasPrefix(value, "*.") {
-		value = strings.TrimPrefix(value, "*.")
-	}
-	if value == "localhost" || len(value) > 253 || !strings.Contains(value, ".") {
-		return false
-	}
-	for _, label := range strings.Split(value, ".") {
-		if label == "" || len(label) > 63 {
-			return false
-		}
-		hasAlphaNumeric := false
-		for _, char := range label {
-			if (char >= 'a' && char <= 'z') || (char >= '0' && char <= '9') {
-				hasAlphaNumeric = true
-				break
-			}
-		}
-		if !hasAlphaNumeric {
-			return false
-		}
-		if strings.HasPrefix(label, "-") || strings.HasSuffix(label, "-") {
-			return false
-		}
-	}
-	return true
+	_, err := NormalizeAssetValue("domain", value)
+	return err == nil
 }

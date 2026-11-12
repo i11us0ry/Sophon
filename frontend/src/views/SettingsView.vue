@@ -912,6 +912,28 @@ onMounted(async () => {
           />
         </label>
         <label class="field">
+          <span>{{ t('settings.maxIterations') }}</span>
+          <input
+            v-model.number="form.maxIterations"
+            type="number"
+            min="1"
+            max="1000"
+            :disabled="locked('agent.maxIterations') || !writable"
+          />
+          <small class="field-hint">{{ t('settings.maxIterationsHint') }}</small>
+        </label>
+        <label class="field">
+          <span>{{ t('settings.maxTurnTokens') }}</span>
+          <input
+            v-model.number="form.maxTurnTokens"
+            type="number"
+            min="0"
+            max="20000000"
+            :disabled="locked('agent.maxTurnTokens') || !writable"
+          />
+          <small class="field-hint">{{ t('settings.maxTurnTokensHint') }}</small>
+        </label>
+        <label class="field">
           <span>{{ t('settings.maxHypotheses') }}</span>
           <input
             v-model.number="form.maxHypotheses"

@@ -4,8 +4,11 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cloudwego/eino/adk"
+
+	"sophon/internal/database"
 )
 
 func TestIsMaxIterationsError(t *testing.T) {
@@ -64,5 +67,72 @@ func TestMaxIterationsResult(t *testing.T) {
 	empty := maxIterationsResult(&runCapture{}, 40)
 	if !strings.Contains(empty, "最大迭代轮数") {
 		t.Fatalf("空结果应返回迭代提示: %s", empty)
+	}
+}
+
+func TestFinalizeRetestAtIterationLimit(t *testing.T) {
+	service, ctx := openProjectToolService(t, true)
+	now := time.Now().UTC()
+	if err := service.db.CreateVulnerability(ctx, database.Vulnerability{
+		ID:          "finding-iteration-limit",
+		ProjectID:   "project-tools",
+		OwnerUserID: "user-1",
+		Title:       "有界复测",
+		Severity:    "high",
+		Status:      "open",
+		Target:      "http://10.8.0.61/FileService.svc",
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}); err != nil {
+		t.Fatalf("创建漏洞失败: %v", err)
+	}
+	run, err := service.db.CreateVulnerabilityRetestRun(
+		ctx,
+		"finding-iteration-limit",
+		"user-1",
+		"conv-tools",
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("创建复测任务失败: %v", err)
+	}
+	plan := missionPlan{
+		Mode:             missionModeRetest,
+		VulnerabilityIDs: []string{"finding-iteration-limit"},
+		RetestIDs:        []string{run.ID},
+		Bounded:          true,
+	}
+	withWriteback := &runCapture{}
+	withWriteback.recordToolCall("write", "project_retest_finding")
+	withWriteback.recordToolResult("write")
+	if terminal, _ := service.finalizeRetestAtIterationLimit(
+		ctx,
+		"conv-tools",
+		"project-tools",
+		"user-1",
+		plan,
+		withWriteback,
+		maxSegmentIterations,
+	); terminal {
+		t.Fatal("已经写回复测结果时不应重复自动写回")
+	}
+	terminal, reason := service.finalizeRetestAtIterationLimit(
+		ctx,
+		"conv-tools",
+		"project-tools",
+		"user-1",
+		plan,
+		&runCapture{},
+		maxSegmentIterations,
+	)
+	if !terminal || !strings.Contains(reason, "24") {
+		t.Fatalf("达到迭代上限应自动写回 insufficient_evidence: terminal=%v reason=%s", terminal, reason)
+	}
+	event, err := service.db.GetVulnerabilityRetest(ctx, run.ID, "user-1")
+	if err != nil || event.Status != "completed" || event.Result != "inconclusive" {
+		t.Fatalf("复测任务未按 inconclusive 完成: %+v err=%v", event, err)
+	}
+	if !strings.Contains(event.Notes, "24") {
+		t.Fatalf("自动写回说明缺少真实迭代上限: %s", event.Notes)
 	}
 }

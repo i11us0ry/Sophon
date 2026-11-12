@@ -303,8 +303,23 @@ func TestRetestButtonMissionPlanReportsMissingTarget(t *testing.T) {
 	}
 }
 
-func TestManualRetestRoleStillUsesNormalPlanning(t *testing.T) {
+func TestManualRetestRoleUsesBoundedRetestPlan(t *testing.T) {
 	service, ctx := openProjectToolService(t, true)
+	now := time.Now().UTC()
+	findingID := "abcdef1234567890abcdef1234567890"
+	if err := service.db.CreateVulnerability(ctx, database.Vulnerability{
+		ID:          findingID,
+		ProjectID:   "project-tools",
+		OwnerUserID: "user-1",
+		Title:       "手动复测漏洞",
+		Severity:    "high",
+		Status:      "open",
+		Target:      "http://10.8.0.61/FileService.svc",
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}); err != nil {
+		t.Fatalf("创建漏洞失败: %v", err)
+	}
 	if err := service.db.SetConversationAgentRole(ctx, "conv-tools", "user-1", SystemRetestAgentID); err != nil {
 		t.Fatalf("绑定复测角色失败: %v", err)
 	}
@@ -336,11 +351,135 @@ func TestManualRetestRoleStillUsesNormalPlanning(t *testing.T) {
 		*project,
 		*conversation,
 		nil,
-		"请复测漏洞 abcdef1234567890abcdef1234567890，授权目标 http://10.8.0.61",
+		"请复测漏洞 "+findingID+"，授权目标 http://10.8.0.61",
 		nil,
 		RunOptions{},
 	)
-	if router.routerCalls != 1 || plan.Mode != missionModeRetest || plan.Source != "llm" {
-		t.Fatalf("手动选择复测角色时应走正常规划: calls=%d plan=%+v", router.routerCalls, plan)
+	if router.routerCalls != 0 ||
+		plan.Mode != missionModeRetest ||
+		plan.Source != "retest_role" ||
+		!plan.Bounded ||
+		len(plan.VulnerabilityIDs) != 1 ||
+		plan.VulnerabilityIDs[0] != findingID {
+		t.Fatalf("手动选择复测角色时应直接生成有界复测任务: calls=%d plan=%+v", router.routerCalls, plan)
+	}
+	plan = service.hydrateMissionPlan(
+		ctx,
+		"conv-tools",
+		"project-tools",
+		"user-1",
+		nil,
+		plan,
+	)
+	if len(plan.RetestIDs) != 1 || plan.Mode != missionModeRetest {
+		t.Fatalf("手动复测任务未创建正式 retest run: %+v", plan)
+	}
+}
+
+func TestManualRetestRoleRequiresValidFindingID(t *testing.T) {
+	service, ctx := openProjectToolService(t, true)
+	if err := service.db.SetConversationAgentRole(ctx, "conv-tools", "user-1", SystemRetestAgentID); err != nil {
+		t.Fatalf("绑定复测角色失败: %v", err)
+	}
+	project, err := service.db.GetProject(ctx, "project-tools", "user-1")
+	if err != nil {
+		t.Fatalf("读取项目失败: %v", err)
+	}
+	conversation, err := service.db.GetConversation(ctx, "conv-tools", "user-1")
+	if err != nil {
+		t.Fatalf("读取会话失败: %v", err)
+	}
+	router := &fixedRouterModel{content: `{"mode":"pentest","confidence":95}`}
+	service.model = router
+	plan := service.resolveMissionPlan(
+		ctx,
+		"conv-tools",
+		"user-1",
+		"assistant-manual-retest-invalid",
+		*project,
+		*conversation,
+		nil,
+		"请复测漏洞 abcdef1234567890abcdef1234567890",
+		nil,
+		RunOptions{},
+	)
+	if router.routerCalls != 0 ||
+		plan.Mode != missionModeClarify ||
+		!strings.Contains(plan.Reason, "有效 finding ID") {
+		t.Fatalf("无效 finding ID 必须精确澄清且不得进入通用路由: calls=%d plan=%+v", router.routerCalls, plan)
+	}
+}
+
+func TestRetestTerminalResultStopsImmediately(t *testing.T) {
+	service, ctx := openProjectToolService(t, true)
+	now := time.Now().UTC()
+	findingID := "5776b8b1cdb18b57d6a0e36cecddfd90"
+	if err := service.db.CreateVulnerability(ctx, database.Vulnerability{
+		ID:          findingID,
+		ProjectID:   "project-tools",
+		OwnerUserID: "user-1",
+		Title:       "FileService 未授权访问复测",
+		Severity:    "high",
+		Status:      "open",
+		Target:      "http://10.8.0.61/FileService.svc",
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}); err != nil {
+		t.Fatalf("创建漏洞失败: %v", err)
+	}
+	run, err := service.db.CreateVulnerabilityRetestRun(
+		ctx,
+		findingID,
+		"user-1",
+		execctx.ConversationID(ctx),
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("创建复测任务失败: %v", err)
+	}
+	plan := missionPlan{
+		Mode:             missionModeRetest,
+		VulnerabilityIDs: []string{findingID},
+		RetestIDs:        []string{run.ID},
+		Stages:           []string{missionPhaseRetest},
+		Bounded:          true,
+	}
+	ctx = withMissionObjectiveState(ctx)
+	ctx = withMissionExecution(ctx, missionExecution{
+		Plan:      plan,
+		Phase:     missionPhaseRetest,
+		AgentMode: agentModeFast,
+	})
+	if _, err := invokeProjectTool(t, service, ctx, "project_retest_finding", map[string]interface{}{
+		"retest_id": run.ID,
+		"result":    "insufficient_evidence",
+		"notes":     "缺少有效登录 token 和真实 fileId，无法完成认证后越权验证",
+	}); err != nil {
+		t.Fatalf("insufficient_evidence 应能写回复测记录: %v", err)
+	}
+	completed, completedFindingID, _ := missionObjectiveCompletion(ctx)
+	if !completed || completedFindingID != findingID {
+		t.Fatalf("复测终态写回后应标记任务完成: completed=%v finding=%s", completed, completedFindingID)
+	}
+	event, err := service.db.GetVulnerabilityRetest(ctx, run.ID, "user-1")
+	if err != nil || event.Result != "inconclusive" || event.Status != "completed" {
+		t.Fatalf("复测结果应规范化为 inconclusive 并完成: %+v err=%v", event, err)
+	}
+	if allowed, _ := service.missionToolDecision(ctx, "exec", map[string]interface{}{
+		"command": "curl http://10.8.0.61/FileService.svc",
+	}); allowed {
+		t.Fatal("复测终态写回后不应继续执行新的探测")
+	}
+	decision := service.checkFinalization(
+		ctx,
+		"conv-tools",
+		"project-tools",
+		"user-1",
+		time.Now().UTC().Add(-time.Minute),
+		&runCapture{},
+		"复测结论为 insufficient_evidence。",
+	)
+	if !decision.Allowed || !decision.ObjectiveCompleted {
+		t.Fatalf("复测终态写回后应立即最终化: %+v", decision)
 	}
 }

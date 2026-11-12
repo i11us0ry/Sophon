@@ -22,6 +22,14 @@ const (
 4. 主动验证任务说明 WP-1 等价空间、WP-2 最小必要条件和 WP-3 外部先验的适用结果；未完成的适用项只能标记未验证，不能输出确定性成功结论；
 5. 如仍有未完成方向，应继续执行而不是生成该总结。
 不得只输出推理过程、工具计划或空内容。`
+
+	iterationBudgetSynthesisPrompt = `【预算耗尽强制总结轮】Agent 迭代预算已耗尽，本轮禁止调用任何工具，也不得要求用户回复“继续”。
+请立即基于当前会话、项目事实、测试结果、漏洞和已有工具输出生成最终可交付总结，必须包含：
+1. 已完成的工作和已验证结论；
+2. 关键证据、漏洞及实际影响；
+3. 未完成项、未验证假设和真实阻塞原因；
+4. 当前成果对应的下一步人工建议。
+不得把内部迭代窗口、预算或工具次数当成漏洞不存在、任务证伪或目标安全的证据；不得编造任何未实际执行的结果。`
 )
 
 type finalizationDecision struct {
@@ -439,6 +447,17 @@ func checkTaskOnlyFinalization(
 			"存在尚未返回结果的工具调用：%s",
 			strings.Join(decision.PendingToolCalls, ", "),
 		))
+	}
+	if execution.Plan.Mode == missionModeRetest {
+		if completed, findingID, reason := missionObjectiveCompletion(ctx); completed {
+			decision.ObjectiveCompleted = true
+			decision.ObjectiveReason = reason
+			decision.Allowed = len(decision.PendingToolCalls) == 0
+			if decision.Allowed && strings.TrimSpace(decision.ObjectiveReason) == "" {
+				decision.ObjectiveReason = "漏洞 " + findingID + " 的复测终态已写回"
+			}
+			return *decision
+		}
 	}
 	if missionRequiresAssetTool(execution.Plan, execution.Phase) &&
 		(capture == nil ||

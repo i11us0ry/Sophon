@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -2923,12 +2922,16 @@ func (s *Service) resolveFindingAsset(
 	}
 
 	now := time.Now().UTC()
+	kind := inferFindingAssetKind(target)
+	if kind == "" {
+		return "", nil
+	}
 	item := database.Asset{
 		ID:          randomID(),
 		ProjectID:   projectID,
 		OwnerUserID: userID,
 		Name:        truncateProjectText(target, projectToolShortText),
-		Kind:        inferFindingAssetKind(target),
+		Kind:        kind,
 		Value:       target,
 		Status:      "active",
 		Criticality: "medium",
@@ -2944,34 +2947,25 @@ func (s *Service) resolveFindingAsset(
 
 func inferFindingAssetKind(value string) string {
 	value = strings.TrimSpace(value)
-	lower := strings.ToLower(value)
-	if strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://") {
+	if _, err := database.NormalizeAssetValue("url", value); err == nil {
 		return "url"
 	}
-	if host, _, err := net.SplitHostPort(value); err == nil {
-		if net.ParseIP(strings.Trim(host, "[]")) != nil {
-			return "ip"
-		}
-		return "domain"
-	}
-	if net.ParseIP(strings.Trim(value, "[]")) != nil {
+	if _, err := database.NormalizeAssetValue("ip", value); err == nil {
 		return "ip"
 	}
-	if parsed, err := url.Parse(value); err == nil && parsed.Hostname() != "" {
-		if net.ParseIP(parsed.Hostname()) != nil {
-			return "ip"
-		}
+	if _, err := database.NormalizeAssetValue("domain", value); err == nil {
 		return "domain"
 	}
-	if !strings.ContainsAny(value, " /") {
-		if parsed, err := url.Parse("http://" + value); err == nil && parsed.Hostname() != "" {
-			if net.ParseIP(parsed.Hostname()) != nil {
-				return "ip"
-			}
-			return "domain"
-		}
+	if _, err := database.NormalizeAssetValue("port", value); err == nil {
+		return "port"
 	}
-	return "url"
+	if _, _, err := net.ParseCIDR(value); err == nil {
+		return "host"
+	}
+	if host, err := database.NormalizeAssetValue("host", value); err == nil && !strings.Contains(host, ".") {
+		return "host"
+	}
+	return ""
 }
 
 func severityRiskScore(severity string) int {

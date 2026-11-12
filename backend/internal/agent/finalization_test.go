@@ -350,7 +350,8 @@ func TestRunForcesSummaryWhenFinalTextIsEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run 失败: %v", err)
 	}
-	if result != "强制总结已生成。" {
+	if !strings.HasPrefix(result, "强制总结已生成。") ||
+		!strings.Contains(result, "已达到 Agent 迭代预算（1/1），本轮在强制总结后停止。") {
 		t.Fatalf("最终文本异常: %q", result)
 	}
 }

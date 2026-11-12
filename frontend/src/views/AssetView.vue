@@ -103,16 +103,6 @@ const averageRisk = computed(() => {
   )
 })
 
-const kindOptions = computed(() => {
-  const values = new Set(KNOWN_KINDS)
-  for (const asset of assets.value) {
-    if (asset.kind.trim()) {
-      values.add(asset.kind)
-    }
-  }
-  return [...values].sort()
-})
-
 function statusLabel(value: string) {
   return STATUS_OPTIONS.find((option) => option.value === value)?.label ?? value
 }
@@ -142,8 +132,6 @@ function kindTone(kind: string) {
       return 'violet'
     case 'url':
       return 'mint'
-    case 'service':
-      return 'amber'
     case 'port':
       return 'coral'
     case 'host':
@@ -538,7 +526,7 @@ onUnmounted(() => {
         </select>
         <select v-model="filters.kind" :aria-label="t('asset.allKinds')" @change="applyFilters">
           <option value="">{{ t('asset.allKinds') }}</option>
-          <option v-for="kind in kindOptions" :key="kind" :value="kind">{{ kindLabel(kind) }}</option>
+          <option v-for="kind in KNOWN_KINDS" :key="kind" :value="kind">{{ kindLabel(kind) }}</option>
         </select>
         <button class="button" type="button" @click="applyFilters">{{ t('common.query') }}</button>
         <button class="button compact" type="button" @click="resetFilters">{{ t('common.reset') }}</button>
@@ -554,7 +542,6 @@ onUnmounted(() => {
             <svg v-if="kind === 'domain'" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><path d="M3 12h18M12 3a15 15 0 0 1 0 18M12 3a15 15 0 0 0 0 18" /></svg>
             <svg v-else-if="kind === 'ip'" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2" /><path d="M7 9h.01M7 15h.01M11 9h6M11 12h6M11 15h4" /></svg>
             <svg v-else-if="kind === 'url'" viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.5.5l2-2a5 5 0 0 0-7-7l-1.2 1.2M14 11a5 5 0 0 0-7.5-.5l-2 2a5 5 0 0 0 7 7l1.2-1.2" /></svg>
-            <svg v-else-if="kind === 'service'" viewBox="0 0 24 24"><path d="M5 8h14v11H5zM9 8V5h6v3M9 12h6M9 16h4" /></svg>
             <svg v-else-if="kind === 'port'" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8" /><path d="M12 4v8l5 3" /></svg>
             <svg v-else-if="kind === 'host'" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2" /><path d="M8 8h8M8 12h8M8 16h5" /></svg>
             <svg v-else viewBox="0 0 24 24"><circle cx="12" cy="12" r="8" /><path d="M9 12h6" /></svg>
