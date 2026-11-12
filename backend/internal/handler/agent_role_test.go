@@ -155,12 +155,25 @@ func TestAgentRoleListIncludesMandatoryInternalAgentsOnDemand(t *testing.T) {
 	}
 
 	normalItems := readItems("/api/agent-roles")
-	if len(normalItems) != 1 || normalItems[0].Internal {
-		t.Fatalf("默认角色列表不应包含系统 Agent: %+v", normalItems)
+	if len(normalItems) != 2 {
+		t.Fatalf("对话角色列表应返回复测 Agent 和普通角色: %+v", normalItems)
+	}
+	retestFound := false
+	normalRoleFound := false
+	for _, item := range normalItems {
+		switch item.ID {
+		case agentpkg.SystemRetestAgentID:
+			retestFound = item.Internal
+		default:
+			normalRoleFound = !item.Internal
+		}
+	}
+	if !retestFound || !normalRoleFound {
+		t.Fatalf("对话角色列表应仅额外包含复测系统 Agent: %+v", normalItems)
 	}
 	items := readItems("/api/agent-roles?includeInternal=true")
-	if len(items) != 7 {
-		t.Fatalf("角色管理应返回普通角色和六个可管理系统 Agent: %+v", items)
+	if len(items) != 8 {
+		t.Fatalf("角色管理应返回普通角色和七个可管理系统 Agent: %+v", items)
 	}
 	if !items[0].Internal || !items[1].Internal || !items[2].Internal {
 		t.Fatalf("系统 Agent 应优先展示: %+v", items)
@@ -195,8 +208,8 @@ func TestAgentRoleListIncludesMandatoryInternalAgentsOnDemand(t *testing.T) {
 			}
 		}
 	}
-	if internal != 6 {
-		t.Fatalf("应返回六个可管理系统 Agent，实际 %d", internal)
+	if internal != 7 {
+		t.Fatalf("应返回七个可管理系统 Agent，实际 %d", internal)
 	}
 	if editable != 1 {
 		t.Fatalf("应仅返回一个可编辑系统 Agent，实际 %d", editable)
@@ -217,6 +230,7 @@ func TestReadOnlySystemAgentsCannotBeEditedDisabledOrDeleted(t *testing.T) {
 	for _, id := range []string{
 		agentpkg.SystemIntentAgentID,
 		agentpkg.SystemReportAgentID,
+		agentpkg.SystemRetestAgentID,
 		agentpkg.SystemMissionPolicyAgentID,
 		agentpkg.SystemDeepPathPlannerID,
 		agentpkg.SystemDeepPathWorkerID,

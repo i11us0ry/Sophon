@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"sophon/internal/database"
@@ -156,6 +157,15 @@ type missionExecution struct {
 
 type missionContextKey struct{}
 
+type missionObjectiveState struct {
+	mu        sync.Mutex
+	completed bool
+	findingID string
+	reason    string
+}
+
+type missionObjectiveContextKey struct{}
+
 func withMissionExecution(ctx context.Context, execution missionExecution) context.Context {
 	return context.WithValue(ctx, missionContextKey{}, execution)
 }
@@ -165,9 +175,106 @@ func missionExecutionFromContext(ctx context.Context) (missionExecution, bool) {
 	return value, ok
 }
 
+func withMissionObjectiveState(ctx context.Context) context.Context {
+	return context.WithValue(ctx, missionObjectiveContextKey{}, &missionObjectiveState{})
+}
+
+func missionObjectiveStateFromContext(ctx context.Context) *missionObjectiveState {
+	state, _ := ctx.Value(missionObjectiveContextKey{}).(*missionObjectiveState)
+	return state
+}
+
+func markMissionObjectiveComplete(ctx context.Context, findingID string, reason string) {
+	state := missionObjectiveStateFromContext(ctx)
+	if state == nil {
+		return
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.completed {
+		return
+	}
+	state.completed = true
+	state.findingID = strings.TrimSpace(findingID)
+	state.reason = strings.TrimSpace(reason)
+}
+
+func missionObjectiveCompletion(ctx context.Context) (bool, string, string) {
+	state := missionObjectiveStateFromContext(ctx)
+	if state == nil {
+		return false, "", ""
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	return state.completed, state.findingID, state.reason
+}
+
 func missionSuppressesAutomaticFollowUps(ctx context.Context) bool {
+	if completed, _, _ := missionObjectiveCompletion(ctx); completed {
+		return true
+	}
 	execution, ok := missionExecutionFromContext(ctx)
 	return ok && execution.Plan.boundedFindingAudit() && !execution.Plan.AllowFollowUps
+}
+
+func (s *Service) markMissionObjectiveCompleteFromFinding(
+	ctx context.Context,
+	finding *database.Vulnerability,
+) {
+	execution, ok := missionExecutionFromContext(ctx)
+	if !ok || !missionFindingCompletesObjective(execution, finding) {
+		return
+	}
+	markMissionObjectiveComplete(
+		ctx,
+		finding.ID,
+		"漏洞 "+finding.ID+" 已确认可利用并满足当前目标："+finding.Title,
+	)
+}
+
+func missionFindingCompletesObjective(
+	execution missionExecution,
+	finding *database.Vulnerability,
+) bool {
+	if finding == nil ||
+		(execution.Plan.Mode != missionModePentest && execution.Plan.Mode != missionModeMixed) ||
+		finding.Status != "confirmed" ||
+		finding.VerificationState != "exploitable" ||
+		finding.Confidence < 80 ||
+		(strings.TrimSpace(finding.Evidence) == "" && len(finding.EvidenceRefs) == 0) {
+		return false
+	}
+	if execution.Scope.Active &&
+		strings.TrimSpace(finding.AssetID) != "" &&
+		!execution.Scope.IncludesAsset(finding.AssetID) {
+		return false
+	}
+	objective := strings.ToLower(strings.TrimSpace(
+		execution.Plan.Objective + " " + execution.Plan.CompletionCriteria,
+	))
+	if !containsAnyText(
+		objective,
+		"服务器权限", "服务器控制", "完全控制", "远程控制",
+		"远程代码执行", "任意命令执行", "获取 shell", "取得 shell",
+		"rce",
+	) {
+		return false
+	}
+	findingText := strings.ToLower(strings.Join([]string{
+		finding.Title,
+		finding.VulnerabilityType,
+		finding.Impact,
+		finding.Evidence,
+		finding.Exploitability,
+	}, " "))
+	return containsAnyText(
+		findingText,
+		"服务器权限", "服务器控制", "完全控制", "远程控制",
+		"远程代码执行", "任意命令", "webshell", "rce",
+	) && containsAnyText(
+		findingText,
+		"命令回显", "命令输出", "whoami", "cmd.exe", "shell",
+	)
 }
 
 func (plan missionPlan) allowsPentest() bool {
@@ -344,6 +451,15 @@ func (s *Service) resolveMissionPlan(
 			Source:     "empty_input",
 		}
 	}
+	if plan, handled := s.retestButtonMissionPlan(
+		ctx,
+		userID,
+		project,
+		conversation,
+		message,
+	); handled {
+		return plan
+	}
 	message = s.missionMessageWithAttachments(ctx, conversationID, message)
 	plan, latency, err := s.callIntentRouter(
 		ctx,
@@ -368,6 +484,60 @@ func (s *Service) resolveMissionPlan(
 	normalized.RouterLatencyMS = latency.Milliseconds()
 	normalized.RouterMode = routerMode
 	return normalized
+}
+
+func (s *Service) retestButtonMissionPlan(
+	ctx context.Context,
+	userID string,
+	project database.Project,
+	conversation database.Conversation,
+	message string,
+) (missionPlan, bool) {
+	if strings.TrimSpace(conversation.Kind) != "retest" ||
+		strings.TrimSpace(conversation.AgentRoleID) != SystemRetestAgentID {
+		return missionPlan{}, false
+	}
+	if s == nil || s.db == nil {
+		return clarifyMissionPlan("漏洞复测服务不可用"), true
+	}
+	retestRun, err := s.db.GetRunningVulnerabilityRetestByConversation(
+		ctx,
+		conversation.ID,
+		userID,
+	)
+	if err != nil || retestRun == nil {
+		return clarifyMissionPlan("当前会话未绑定运行中的漏洞复测任务"), true
+	}
+	vulnerability, err := s.db.GetVulnerability(
+		ctx,
+		retestRun.VulnerabilityID,
+		userID,
+	)
+	if err != nil || vulnerability == nil || vulnerability.ProjectID != project.ID {
+		return clarifyMissionPlan("复测任务关联的漏洞不存在或不属于当前项目"), true
+	}
+	targets := normalizeMissionTargets(extractMissionHosts(message))
+	if len(targets) == 0 {
+		return clarifyMissionPlan("复测任务未提供授权目标"), true
+	}
+	return missionPlan{
+		Mode:               missionModeRetest,
+		Tasks:              []string{missionModeRetest},
+		Stages:             []string{missionPhaseRetest},
+		PentestTargets:     targets,
+		VulnerabilityIDs:   []string{vulnerability.ID},
+		Objective:          "重新验证指定漏洞并提交结构化复测结论",
+		CompletionCriteria: "取得本次复测证据，并调用 project_retest_finding 写回结论",
+		AllowFollowUps:     false,
+		MaxSegments:        boundedFindingMaxSegments,
+		MaxToolCalls:       boundedFindingMaxToolCalls,
+		Bounded:            true,
+		RetestIDs:          []string{retestRun.ID},
+		Confidence:         100,
+		Reason:             "漏洞复测按钮已绑定运行中的复测任务和授权目标",
+		Source:             "retest_button",
+		RouterMode:         missionModeRetest,
+	}, true
 }
 
 func (s *Service) defaultMissionPlan(
@@ -1067,7 +1237,9 @@ func (s *Service) hydrateMissionPlan(
 		return clarifyMissionPlan("漏洞复测需要明确提供漏洞 ID")
 	}
 
-	targets := append([]string(nil), plan.PentestTargets...)
+	explicitTargets := append([]string(nil), plan.PentestTargets...)
+	targets := append([]string(nil), explicitTargets...)
+	allowExplicitTargetFallback := !plan.RetestAll && len(plan.VulnerabilityIDs) == 1
 	retestableIDs := make([]string, 0, len(plan.VulnerabilityIDs))
 	for _, vulnerabilityID := range plan.VulnerabilityIDs {
 		vulnerability, err := s.db.GetVulnerability(ctx, vulnerabilityID, userID)
@@ -1085,6 +1257,9 @@ func (s *Service) hydrateMissionPlan(
 					break
 				}
 			}
+		}
+		if len(vulnerabilityTargets) == 0 && allowExplicitTargetFallback {
+			vulnerabilityTargets = append(vulnerabilityTargets, explicitTargets...)
 		}
 		if len(vulnerabilityTargets) == 0 {
 			if plan.RetestAll {
@@ -1131,6 +1306,9 @@ func (s *Service) bindMissionFindingReference(
 ) missionPlan {
 	referenceRequired := missionReferencesSpecificFinding(message)
 	if plan.Mode != missionModeCodeAudit && plan.Mode != missionModeCodeValidate {
+		if plan.Mode == missionModeRetest {
+			return plan
+		}
 		if referenceRequired {
 			return clarifyMissionPlan("该请求引用了一个已有漏洞，但未形成可审计的具体任务；请明确漏洞标题或 ID 以及要核验的问题")
 		}
@@ -1759,7 +1937,7 @@ func (s *Service) mainAgentInstruction(ctx context.Context) string {
 	); strings.TrimSpace(policyPrompt) != "" {
 		instruction += "\n\n" + policyPrompt
 	}
-	return instruction
+	return withPlatformVerificationWorkflow(instruction)
 }
 
 func (s *Service) missionSourceAccessGuidance(ctx context.Context) string {
@@ -1894,8 +2072,7 @@ func missionClarificationMessage(plan missionPlan) string {
 	if reason == "" {
 		reason = "当前请求的任务类型或测试范围不明确"
 	}
-	return "需要先明确任务边界：" + reason + "。\n\n请说明要执行的是资产整理、项目数据修改、普通查询、代码审计、漏洞复测、App 验证还是渗透测试。" +
-		"代码审计需要源码目录；代码验证需要源码和运行时目标；复测需要漏洞 ID；App 验证需要 APK/IPA/App 路径。未确认前不会启动外部探测。"
+	return strings.TrimRight(reason, "。.!！") + "。"
 }
 
 func missionToolAllowed(plan missionPlan, phase string, toolName string) bool {
@@ -1976,7 +2153,7 @@ func retestToolAllowed(name string) bool {
 	switch name {
 	case "exec", "execute-python-script", "mcp_use_tool", "read_artifact", readSkillToolName,
 		"project_list", "project_get", "project_list_findings", "project_get_finding", "project_list_facts", "project_record_fact",
-		"project_update_finding", "project_retest_finding",
+		"project_get_retest_context", "project_update_finding", "project_retest_finding",
 		"project_graph_overview", "project_graph_node":
 		return true
 	default:
@@ -2104,6 +2281,16 @@ func (s *Service) missionToolDecision(
 		return true, ""
 	}
 	plainName := s.plainToolName(toolName)
+	if completed, _, _ := missionObjectiveCompletion(ctx); completed {
+		switch {
+		case isSubAgentEntryToolName(plainName):
+			return false, "明确目标已完成，禁止继续启动新的子 Agent"
+		case plainName == "exec",
+			plainName == "execute-python-script",
+			plainName == "mcp_use_tool":
+			return false, "明确目标已完成，禁止继续执行新的工具任务"
+		}
+	}
 	if execution.AgentMode == agentModeDeep &&
 		execution.Plan.Mode == missionModeCodeAudit &&
 		execution.Phase == missionPhaseSourceAudit {

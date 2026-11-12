@@ -37,6 +37,22 @@ func TestRunBudgetClampsOversizedOptions(t *testing.T) {
 	}
 }
 
+func TestRunBudgetUsesMissionPlanLimitsForPentest(t *testing.T) {
+	plan := missionPlan{
+		Mode:         missionModePentest,
+		MaxSegments:  2,
+		MaxToolCalls: 60,
+	}
+	segments, tools := resolveRunLimits(RunOptions{}, plan)
+	if segments != 2 || tools != 60 {
+		t.Fatalf("渗透任务应使用意图预算 2/60，实际 %d/%d", segments, tools)
+	}
+	segments, tools = resolveRunLimits(RunOptions{MaxSegments: 1, MaxToolCalls: 30}, plan)
+	if segments != 1 || tools != 30 {
+		t.Fatalf("显式运行预算应继续收紧，实际 %d/%d", segments, tools)
+	}
+}
+
 func TestRunTokenBudgetCancelsAtLimit(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

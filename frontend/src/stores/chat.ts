@@ -224,6 +224,7 @@ export interface AgentRoleOption {
   id: string
   name: string
   icon: string
+  prompt?: string
   defaultMode?: AgentMode
   enabled: boolean
 }
@@ -416,7 +417,9 @@ export const useChatStore = defineStore('chat', {
       this.conversationsNextCursor = response.nextCursor || ''
       try {
         const roles = await apiGet<{ items: AgentRoleOption[] }>('/agent-roles?enabled=true')
-        this.roles = roles.items ?? []
+        this.roles = (roles.items ?? []).filter(
+          (role) => role.prompt === undefined || role.prompt.trim() !== '',
+        )
         this.rolesLoaded = true
         if (
           this.selectedRoleId &&

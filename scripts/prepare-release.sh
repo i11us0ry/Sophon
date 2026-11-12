@@ -120,6 +120,7 @@ copy_release() {
   copy_tree "${ROOT_DIR}/roles" "${release}/roles"
   copy_tree "${ROOT_DIR}/skills" "${release}/skills"
   copy_tree "${ROOT_DIR}/tools" "${release}/tools"
+  copy_tree "${ROOT_DIR}/screenshots" "${release}/screenshots"
   copy_tree "${ROOT_DIR}/mcp-servers" "${release}/mcp-servers"
   copy_tree "${ROOT_DIR}/licenses" "${release}/licenses"
   copy_tree "${ROOT_DIR}/scripts" "${release}/scripts"
@@ -158,7 +159,7 @@ sanitize_release() {
         LC_ALL=C perl -pi -e \
         's/\Q$ENV{RELEASE_SOURCE}\E/$ENV{RELEASE_REPLACEMENT}/g' "$file"
     done < <(
-      find "$release" -type f \( \
+      find "$release" -path "${release}/.git" -prune -o -type f \( \
         -name '*.go' -o -name '*.ts' -o -name '*.js' -o -name '*.vue' \
         -o -name '*.py' -o -name '*.md' -o -name '*.yaml' -o -name '*.yml' \
         -o -name '*.json' -o -name '*.sh' -o -name '*.txt' -o -name '*.conf' \
@@ -175,7 +176,7 @@ scan_release() {
   info "扫描敏感信息..."
 
   if [[ -f "$REDACTIONS_FILE" ]]; then
-    hits="$(rg -a -l -F -f <(redaction_sources) "$release" 2>/dev/null || true)"
+    hits="$(rg -a -l --glob '!.git/**' -F -f <(redaction_sources) "$release" 2>/dev/null || true)"
     [[ -z "$hits" ]] || {
       printf '%s\n' "$hits" >&2
       die "发布目录仍包含脱敏映射中的原始值"
@@ -197,7 +198,7 @@ scan_release() {
         printf '%s\n' "$file"
       fi
     done < <(
-      find "$release" -type f \( \
+      find "$release" -path "${release}/.git" -prune -o -type f \( \
         -name '*.go' -o -name '*.ts' -o -name '*.js' -o -name '*.vue' \
         -o -name '*.py' -o -name '*.md' -o -name '*.yaml' -o -name '*.yml' \
         -o -name '*.json' -o -name '*.sh' -o -name '*.txt' -o -name '*.conf' \
@@ -211,7 +212,7 @@ scan_release() {
     die "发现本机绝对路径或疑似密钥"
   }
 
-  hits="$(find "$release" -type f \( \
+  hits="$(find "$release" -path "${release}/.git" -prune -o -type f \( \
     -name 'config.yml' -o -name '.env' -o -name '.DS_Store' \
     -o -name '*.bak' -o -name '*.bak.*' -o -name '*.pyc' \
     -o -name '*.tsbuildinfo' -o -path '*/node_modules/*' -o -path '*/dist/*' \
@@ -259,15 +260,23 @@ run_tests() {
 publish_release() {
   local release="$1"
   local backup=""
+  local preserve_git=0
   if [[ -e "$OUTPUT_DIR" ]]; then
     ((REPLACE == 1)) || die "发布目录已存在；确认替换时使用 --replace"
     [[ ! -L "$OUTPUT_DIR" ]] || die "发布目录不能是符号链接"
+    if [[ -d "${OUTPUT_DIR}/.git" ]]; then
+      preserve_git=1
+    fi
     backup="${OUTPUT_DIR}.backup.$(date +%Y%m%d-%H%M%S)-$$"
     info "移动旧发布目录到 ${backup}"
     mv "$OUTPUT_DIR" "$backup"
   fi
   mv "$release" "$OUTPUT_DIR"
   STAGE_DIR=""
+  if ((preserve_git == 1)) && [[ -d "${backup}/.git" ]]; then
+    cp -a "${backup}/.git" "${OUTPUT_DIR}/.git"
+    ok "已保留 Git 仓库元数据"
+  fi
   move_os_metadata "$OUTPUT_DIR"
   scan_release "$OUTPUT_DIR"
   ok "发布目录已生成: ${OUTPUT_DIR}"

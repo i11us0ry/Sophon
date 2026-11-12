@@ -19,7 +19,8 @@ const (
 1. 已完成的工作和已验证结论；
 2. 关键证据、漏洞及影响；
 3. 仅列出真实的外部阻塞（缺少授权、缺少凭据、需要人工审批或目标范围外），不得把内部迭代窗口、Token 或工具次数列为未完成原因；
-4. 如仍有未完成方向，应继续执行而不是生成该总结。
+4. 主动验证任务说明 WP-1 等价空间、WP-2 最小必要条件和 WP-3 外部先验的适用结果；未完成的适用项只能标记未验证，不能输出确定性成功结论；
+5. 如仍有未完成方向，应继续执行而不是生成该总结。
 不得只输出推理过程、工具计划或空内容。`
 )
 
@@ -46,6 +47,8 @@ type finalizationDecision struct {
 	PendingUserConfirmation bool
 	PauseOnQuestion         bool
 	ActionableNextTargets   int
+	ObjectiveCompleted      bool
+	ObjectiveReason         string
 }
 
 func requireFinalText(decision finalizationDecision, finalText string) finalizationDecision {
@@ -145,6 +148,15 @@ func (s *Service) checkFinalization(
 			"存在尚未返回结果的工具调用：%s",
 			strings.Join(decision.PendingToolCalls, ", "),
 		))
+	}
+	if completed, findingID, reason := missionObjectiveCompletion(ctx); completed {
+		decision.ObjectiveCompleted = true
+		decision.ObjectiveReason = reason
+		decision.Allowed = len(decision.PendingToolCalls) == 0
+		if decision.Allowed && strings.TrimSpace(decision.ObjectiveReason) == "" {
+			decision.ObjectiveReason = "明确目标已由漏洞 " + findingID + " 的利用证据满足"
+		}
+		return decision
 	}
 
 	var nodes []database.GraphNode

@@ -1160,7 +1160,7 @@ const messages: Record<string, string> = {
   'chat.workerResult': '执行结果',
   'chat.workerError': '错误',
   'chat.project': '项目',
-  'chat.noRole': '默认角色',
+  'chat.noRole': '不使用角色（平台默认）',
   'chat.noProject': '无项目',
   'chat.newConversation': '新建',
   'chat.batchNew': '批量新建',

@@ -34,6 +34,7 @@ const projectWritebackGuidance = `
 - 测试前用 project_plan_hypotheses 建假设；Worker 用 project_start_hypothesis 领取，用 project_complete_hypothesis 完成。达到假设上限后只写事实和测试结果。
 - 每项测试后用 project_record_test 写结论和 evidence_refs（tool:/fact:/artifact:/conversation:）；未发现漏洞也必须写 tested_clean 和负向证据。
 - 确认漏洞先用 project_report_finding 写规范 vulnerability_type、title_impact、description、preconditions、完整 poc/HTTP 数据包、evidence、impact、recommendation、residual_notes 和 asset_id；证据必填，复测备注无则写“无”，复现步骤末尾必须包含“利用脚本（优先 Python）”及 Python 代码块；高危以上缺任一字段或 PoC 不完整时不得上报。
+- 主动验证的测试结果、漏洞证据或复测备注必须记录适用的 WP-1 等价表达覆盖、WP-2 最小必要条件、WP-3 外部先验与根因映射；不适用项写原因，禁止只写“已检查”。
 - 代码审计先用 project_record_audit(action=scope) 写明纳入和排除类别；按 service×entry×shape×surface 建矩阵，未测单元格记 not_audited，实测后回写 tested/not_applicable。零记录只能写未审计，不得写成已排除。
 - 发现漏检形态后用 project_record_audit(action=rescan) 生成同类跨分发面回扫单元；阶段切换或中断前用 action=checkpoint 写下一步首个动作。
 - 收尾先清除或说明 not_audited 单元格，并抽查一条 tested_clean 旧结论的证据是否仍成立。

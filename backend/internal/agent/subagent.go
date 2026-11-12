@@ -138,6 +138,7 @@ func (r *subAgentRunner) instruction(ctx context.Context) string {
 	); strings.TrimSpace(policyPrompt) != "" {
 		instruction += "\n\n" + policyPrompt
 	}
+	instruction = withPlatformVerificationWorkflow(instruction)
 	instruction += service.missionSourceAccessGuidance(ctx)
 	var state strings.Builder
 	var findings []string

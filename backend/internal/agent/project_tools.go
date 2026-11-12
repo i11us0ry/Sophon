@@ -1986,6 +1986,7 @@ func (s *Service) reportFindingTool() tool.BaseTool {
 				return "", fmt.Errorf("上报漏洞失败: %w", err)
 			}
 			finding = *savedFinding
+			s.markMissionObjectiveCompleteFromFinding(ctx, savedFinding)
 			s.enqueueFindingVerification(ctx, savedFinding)
 			saved, err := s.materializeFindingNode(ctx, projectID, savedFinding)
 			if err != nil {
@@ -2044,7 +2045,7 @@ func (s *Service) enqueueFindingVerification(
 	ctx context.Context,
 	finding *database.Vulnerability,
 ) {
-	if s == nil || s.db == nil || finding == nil {
+	if s == nil || s.db == nil || finding == nil || missionSuppressesAutomaticFollowUps(ctx) {
 		return
 	}
 	campaignID, err := s.resolveCampaignID(ctx, "")

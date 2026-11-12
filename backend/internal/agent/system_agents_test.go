@@ -39,6 +39,17 @@ func TestSystemAgentRolesSeedCanonicalIdentityAndPrompt(t *testing.T) {
 	if SystemAgentEditableForRole(*reportRole) {
 		t.Fatalf("报告生成 Agent 必须只读")
 	}
+	retestRole, err := db.GetAgentRole(ctx, SystemRetestAgentID)
+	if err != nil {
+		t.Fatalf("读取漏洞复测 Agent 失败: %v", err)
+	}
+	if retestRole.Name != SystemRetestAgentName || !retestRole.Enabled || !retestRole.Builtin ||
+		retestRole.Prompt != retestAgentPrompt || retestRole.Icon != "🔁" {
+		t.Fatalf("漏洞复测 Agent 初始状态错误: %+v", retestRole)
+	}
+	if SystemAgentEditableForRole(*retestRole) || SystemAgentDisableableForRole(*retestRole) {
+		t.Fatalf("漏洞复测 Agent 必须只读且不可停用")
+	}
 	reviewerRole, err := db.GetAgentRole(ctx, SystemVulnerabilityReviewerID)
 	if err != nil {
 		t.Fatalf("读取漏洞审核失败: %v", err)
@@ -353,6 +364,28 @@ func TestDeepPathAgentPromptsContainOperationalContracts(t *testing.T) {
 			if !strings.Contains(check.prompt, phrase) {
 				t.Fatalf("%s Prompt 缺少关键契约 %q", check.name, phrase)
 			}
+		}
+	}
+}
+
+func TestRetestAgentPromptContainsRequiredOutputContract(t *testing.T) {
+	if len([]rune(retestAgentPrompt)) < 2500 {
+		t.Fatalf("漏洞复测 Agent Prompt 过短: %d", len([]rune(retestAgentPrompt)))
+	}
+	for _, phrase := range []string{
+		"confirmed",
+		"not_reproducible",
+		"insufficient_evidence",
+		"blocked",
+		"project_get(resource=\"finding\")",
+		"Python 3",
+		"Burp Repeater",
+		"敏感值脱敏",
+		"不得编造",
+		"最终输出格式",
+	} {
+		if !strings.Contains(retestAgentPrompt, phrase) {
+			t.Fatalf("漏洞复测 Agent Prompt 缺少: %s", phrase)
 		}
 	}
 }

@@ -739,6 +739,40 @@ func TestSpecificFindingReferenceRejectsNonAuditMode(t *testing.T) {
 	}
 }
 
+func TestRetestModeSkipsCodeAuditFindingBinder(t *testing.T) {
+	service, ctx := openProjectToolService(t, true)
+	plan := service.bindMissionFindingReference(
+		ctx,
+		"project-tools",
+		"user-1",
+		"复测该漏洞，漏洞 ID：24c849ca11237e6f8700c609cc011c1b",
+		missionPlan{
+			Mode:             missionModeRetest,
+			VulnerabilityIDs: []string{"24c849ca11237e6f8700c609cc011c1b"},
+			PentestTargets:   []string{"10.8.0.61"},
+		},
+	)
+	if plan.Mode != missionModeRetest ||
+		len(plan.VulnerabilityIDs) != 1 ||
+		len(plan.PentestTargets) != 1 {
+		t.Fatalf("复测模式不应被代码审计 Finding 绑定转成澄清: %+v", plan)
+	}
+}
+
+func TestMissionClarificationMessageIsSpecific(t *testing.T) {
+	message := missionClarificationMessage(missionPlan{
+		Mode:   missionModeClarify,
+		Reason: "漏洞复测需要明确提供漏洞 ID",
+	})
+	if message != "漏洞复测需要明确提供漏洞 ID。" {
+		t.Fatalf("澄清消息应只返回具体原因: %q", message)
+	}
+	if strings.Contains(message, "需要先明确任务边界") ||
+		strings.Contains(message, "资产整理、项目数据修改") {
+		t.Fatalf("不应返回通用任务分类菜单: %q", message)
+	}
+}
+
 func TestLegacyOpenCodeAuditResumeRequiresFindingBinding(t *testing.T) {
 	service := &Service{}
 	state := &missionProgressState{
@@ -1180,6 +1214,44 @@ func TestRetestMissionLoadsOriginalVulnerabilityTarget(t *testing.T) {
 		plan.PentestTargets[0] != "app.example.com" ||
 		len(plan.RetestIDs) != 1 {
 		t.Fatalf("复测任务应加载原漏洞目标: %+v", plan)
+	}
+}
+
+func TestRetestMissionUsesExplicitTargetWhenStoredTargetIsSourcePath(t *testing.T) {
+	service, ctx := openProjectToolService(t, true)
+	now := time.Now().UTC()
+	const findingID = "vuln-retest-source-path"
+	if err := service.db.CreateVulnerability(ctx, database.Vulnerability{
+		ID:          findingID,
+		ProjectID:   "project-tools",
+		AssetID:     "asset-with-code-path",
+		OwnerUserID: "user-1",
+		Title:       "源码路径型漏洞",
+		Severity:    "high",
+		Status:      "open",
+		Target:      "src/WebSite/App_Data/Common.config:350 → SRM/ScpSupRegHandler",
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}); err != nil {
+		t.Fatalf("创建漏洞失败: %v", err)
+	}
+	plan := service.hydrateMissionPlan(
+		ctx,
+		"conv-tools",
+		"project-tools",
+		"user-1",
+		missionTestAssets(),
+		missionPlan{
+			Mode:             missionModeRetest,
+			VulnerabilityIDs: []string{findingID},
+			PentestTargets:   []string{"10.8.0.61", "http://10.8.0.61:8000"},
+		},
+	)
+	if plan.Mode == missionModeClarify ||
+		len(plan.PentestTargets) != 1 ||
+		plan.PentestTargets[0] != "10.8.0.61" ||
+		len(plan.RetestIDs) != 1 {
+		t.Fatalf("存储目标为源码路径时应改用用户显式复测目标: %+v", plan)
 	}
 }
 

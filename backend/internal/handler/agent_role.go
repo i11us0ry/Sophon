@@ -62,7 +62,7 @@ func (h *AgentRoleHandler) List(c *gin.Context) {
 			continue
 		}
 		_, isSystem := agentpkg.SystemAgentDefinitionForRole(role)
-		if isSystem && !includeInternal {
+		if isSystem && !includeInternal && role.ID != agentpkg.SystemRetestAgentID {
 			continue
 		}
 		item := agentRoleListItem{

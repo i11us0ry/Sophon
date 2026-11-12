@@ -4,6 +4,7 @@ import { useRoute } from 'vue-router'
 
 import { apiUrl } from '../api/client'
 import AgentRunSteps from '../components/AgentRunSteps.vue'
+import MarkdownContent from '../components/MarkdownContent.vue'
 import { useAuthStore } from '../stores/auth'
 import {
   useChatStore,
@@ -22,6 +23,7 @@ const auth = useAuthStore()
 const route = useRoute()
 const MAX_ATTACHMENT_BYTES = 2 * 1024 * 1024 * 1024
 const input = ref('')
+const composerComposing = ref(false)
 const selected = ref<string[]>([])
 const notice = ref('')
 const showInternalTools = ref(false)
@@ -426,6 +428,9 @@ async function removeSelected() {
 
 async function send() {
   const message = input.value
+  if (!message.trim() || chat.uploading || chat.streaming || composerBlocked.value) {
+    return
+  }
   if (projectBlocked.value) {
     chat.error = projectInactive.value
       ? t('chat.projectInactive', { status: selectedProjectStatus.value })
@@ -439,6 +444,21 @@ async function send() {
   input.value = ''
   stickToBottom.value = true
   await chat.sendMessage(message)
+}
+
+function onComposerKeydown(event: KeyboardEvent) {
+  if (
+    event.key !== 'Enter' ||
+    event.shiftKey ||
+    event.altKey ||
+    composerComposing.value ||
+    event.isComposing ||
+    event.keyCode === 229
+  ) {
+    return
+  }
+  event.preventDefault()
+  void send()
 }
 
 function startEdit(message: ChatMessage) {
@@ -1555,7 +1575,11 @@ onUnmounted(() => {
                 :agent-summary="chat.processDetailMeta[message.id]?.agentSummary"
                 @load-more="chat.loadProcessDetailsForMessage(message.id)"
               />
-              <p>{{ message.content }}</p>
+              <MarkdownContent
+                v-if="message.role === 'assistant'"
+                :content="message.content"
+              />
+              <p v-else>{{ message.content }}</p>
               <div v-if="messageAttachments(message.id).length" class="message-attachments">
                 <a
                   v-for="item in messageAttachments(message.id)"
@@ -1924,7 +1948,9 @@ onUnmounted(() => {
                     : t('chat.placeholder')
             "
             :disabled="composerBlocked || currentConversationRunning"
-            @keydown.ctrl.enter.prevent="send"
+            @compositionstart="composerComposing = true"
+            @compositionend="composerComposing = false"
+            @keydown="onComposerKeydown"
           ></textarea>
 
           <div class="chat-input-footer">

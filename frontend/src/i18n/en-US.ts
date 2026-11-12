@@ -1160,7 +1160,7 @@ const messages: Record<string, string> = {
   'chat.workerResult': 'Result',
   'chat.workerError': 'Error',
   'chat.project': 'Project',
-  'chat.noRole': 'Default role',
+  'chat.noRole': 'No role (platform default)',
   'chat.noProject': 'No project',
   'chat.newConversation': 'New',
   'chat.batchNew': 'Batch new',

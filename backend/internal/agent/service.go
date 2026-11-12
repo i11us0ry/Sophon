@@ -95,6 +95,28 @@ func clampRunBudget(value, fallback, maximum int) int {
 	return value
 }
 
+func resolveRunLimits(options RunOptions, plan missionPlan) (int, int) {
+	maxSegments := clampRunBudget(options.MaxSegments, defaultRunMaxSegments, maxRunMaxSegments)
+	maxToolCalls := clampRunBudget(options.MaxToolCalls, defaultRunMaxToolCalls, maxRunMaxToolCalls)
+	if plan.MaxSegments > 0 {
+		maxSegments = min(
+			maxSegments,
+			clampRunBudget(plan.MaxSegments, defaultRunMaxSegments, maxRunMaxSegments),
+		)
+	}
+	if plan.MaxToolCalls > 0 {
+		maxToolCalls = min(
+			maxToolCalls,
+			clampRunBudget(plan.MaxToolCalls, defaultRunMaxToolCalls, maxRunMaxToolCalls),
+		)
+	}
+	if plan.boundedFindingAudit() {
+		maxSegments = min(maxSegments, boundedLimit(plan.MaxSegments, boundedFindingMaxSegments))
+		maxToolCalls = min(maxToolCalls, boundedLimit(plan.MaxToolCalls, boundedFindingMaxToolCalls))
+	}
+	return maxSegments, maxToolCalls
+}
+
 func ParseAgentMode(mode string) (string, error) {
 	switch strings.ToLower(strings.TrimSpace(mode)) {
 	case "":
@@ -739,6 +761,7 @@ func (s *Service) RunWithOptions(
 	}
 	ctx = execctx.WithAutoContinue(ctx, autoContinue)
 	ctx = withMissionExecution(ctx, missionExecution)
+	ctx = withMissionObjectiveState(ctx)
 	ctx = mcpclient.WithToolInterceptor(ctx, s.toolInterceptor(conversationID, userID, progress))
 	if progress != nil {
 		ctx = execctx.WithProgress(ctx, func(eventType, message string, data map[string]interface{}) error {
@@ -858,14 +881,7 @@ func (s *Service) RunWithOptions(
 	previousProgress := s.missionProgress(ctx, projectID, userID)
 	noProgressRounds := 0
 	segmentCount := 0
-	maxSegmentsLimit := options.MaxSegments
-	maxSegmentsLimit = clampRunBudget(maxSegmentsLimit, defaultRunMaxSegments, maxRunMaxSegments)
-	maxToolCallsLimit := options.MaxToolCalls
-	maxToolCallsLimit = clampRunBudget(maxToolCallsLimit, defaultRunMaxToolCalls, maxRunMaxToolCalls)
-	if intentPlan.boundedFindingAudit() {
-		maxSegmentsLimit = min(maxSegmentsLimit, boundedLimit(intentPlan.MaxSegments, boundedFindingMaxSegments))
-		maxToolCallsLimit = min(maxToolCallsLimit, boundedLimit(intentPlan.MaxToolCalls, boundedFindingMaxToolCalls))
-	}
+	maxSegmentsLimit, maxToolCallsLimit := resolveRunLimits(options, intentPlan)
 	autoContinueSegments := !intentPlan.boundedFindingAudit()
 	autonomousPentest := missionExecution.Plan.allowsPentest()
 	scope := missionExecution.Scope
@@ -1302,12 +1318,14 @@ func (s *Service) RunWithOptions(
 		Type:    "finalization",
 		Message: "最终化检查",
 		Data: map[string]interface{}{
-			"allowed":          decision.Allowed,
-			"reasons":          decision.Reasons,
-			"missionScoped":    scope.Active,
-			"missionHosts":     scope.Hosts,
-			"strategySwitches": strategySwitches,
-			"segmentCount":     segmentCount,
+			"allowed":            decision.Allowed,
+			"reasons":            decision.Reasons,
+			"missionScoped":      scope.Active,
+			"missionHosts":       scope.Hosts,
+			"strategySwitches":   strategySwitches,
+			"segmentCount":       segmentCount,
+			"objectiveCompleted": decision.ObjectiveCompleted,
+			"objectiveReason":    decision.ObjectiveReason,
 		},
 	})
 	if err := s.saveAssistantContent(
