@@ -70,6 +70,31 @@ func TestActiveConversations(t *testing.T) {
 	}
 }
 
+func TestSetMaxPerUserAppliesImmediately(t *testing.T) {
+	manager := NewManagerWithLimit(1)
+	first, _, err := manager.CreateIfIdle("conv-1", "user-1")
+	if err != nil {
+		t.Fatalf("创建首个任务失败: %v", err)
+	}
+	if _, _, err := manager.CreateIfIdle("conv-2", "user-1"); !errors.Is(err, ErrUserTaskLimit) {
+		t.Fatalf("达到上限后应拒绝新任务: %v", err)
+	}
+
+	manager.SetMaxPerUser(2)
+	second, _, err := manager.CreateIfIdle("conv-2", "user-1")
+	if err != nil {
+		t.Fatalf("调高上限后应允许新任务: %v", err)
+	}
+
+	manager.SetMaxPerUser(1)
+	if _, _, err := manager.CreateIfIdle("conv-3", "user-1"); !errors.Is(err, ErrUserTaskLimit) {
+		t.Fatalf("调低上限后应阻止超过新上限的任务: %v", err)
+	}
+
+	first.Complete()
+	second.Complete()
+}
+
 func TestDetachKeepsTaskRunningAndDrainsEvents(t *testing.T) {
 	manager := NewManager()
 	item, _, err := manager.CreateIfIdle("conv-detach", "user-1")

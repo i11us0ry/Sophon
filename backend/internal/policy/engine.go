@@ -59,7 +59,7 @@ func (e *Engine) Evaluate(
 		Targets:             uniqueStrings(targetsForTool(toolName, args)),
 		Reason:              "未命中拦截设置，按基础策略放行",
 	}
-	if len(result.Targets) > 0 && !authorizationScopeExempt(toolName) {
+	if len(result.Targets) > 0 && execctx.AssetRestrictionEnabled(ctx) {
 		campaignID := strings.TrimSpace(execctx.CampaignID(ctx))
 		assets, err := e.db.ListProjectAssets(ctx, projectID, userID)
 		if campaignID != "" {
@@ -120,16 +120,6 @@ func (e *Engine) Evaluate(
 	return result, nil
 }
 
-// authorizationScopeExempt 仅关闭直接命令执行工具的资产范围校验；
-// 拦截规则仍会正常评估。
-func authorizationScopeExempt(toolName string) bool {
-	name := strings.ToLower(strings.TrimSpace(toolName))
-	if index := strings.Index(name, "__"); index >= 0 {
-		name = name[index+2:]
-	}
-	return name == "exec" || name == "execute-python-script"
-}
-
 func targetAllowedByRunScopes(target string, scopes []string) bool {
 	target = strings.Trim(strings.ToLower(strings.TrimSpace(target)), "[]")
 	if target == "" {
@@ -164,9 +154,9 @@ func targetAllowedByRunScopes(target string, scopes []string) bool {
 // destructive semantics remain fully delegated to intercept rules.
 func targetsForTool(toolName string, args map[string]interface{}) []string {
 	switch strings.ToLower(strings.TrimSpace(toolName)) {
-	case "exec":
+	case "exec", "zhizi_exec":
 		return AnalyzeCommand(stringArg(args, "command")).Targets
-	case "execute-python-script":
+	case "execute-python-script", "zhizi_python":
 		workspace := strings.TrimSpace(stringArg(args, "_sophon_workspace"))
 		if workspace == "" {
 			workspace = strings.TrimSpace(stringArg(args, "workdir"))

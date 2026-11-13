@@ -266,6 +266,7 @@ func PermissionCatalog() map[string][]string {
 		"agent":         {"agent:execute"},
 		"tasks":         {"tasks:read", "tasks:write"},
 		"agentRole":     {"agentRole:read", "agentRole:admin"},
+		"zhizi":         {"zhizi:read", "zhizi:execute", "zhizi:write", "zhizi:delete"},
 		"mcp":           {"mcp:read", "mcp:write", "mcp:delete"},
 		"project":       {"project:read", "project:write", "project:delete"},
 		"asset":         {"asset:read", "asset:write", "asset:delete"},
@@ -289,6 +290,7 @@ func operatorPermissions() []string {
 		"agent:execute",
 		"tasks:read", "tasks:write",
 		"agentRole:read",
+		"zhizi:read", "zhizi:execute",
 		"mcp:read", "mcp:write", "mcp:delete",
 		"project:read", "project:write", "project:delete",
 		"asset:read", "asset:write", "asset:delete",
@@ -319,6 +321,7 @@ func readPermissions() []string {
 		"audit:read",
 		"monitor:read",
 		"agentRole:read",
+		"zhizi:read",
 		"mcp:read",
 		"settings:read",
 	}

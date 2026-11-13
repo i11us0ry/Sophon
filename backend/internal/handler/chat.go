@@ -20,6 +20,7 @@ import (
 	"sophon/internal/middleware"
 	storagepkg "sophon/internal/storage"
 	"sophon/internal/task"
+	zhizipkg "sophon/internal/zhizi"
 
 	"github.com/gin-gonic/gin"
 )
@@ -312,7 +313,18 @@ func (h *ChatHandler) GetConversationAgentSettings(c *gin.Context) {
 		internalError(c, "load_agent_settings_failed", "读取会话设置失败")
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"autoContinue": autoContinue})
+	assetRestriction, err := h.db.GetConversationAssetRestriction(
+		c.Request.Context(),
+		conversation.ID,
+	)
+	if err != nil {
+		internalError(c, "load_agent_settings_failed", "读取会话设置失败")
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"autoContinue":            autoContinue,
+		"assetRestrictionEnabled": assetRestriction,
+	})
 }
 
 func (h *ChatHandler) SetConversationAgentSettings(c *gin.Context) {
@@ -321,21 +333,48 @@ func (h *ChatHandler) SetConversationAgentSettings(c *gin.Context) {
 		return
 	}
 	var request struct {
-		AutoContinue *bool `json:"autoContinue"`
+		AutoContinue            *bool `json:"autoContinue"`
+		AssetRestrictionEnabled *bool `json:"assetRestrictionEnabled"`
 	}
-	if err := c.ShouldBindJSON(&request); err != nil || request.AutoContinue == nil {
-		badRequest(c, "invalid_request", "autoContinue 参数格式错误")
+	if err := c.ShouldBindJSON(&request); err != nil ||
+		(request.AutoContinue == nil && request.AssetRestrictionEnabled == nil) {
+		badRequest(c, "invalid_request", "至少提供一个有效的会话设置")
 		return
 	}
-	if err := h.db.SetConversationAutoContinue(
-		c.Request.Context(),
-		conversation.ID,
-		*request.AutoContinue,
-	); err != nil {
-		internalError(c, "save_agent_settings_failed", "保存会话设置失败")
+	if request.AutoContinue != nil {
+		if err := h.db.SetConversationAutoContinue(
+			c.Request.Context(),
+			conversation.ID,
+			*request.AutoContinue,
+		); err != nil {
+			internalError(c, "save_agent_settings_failed", "保存会话设置失败")
+			return
+		}
+	}
+	if request.AssetRestrictionEnabled != nil {
+		if err := h.db.SetConversationAssetRestriction(
+			c.Request.Context(),
+			conversation.ID,
+			*request.AssetRestrictionEnabled,
+		); err != nil {
+			internalError(c, "save_agent_settings_failed", "保存会话设置失败")
+			return
+		}
+	}
+	autoContinue, err := h.db.GetConversationAutoContinue(c.Request.Context(), conversation.ID)
+	if err != nil {
+		internalError(c, "load_agent_settings_failed", "读取会话设置失败")
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"autoContinue": *request.AutoContinue})
+	assetRestriction, err := h.db.GetConversationAssetRestriction(c.Request.Context(), conversation.ID)
+	if err != nil {
+		internalError(c, "load_agent_settings_failed", "读取会话设置失败")
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"autoContinue":            autoContinue,
+		"assetRestrictionEnabled": assetRestriction,
+	})
 }
 
 func (h *ChatHandler) StopConversation(c *gin.Context) {
@@ -879,6 +918,30 @@ func (h *ChatHandler) Stream(c *gin.Context) {
 		})
 		return
 	}
+	if err := h.ensureZhiziLease(c.Request.Context(), conversation.ID, user.ID); err != nil {
+		taskItem.Cancel()
+		if errors.Is(err, database.ErrZhiziNoCapacity) {
+			c.JSON(http.StatusConflict, gin.H{
+				"code":    "zhizi_no_capacity",
+				"message": "当前没有可用的智子分身容量",
+			})
+			return
+		}
+		internalError(c, "zhizi_lease_failed", "获取智子分身失败")
+		return
+	}
+	releaseZhiziOnReturn := true
+	defer func() {
+		if !releaseZhiziOnReturn {
+			return
+		}
+		releaseCtx, cancel := context.WithTimeout(
+			context.WithoutCancel(c.Request.Context()),
+			5*time.Second,
+		)
+		defer cancel()
+		_ = h.db.ReleaseZhiziLeaseByConversation(releaseCtx, conversation.ID)
+	}()
 	if err := h.applyConversationRole(
 		c.Request.Context(),
 		conversation,
@@ -959,6 +1022,7 @@ func (h *ChatHandler) Stream(c *gin.Context) {
 		return
 	}
 
+	releaseZhiziOnReturn = false
 	go h.runWithOptions(
 		taskItem,
 		conversation.ID,
@@ -1120,6 +1184,9 @@ func (h *ChatHandler) streamTask(
 				taskItem.Detach()
 				return
 			}
+		case <-c.Request.Context().Done():
+			taskItem.Detach()
+			return
 		case <-taskItem.Done():
 			for {
 				select {
@@ -1135,12 +1202,9 @@ func (h *ChatHandler) streamTask(
 			}
 		case <-heartbeat.C:
 			if !writeSSE(c, task.Event{Type: "heartbeat", Timestamp: time.Now().UTC()}) {
-				taskItem.Cancel()
+				taskItem.Detach()
 				return
 			}
-		case <-c.Request.Context().Done():
-			taskItem.Detach()
-			return
 		}
 	}
 }
@@ -1211,6 +1275,7 @@ func (h *ChatHandler) DeleteConversation(c *gin.Context) {
 		return
 	}
 	h.manager.CancelConversation(conversationID, user.ID)
+	_ = h.db.ReleaseZhiziLeaseByConversation(c.Request.Context(), conversationID)
 	deleted, err := h.db.DeleteConversations(
 		c.Request.Context(),
 		[]string{conversationID},
@@ -1270,10 +1335,23 @@ func (h *ChatHandler) BatchDeleteConversations(c *gin.Context) {
 	}
 	for _, id := range ownedIDs {
 		h.manager.CancelConversation(id, user.ID)
+		_ = h.db.ReleaseZhiziLeaseByConversation(c.Request.Context(), id)
 		h.removeConversationFiles(id)
 		h.removeConversationWorkspace(id)
 	}
 	c.JSON(http.StatusOK, gin.H{"deleted": deleted})
+}
+
+func (h *ChatHandler) ensureZhiziLease(ctx context.Context, conversationID, userID string) error {
+	state, err := h.db.GetZhiziConversationState(ctx, conversationID, userID)
+	if err != nil {
+		return err
+	}
+	if !state.Enabled || state.Lease != nil {
+		return nil
+	}
+	_, err = h.db.AcquireZhiziLease(ctx, conversationID, userID, zhizipkg.DefaultTTL)
+	return err
 }
 
 func (h *ChatHandler) removeConversationFiles(conversationID string) {

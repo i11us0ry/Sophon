@@ -78,6 +78,15 @@ func RoutePermission(method, path string) string {
 			return "agentRole:read"
 		}
 		return "agentRole:admin"
+	case strings.HasPrefix(path, "/api/zhizi"):
+		if path == "/api/zhizi/nodes/delete" {
+			return "zhizi:delete"
+		}
+		if strings.HasPrefix(path, "/api/zhizi/conversations/") &&
+			(method == http.MethodPut || method == http.MethodPatch) {
+			return "zhizi:execute"
+		}
+		return crudPermission(method, "zhizi")
 	case strings.HasPrefix(path, "/api/mcp"):
 		return crudPermission(method, "mcp")
 	case strings.HasPrefix(path, "/api/admin"):

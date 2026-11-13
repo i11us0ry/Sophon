@@ -1115,179 +1115,99 @@ func TestCodeValidateUsesActiveProjectScopeAsRuntimeTarget(t *testing.T) {
 	}
 }
 
-func TestMissionPolicyRejectsRootOutputWithWorkspaceSuggestion(t *testing.T) {
-	root := t.TempDir()
-	source := filepath.Join(root, "tmp", "workspace", "conv-strings", "src", "bin")
-	if err := os.MkdirAll(source, 0o700); err != nil {
-		t.Fatalf("创建源码目录失败: %v", err)
+func TestMissionPolicyRejectsConfiguredDeniedPaths(t *testing.T) {
+	service := &Service{}
+	ctx := withMissionExecution(context.Background(), missionExecution{
+		Plan:  missionPlan{Mode: missionModeCodeAudit},
+		Phase: missionPhaseSourceAudit,
+	})
+	commands := []string{
+		"cat /opt/sophon/config.yml",
+		"cat /opt/sophon/config.yml.bak.20261113",
+		"cat /opt/sophon/.env",
+		"cat /opt/sophon/deploy/.env.production",
+		"cat /opt/sophon/data/.sophon-job-key",
+		"cat /opt/sophon/data/sophon.db",
+		"cat /opt/sophon/data/sophon.db-wal",
+		"find /opt/sophon/data/observability -type f",
+		"ls /opt/sophon/backend/internal",
+		"ls /opt/sophon/deploy/container",
+		"ls /opt/sophon/roles",
+		"ls /opt/sophon/roles.bak.20261109-audit-fix",
+		"ls /opt/sophon/skills",
+		"ls /opt/sophon/skills.bak.20261109-audit-fix",
+		"ls /opt/sophon/tools",
+		"ls /opt/sophon/tools.bak.20261016-tool-prune",
+		"ls /opt/sophon/scripts",
+		"ls /opt/sophon/thirdTools",
+		"ls /opt/sophon/mcp-servers",
 	}
-	service := &Service{cfg: config.Config{Storage: config.StorageConfig{ArtifactRoot: root}}}
-	ctx := execctx.WithConversationID(context.Background(), "conv-strings")
-	ctx = withMissionExecution(ctx, missionExecution{
-		Plan: missionPlan{
-			Mode:        missionModeCodeAudit,
-			SourceRoots: []string{filepath.Dir(source)},
-		},
+	for _, command := range commands {
+		if allowed, reason := service.missionToolDecision(ctx, "exec", map[string]interface{}{
+			"command": command,
+		}); allowed || !strings.Contains(reason, "命中敏感路径拒绝清单") {
+			t.Fatalf("拒绝清单路径应阻止执行: %s\nallowed=%v reason=%s", command, allowed, reason)
+		}
+	}
+}
+
+func TestMissionPolicyExecSkillFileRedirectsToReadSkill(t *testing.T) {
+	service := &Service{}
+	ctx := withMissionExecution(context.Background(), missionExecution{
+		Plan:  missionPlan{Mode: missionModeCodeAudit},
 		Phase: missionPhaseSourceAudit,
 	})
 	allowed, reason := service.missionToolDecision(ctx, "exec", map[string]interface{}{
-		"command": "mkdir -p /strings_out && strings target.dll > /strings_out/result.txt",
+		"command": "cat /opt/sophon/skills/pentest-output-standards/SKILL.md",
 	})
 	if allowed {
-		t.Fatal("根目录输出路径必须被 Mission Policy 拒绝")
+		t.Fatal("技能文件不应允许通过 exec 读取")
 	}
-	if !strings.Contains(reason, "本地路径超出") ||
-		!strings.Contains(reason, "$SOPHON_WORKSPACE/strings_out") {
-		t.Fatalf("拒绝原因应给出工作区修复建议: %s", reason)
-	}
-}
-
-func TestMissionPolicyAllowsRegexPathsInAwkPatterns(t *testing.T) {
-	root := t.TempDir()
-	source := filepath.Join(root, "tmp", "workspace", "conv-awk", "src")
-	if err := os.MkdirAll(source, 0o700); err != nil {
-		t.Fatalf("创建源码目录失败: %v", err)
-	}
-	service := &Service{cfg: config.Config{Storage: config.StorageConfig{ArtifactRoot: root}}}
-	ctx := execctx.WithConversationID(context.Background(), "conv-awk")
-	ctx = withMissionExecution(ctx, missionExecution{
-		Plan: missionPlan{
-			Mode:        missionModeCodeAudit,
-			SourceRoots: []string{source},
-		},
-		Phase: missionPhaseSourceAudit,
-	})
-	allowed, reason := service.missionToolDecision(ctx, "exec", map[string]interface{}{
-		"command": `cd "$SOPHON_WORKSPACE" && awk -F' -> ' '/NewCode\\.Core\\.Web/{print $1}' out/ref_newcode.txt | sort -u | head -20; echo "=== who references Core.Web types ==="; grep -o "NewCode\\.Core\\.Web\\.[A-Za-z]*" out/ref_newcode.txt | sort | uniq -c | sort -rn | head -20`,
-	})
-	if !allowed {
-		t.Fatalf("awk/grep 正则中的路径片段不应被误判为本地绝对路径: %s", reason)
-	}
-	for _, command := range []string{
-		`cat /tmp/outside*`,
-		`sed -f '/tmp/script.sed' out/ref_newcode.txt`,
-	} {
-		allowed, reason := service.missionToolDecision(ctx, "exec", map[string]interface{}{
-			"command": command,
-		})
-		if allowed {
-			t.Fatalf("真实工作区外路径仍必须拒绝: %s", command)
-		}
-		if !strings.Contains(reason, "本地路径超出") {
-			t.Fatalf("真实路径拒绝原因不正确: %s", reason)
-		}
+	if !strings.Contains(reason, `read_skill(name="pentest-output-standards")`) {
+		t.Fatalf("拒绝提示应引导使用 read_skill: %s", reason)
 	}
 }
 
-func TestMissionPolicyAllowsVariableSuffixPaths(t *testing.T) {
-	root := t.TempDir()
-	source := filepath.Join(root, "tmp", "workspace", "conv-variable", "src")
-	if err := os.MkdirAll(source, 0o700); err != nil {
-		t.Fatalf("创建源码目录失败: %v", err)
-	}
-	service := &Service{cfg: config.Config{Storage: config.StorageConfig{ArtifactRoot: root}}}
-	ctx := execctx.WithConversationID(context.Background(), "conv-variable")
-	ctx = withMissionExecution(ctx, missionExecution{
-		Plan: missionPlan{
-			Mode:        missionModeCodeAudit,
-			SourceRoots: []string{source},
-		},
+func TestMissionPolicyAllowsPathsOutsideConfiguredDenyList(t *testing.T) {
+	service := &Service{}
+	ctx := withMissionExecution(context.Background(), missionExecution{
+		Plan:  missionPlan{Mode: missionModeCodeAudit},
 		Phase: missionPhaseSourceAudit,
 	})
-	for _, command := range []string{
-		`ls "$W"/src`,
-		`find "${WORKSPACE}"/evidence -maxdepth 1`,
-	} {
-		if allowed, reason := service.missionToolDecision(ctx, "exec", map[string]interface{}{
-			"command": command,
-		}); !allowed {
-			t.Fatalf("变量后缀路径不应被误判: %s\n%s", command, reason)
-		}
-	}
-	for _, command := range []string{
+	commands := []string{
+		`cd "$SOPHON_WORKSPACE/kkgai" && grep -oE '"/[a-zA-Z0-9_\\-/{}]*admin[a-zA-Z0-9_\\-/{}]*"' app.js | sort -u`,
 		"cat /etc/passwd",
 		"cat /root/secret",
-		"cat /src",
-	} {
-		if allowed, _ := service.missionToolDecision(ctx, "exec", map[string]interface{}{
-			"command": command,
-		}); allowed {
-			t.Fatalf("真实工作区外路径仍必须拒绝: %s", command)
-		}
+		"cat /tmp/outside",
+		"cat /opt/sophon/tmp/workspace/2aaa0c34b46229caa8ec4aa7596b6027/api/session.json",
+		"echo blocked > /opt/sophon/tmp/workspace/2aaa0c34b46229caa8ec4aa7596b6027/result.txt",
+		"cat /opt/sophon/data/conversation_artifacts/2aaa0c34b46229caa8ec4aa7596b6027/result.txt",
+		"cat /opt/sophon/config.example.yml",
 	}
-}
-
-func TestMissionPolicyAllowsConversationScopedSourcePaths(t *testing.T) {
-	root := t.TempDir()
-	conversationID := "conv-scoped"
-	workspace := filepath.Join(root, "tmp", "workspace", conversationID)
-	uploads := filepath.Join(root, "chat_uploads", conversationID)
-	artifacts := filepath.Join(root, "data", "conversation_artifacts", conversationID)
-	otherUploads := filepath.Join(root, "chat_uploads", "conv-other")
-	for _, dir := range []string{workspace, uploads, artifacts, otherUploads} {
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			t.Fatalf("创建目录失败: %v", err)
-		}
-	}
-	sourceZip := filepath.Join(uploads, "WebSite.zip")
-	if err := os.WriteFile(sourceZip, []byte("zip"), 0o600); err != nil {
-		t.Fatalf("写入源码包失败: %v", err)
-	}
-	service := &Service{cfg: config.Config{Storage: config.StorageConfig{ArtifactRoot: root}}}
-	ctx := execctx.WithConversationID(context.Background(), conversationID)
-	ctx = withMissionExecution(ctx, missionExecution{
-		Plan: missionPlan{
-			Mode:        missionModeCodeAudit,
-			SourceRoots: []string{sourceZip},
-		},
-		Phase:     missionPhaseSourceAudit,
-		AgentMode: agentModeDeep,
-	})
-	ctx = execctx.WithSubagent(ctx, execctx.SubagentInfo{
-		ID: "worker-scoped", Kind: "worker", Mode: subagentModeExecute, Depth: 1,
-	})
-	guidance := service.missionSourceAccessGuidance(ctx)
-	for _, want := range []string{
-		"当前项目公共上传目录", uploads, workspace, sourceZip, `unzip -q ` + sourceZip,
-		"禁止读取其他项目、其他用户",
-	} {
-		if !strings.Contains(guidance, want) {
-			t.Fatalf("Worker 源码访问提示缺少 %q: %s", want, guidance)
-		}
-	}
-	allowedCommands := []string{
-		"ls -la " + uploads,
-		"unzip -l " + sourceZip,
-		`unzip -q ` + sourceZip + ` -d "$SOPHON_WORKSPACE/src"`,
-		"find " + uploads + " -maxdepth 2 -type f",
-		"ls -la " + artifacts,
-		"cp " + sourceZip + " " + filepath.Join(workspace, "source.zip"),
-	}
-	for _, command := range allowedCommands {
+	for _, command := range commands {
 		if allowed, reason := service.missionToolDecision(ctx, "exec", map[string]interface{}{
 			"command": command,
 		}); !allowed {
-			t.Fatalf("当前会话源码路径应允许: %s\n%s", command, reason)
-		}
-	}
-	deniedCommands := []string{
-		"cat " + filepath.Join(root, "config.yml"),
-		"ls -la " + otherUploads,
-		"find " + root,
-		"echo blocked > " + filepath.Join(uploads, "new.txt"),
-		"cp " + filepath.Join(workspace, "source.zip") + " " + filepath.Join(uploads, "copy.zip"),
-		`cd "$SOPHON_WORKSPACE" && ls .. && ls ../..`,
-	}
-	for _, command := range deniedCommands {
-		if allowed, _ := service.missionToolDecision(ctx, "exec", map[string]interface{}{
-			"command": command,
-		}); allowed {
-			t.Fatalf("跨会话、敏感路径或非工作区写入必须拒绝: %s", command)
+			t.Fatalf("未命中拒绝清单的路径不应被拒绝: %s\n%s", command, reason)
 		}
 	}
 }
 
-func TestCodeAuditStageExemptsDirectExecToolsFromTargetScope(t *testing.T) {
+func TestMissionPolicyDeniedPathFollowsSymlinkTarget(t *testing.T) {
+	target := "/opt/sophon/config.yml"
+	if _, err := os.Stat(target); err != nil {
+		t.Skip("当前测试环境不存在容器敏感路径")
+	}
+	link := filepath.Join(t.TempDir(), "config-link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("无法创建符号链接: %v", err)
+	}
+	if !missionPathDenied(link) {
+		t.Fatalf("指向拒绝清单路径的符号链接必须拒绝: %s", link)
+	}
+}
+
+func TestCodeAuditStageRespectsAssetRestriction(t *testing.T) {
 	root := t.TempDir()
 	source := filepath.Join(root, "tmp", "workspace", "conv-audit", "src")
 	if err := os.MkdirAll(source, 0o700); err != nil {
@@ -1324,8 +1244,15 @@ func TestCodeAuditStageExemptsDirectExecToolsFromTargetScope(t *testing.T) {
 	}
 	if allowed, reason := service.missionToolDecision(ctx, "exec", map[string]interface{}{
 		"command": "curl https://evil.example/",
-	}); !allowed {
-		t.Fatalf("代码审计阶段 exec 不应受目标范围限制: %s", reason)
+	}); allowed {
+		t.Fatalf("开启资产限制时代码审计阶段 exec 应受目标范围限制: %s", reason)
+	}
+	if allowed, reason := service.missionToolDecision(
+		execctx.WithAssetRestriction(ctx, false),
+		"exec",
+		map[string]interface{}{"command": "curl https://evil.example/"},
+	); !allowed {
+		t.Fatalf("关闭资产限制后代码审计阶段 exec 应跳过目标范围限制: %s", reason)
 	}
 }
 
@@ -1895,9 +1822,9 @@ func TestProjectGetResourceHonorsMissionPhaseAllowlist(t *testing.T) {
 	}
 }
 
-func TestMissionToolDecisionExemptsDirectExecToolsFromTargetScope(t *testing.T) {
+func TestMissionToolDecisionRespectsAssetRestriction(t *testing.T) {
 	service := &Service{}
-	ctx := withMissionExecution(context.Background(), missionExecution{
+	restrictedCtx := withMissionExecution(context.Background(), missionExecution{
 		Plan: missionPlan{
 			Mode:           missionModePentest,
 			PentestTargets: []string{"falcon.example.com"},
@@ -1908,41 +1835,56 @@ func TestMissionToolDecisionExemptsDirectExecToolsFromTargetScope(t *testing.T) 
 			Active: true,
 		},
 	})
-	if allowed, reason := service.missionToolDecision(ctx, "exec", map[string]interface{}{
+	if allowed, reason := service.missionToolDecision(restrictedCtx, "exec", map[string]interface{}{
 		"command": "curl -s https://falcon.example.com/falcon/user_info/uid_query",
 	}); !allowed {
 		t.Fatalf("明确目标应允许: %s", reason)
 	}
-	if allowed, reason := service.missionToolDecision(ctx, "exec", map[string]interface{}{
+	if allowed, reason := service.missionToolDecision(restrictedCtx, "exec", map[string]interface{}{
 		"command": `printf '<svg xmlns="http://www.w3.org/2000/svg"></svg>' > rt.svg; ` +
 			`curl -s https://falcon.example.com/health; curl -s https://other.example.com/`,
 	}); !allowed {
 		t.Fatalf("至少一个目标在授权范围内时应允许: %s", reason)
 	}
-	if allowed, reason := service.missionToolDecision(ctx, "exec", map[string]interface{}{
+	if allowed, reason := service.missionToolDecision(restrictedCtx, "exec", map[string]interface{}{
 		"command": `printf '<svg xmlns="http://www.w3.org/2000/svg"></svg>' > rt.svg; ls -l rt.svg`,
 	}); !allowed {
 		t.Fatalf("无真实网络目标的本地命令不应触发授权检查: %s", reason)
 	}
-	if allowed, reason := service.missionToolDecision(ctx, "exec", map[string]interface{}{
+	if allowed, reason := service.missionToolDecision(restrictedCtx, "exec", map[string]interface{}{
 		"command": "curl -s https://other.example.com/",
-	}); !allowed {
-		t.Fatalf("exec 不应再受 Mission 目标范围限制: %s", reason)
+	}); allowed {
+		t.Fatalf("开启资产限制时 exec 应受 Mission 目标范围限制: %s", reason)
 	}
-	if allowed, reason := service.missionToolDecision(ctx, "exec", map[string]interface{}{
-		"command": "curl -s https://other.example.com/; curl -s https://third.example.com/",
-	}); !allowed {
-		t.Fatalf("exec 多目标也不应再受 Mission 范围限制: %s", reason)
-	}
-	if allowed, reason := service.missionToolDecision(ctx, "execute-python-script", map[string]interface{}{
+	if allowed, reason := service.missionToolDecision(restrictedCtx, "execute-python-script", map[string]interface{}{
 		"script": "import requests\nrequests.get('https://other.example.com/')",
-	}); !allowed {
-		t.Fatalf("execute-python-script 不应再受 Mission 目标范围限制: %s", reason)
+	}); allowed {
+		t.Fatalf("开启资产限制时 execute-python-script 应受 Mission 目标范围限制: %s", reason)
 	}
-	if allowed, _ := service.missionToolDecision(ctx, "nmap", map[string]interface{}{
+	if allowed, reason := service.missionToolDecision(restrictedCtx, zhiziExecToolName, map[string]interface{}{
+		"command": "curl -s 'https://dns.alidns.com/resolve?name=eye.oa.example.com&type=A'",
+	}); allowed {
+		t.Fatalf("开启资产限制时 zhizi_exec 应受 Mission 目标范围限制: %s", reason)
+	}
+	if allowed, _ := service.missionToolDecision(restrictedCtx, "nmap", map[string]interface{}{
 		"target": "other.example.com",
 	}); allowed {
-		t.Fatalf("其他网络工具仍必须受 Mission 目标范围限制")
+		t.Fatalf("开启资产限制时网络工具必须受 Mission 目标范围限制")
+	}
+
+	unrestrictedCtx := execctx.WithAssetRestriction(restrictedCtx, false)
+	for _, item := range []struct {
+		tool string
+		args map[string]interface{}
+	}{
+		{"exec", map[string]interface{}{"command": "curl -s https://other.example.com/"}},
+		{"execute-python-script", map[string]interface{}{"script": "import requests\nrequests.get('https://other.example.com/')"}},
+		{zhiziExecToolName, map[string]interface{}{"command": "curl -s 'https://dns.alidns.com/resolve?name=eye.oa.example.com&type=A'"}},
+		{"nmap", map[string]interface{}{"target": "other.example.com"}},
+	} {
+		if allowed, reason := service.missionToolDecision(unrestrictedCtx, item.tool, item.args); !allowed {
+			t.Fatalf("关闭资产限制后 %s 应跳过 Mission 目标范围校验: %s", item.tool, reason)
+		}
 	}
 }
 

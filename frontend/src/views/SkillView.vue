@@ -139,7 +139,7 @@ onMounted(load)
   <section class="page factory-page page-skills">
     <header class="page-header">
       <div class="page-heading-with-robot">
-        <PageTitleRobot tone="violet" />
+        <PageTitleRobot tone="indigo" />
         <div>
           <p class="eyebrow">SKILL LIBRARY</p>
           <h1>{{ t('nav.skills') }}</h1>

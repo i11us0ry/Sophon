@@ -24,6 +24,7 @@ import (
 	rbacpkg "sophon/internal/rbac"
 	storagepkg "sophon/internal/storage"
 	"sophon/internal/task"
+	zhizipkg "sophon/internal/zhizi"
 
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/gin-gonic/gin"
@@ -63,6 +64,16 @@ func New(cfg config.Config) (*App, error) {
 		log.Printf("tool execution recovery: %v", err)
 	} else if affected > 0 {
 		log.Printf("tool execution recovery: 已清理 %d 条遗留 running 记录", affected)
+	}
+	if released, err := db.RecoverZhiziLeasesOnStartup(context.Background()); err != nil {
+		log.Printf("zhizi lease recovery: %v", err)
+	} else if released > 0 {
+		log.Printf("zhizi lease recovery: 已释放 %d 条遗留租约", released)
+	}
+	if recovered, err := db.RecoverZhiziNodeInitStatesOnStartup(context.Background()); err != nil {
+		log.Printf("zhizi init recovery: %v", err)
+	} else if recovered > 0 {
+		log.Printf("zhizi init recovery: 已标记 %d 个中断的初始化任务", recovered)
 	}
 	if affected, err := db.InterruptRunningToolJobs(
 		context.Background(),
@@ -175,7 +186,7 @@ func New(cfg config.Config) (*App, error) {
 			log.Printf("recover blocked intent alternatives: 已派生 %d 条替代路径", recovered)
 		}
 	}()
-	taskManager := task.NewManager()
+	taskManager := task.NewManagerWithLimit(cfg.AgentMaxConcurrentSessions)
 	storageService := storagepkg.NewService(db, cfg.Storage, cfg.DataDir)
 	chatUploadsDir := filepath.Join(storageService.ArtifactRoot(), "chat_uploads")
 
@@ -197,7 +208,7 @@ func New(cfg config.Config) (*App, error) {
 		storageService,
 		agentService,
 	)
-	settingsHandler := handler.NewSettingsHandler(cfg, knowledgeService, agentService)
+	settingsHandler := handler.NewSettingsHandler(cfg, knowledgeService, agentService, taskManager)
 	interceptHandler := handler.NewInterceptHandler(db)
 	rbacHandler := handler.NewRBACHandler(rbacService)
 	dashboardHandler := handler.NewDashboardHandler(db)
@@ -217,6 +228,7 @@ func New(cfg config.Config) (*App, error) {
 		db,
 		chatUploadsDir,
 	)
+	zhiziHandler := handler.NewZhiziHandler(db, zhizipkg.NewExecutor(db))
 
 	router.GET("/livez", health.Live)
 	router.GET("/readyz", health.Ready)
@@ -249,6 +261,18 @@ func New(cfg config.Config) (*App, error) {
 	protected.POST("/agent-roles", agentRoleHandler.Create)
 	protected.PUT("/agent-roles/:id", agentRoleHandler.Update)
 	protected.DELETE("/agent-roles/:id", agentRoleHandler.Delete)
+	protected.GET("/zhizi/nodes", zhiziHandler.List)
+	protected.POST("/zhizi/nodes", zhiziHandler.Create)
+	protected.POST("/zhizi/nodes/probe", zhiziHandler.Probe)
+	protected.POST("/zhizi/nodes/test", zhiziHandler.TestBatch)
+	protected.POST("/zhizi/nodes/init", zhiziHandler.InitializeBatch)
+	protected.POST("/zhizi/nodes/delete", zhiziHandler.DeleteBatch)
+	protected.PUT("/zhizi/nodes/:id", zhiziHandler.Update)
+	protected.DELETE("/zhizi/nodes/:id", zhiziHandler.Disable)
+	protected.POST("/zhizi/nodes/:id/test", zhiziHandler.Test)
+	protected.GET("/zhizi/availability", zhiziHandler.Availability)
+	protected.GET("/zhizi/conversations/:id", zhiziHandler.GetConversationState)
+	protected.PUT("/zhizi/conversations/:id", zhiziHandler.SetConversationState)
 	protected.GET("/rbac/metadata", rbacHandler.Metadata)
 	protected.GET("/rbac/roles", rbacHandler.ListRoles)
 	protected.POST("/rbac/roles", rbacHandler.CreateRole)
@@ -260,7 +284,6 @@ func New(cfg config.Config) (*App, error) {
 	protected.DELETE("/rbac/users/:id", rbacHandler.DeleteUser)
 
 	protected.POST("/conversations", chatHandler.CreateConversation)
-	protected.POST("/conversations/batch", chatHandler.CreateConversationBatch)
 	protected.POST("/conversation-batches/:id/start", chatHandler.StartCampaign)
 	protected.POST("/conversation-batches/:id/pause", chatHandler.PauseCampaign)
 	protected.POST("/conversation-batches/:id/resume", chatHandler.ResumeCampaign)

@@ -97,6 +97,7 @@ func seedCampaignP1Handler(t *testing.T) (*ChatHandler, string, string) {
 			},
 		},
 		"",
+		false,
 	); err != nil {
 		t.Fatalf("创建 Campaign 失败: %v", err)
 	}

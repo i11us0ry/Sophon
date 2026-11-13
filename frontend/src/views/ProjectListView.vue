@@ -60,6 +60,13 @@ interface AgentRoleOption {
   enabled: boolean
 }
 
+interface ZhiziAvailability {
+  enabledNodes: number
+  totalSlots: number
+  activeSlots: number
+  available: number
+}
+
 const router = useRouter()
 const projects = ref<Project[]>([])
 const selected = ref<string[]>([])
@@ -90,6 +97,14 @@ const batchDraft = reactive({
 })
 const batchStartInstruction = ref('')
 const batchStartRoleId = ref('')
+const batchStartUseZhizi = ref(false)
+const zhiziLoading = ref(false)
+const zhiziAvailability = ref<ZhiziAvailability>({
+  enabledNodes: 0,
+  totalSlots: 0,
+  activeSlots: 0,
+  available: 0,
+})
 const agentRoles = ref<AgentRoleOption[]>([])
 const rolesLoading = ref(false)
 const deleteTarget = ref<Project | null>(null)
@@ -229,6 +244,25 @@ async function loadAgentRoles() {
   }
 }
 
+async function loadZhiziAvailability() {
+  zhiziLoading.value = true
+  try {
+    zhiziAvailability.value = await apiGet<ZhiziAvailability>('/zhizi/availability')
+  } catch {
+    zhiziAvailability.value = {
+      enabledNodes: 0,
+      totalSlots: 0,
+      activeSlots: 0,
+      available: 0,
+    }
+  } finally {
+    zhiziLoading.value = false
+    if (zhiziAvailability.value.available <= 0) {
+      batchStartUseZhizi.value = false
+    }
+  }
+}
+
 async function run(action: () => Promise<void>, successText = '') {
   error.value = ''
   notice.value = ''
@@ -289,6 +323,8 @@ function openBatchStart() {
   error.value = ''
   notice.value = ''
   batchStartInstruction.value = t('project.batchStartDefaultInstruction')
+  batchStartUseZhizi.value = false
+  void loadZhiziAvailability()
   if (!agentRoles.value.some((role) => role.id === batchStartRoleId.value)) {
     batchStartRoleId.value = agentRoles.value[0]?.id ?? ''
   }
@@ -318,6 +354,7 @@ function closeBatchStart() {
   }
   showBatchStart.value = false
   batchStartInstruction.value = ''
+  batchStartUseZhizi.value = false
 }
 
 function createProject() {
@@ -388,6 +425,10 @@ async function startSelectedProjects() {
     error.value = t('project.batchStartRoleRequired')
     return
   }
+  if (batchStartUseZhizi.value && zhiziAvailability.value.available <= 0) {
+    error.value = t('project.batchStartZhiziNoCapacity')
+    return
+  }
   batchStarting.value = true
   error.value = ''
   notice.value = ''
@@ -396,6 +437,7 @@ async function startSelectedProjects() {
       projectIds: [...selected.value],
       instruction: batchStartInstruction.value.trim(),
       roleId: batchStartRoleId.value,
+      useZhizi: batchStartUseZhizi.value,
     })
     showBatchStart.value = false
     selected.value = []
@@ -508,6 +550,7 @@ async function confirmDelete() {
 onMounted(() => {
   void load()
   void loadAgentRoles()
+  void loadZhiziAvailability()
 })
 </script>
 
@@ -515,7 +558,7 @@ onMounted(() => {
   <section class="page factory-page page-projects">
     <header class="page-header project-control-header">
       <div class="page-heading-with-robot">
-        <PageTitleRobot tone="amber" />
+        <PageTitleRobot tone="orange" />
         <div>
           <p class="eyebrow">PROJECT CONTROL // MISSION REGISTRY</p>
           <h1>{{ t('nav.projects') }}</h1>
@@ -947,6 +990,30 @@ onMounted(() => {
             </option>
           </select>
         </label>
+        <label class="field batch-start-zhizi-field">
+          <span>{{ t('project.batchStartUseZhizi') }}</span>
+          <span class="batch-start-zhizi-control">
+            <input
+              v-model="batchStartUseZhizi"
+              type="checkbox"
+              :disabled="
+                batchStarting || zhiziLoading || zhiziAvailability.available <= 0
+              "
+            />
+            <small>
+              {{
+                zhiziLoading
+                  ? t('common.loading')
+                  : zhiziAvailability.available > 0
+                    ? t('project.batchStartZhiziAvailable', {
+                        available: zhiziAvailability.available,
+                        total: zhiziAvailability.totalSlots,
+                      })
+                    : t('project.batchStartZhiziNoCapacity')
+              }}
+            </small>
+          </span>
+        </label>
         <p v-if="!rolesLoading && !agentRoles.length" class="batch-hint">
           {{ t('project.batchStartNoRoles') }}
         </p>
@@ -1214,6 +1281,30 @@ onMounted(() => {
 .batch-start-instruction {
   min-height: 180px;
   line-height: 1.6;
+}
+
+.batch-start-zhizi-control {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 40px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--field-bg);
+}
+
+.batch-start-zhizi-control input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--project-accent);
+}
+
+.batch-start-zhizi-control small {
+  margin-left: auto;
+  color: var(--text-muted);
+  font-size: 12px;
 }
 
 .batch-assets-input {
@@ -1650,7 +1741,7 @@ onMounted(() => {
 <style scoped>
 /* Project mission registry */
 .main-column .page-projects {
-  --project-accent: #f0a43a;
+  --project-accent: #fb923c;
   --project-mint: #34d399;
   --project-amber: #f0a43a;
   --project-coral: #fb7185;

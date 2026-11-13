@@ -130,6 +130,9 @@ func (r *subAgentRunner) instruction(ctx context.Context) string {
 	if roleBrief := service.delegatedRoleBrief(ctx); roleBrief != "" {
 		instruction += "\n\n" + roleBrief
 	}
+	if service.hasActiveZhiziLease(ctx) {
+		instruction += zhiziExecutionPriorityGuidance("")
+	}
 	if policyPrompt := service.systemAgentPrompt(
 		ctx,
 		SystemMissionPolicyAgentID,

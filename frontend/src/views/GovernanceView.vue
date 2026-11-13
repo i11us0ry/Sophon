@@ -403,7 +403,7 @@ onUnmounted(() => {
   <section class="page factory-page page-governance audit-control">
     <header class="page-header audit-command-header">
       <div class="audit-heading page-heading-with-robot">
-        <PageTitleRobot tone="amber" />
+        <PageTitleRobot tone="lime" />
         <div>
           <p class="eyebrow">AUDIT FLOOR // SECURITY QC</p>
           <h1>{{ t('governance.controlCenter') }}</h1>

@@ -567,7 +567,7 @@ onBeforeUnmount(() => {
   <section class="page factory-page page-workspace artifact-depot">
     <header class="page-header depot-header">
       <div class="depot-heading page-heading-with-robot">
-        <PageTitleRobot tone="cyan" />
+        <PageTitleRobot tone="green" />
         <div>
           <p class="eyebrow">WORKSPACE FLOOR // ARTIFACT DEPOT</p>
           <h1>{{ t('workspace.depot') }}</h1>
@@ -1468,7 +1468,7 @@ onBeforeUnmount(() => {
 <style scoped>
 /* Artifact depot */
 .main-column .page-workspace.artifact-depot {
-  --depot-accent: #55c7e8;
+  --depot-accent: #22c55e;
   --depot-mint: #34d399;
   --depot-amber: #f0a43a;
   --depot-violet: #9d8cff;

@@ -507,7 +507,7 @@ onUnmounted(() => {
         <span class="factory-code">OPS FLOOR // 01</span>
         <p class="eyebrow">SECURITY OPERATIONS</p>
         <div class="dashboard-title-row">
-          <PageTitleRobot tone="amber" />
+          <PageTitleRobot tone="sky" />
           <h1>{{ t('dashboard.title') }}</h1>
         </div>
       </div>

@@ -1,10 +1,25 @@
 <script setup lang="ts">
 withDefaults(
   defineProps<{
-    tone?: 'amber' | 'violet' | 'cyan' | 'coral' | 'mint'
+    tone?:
+      | 'sky'
+      | 'mint'
+      | 'orange'
+      | 'red'
+      | 'pink'
+      | 'violet'
+      | 'indigo'
+      | 'amber'
+      | 'teal'
+      | 'lime'
+      | 'green'
+      | 'magenta'
+      | 'slate'
+      | 'cyan'
+      | 'coral'
   }>(),
   {
-    tone: 'cyan',
+    tone: 'sky',
   },
 )
 </script>
@@ -43,21 +58,21 @@ withDefaults(
   color: var(--title-robot-tone);
 }
 
-.page-title-robot.tone-amber {
-  --title-robot-tone: #f0a43a;
-}
-
-.page-title-robot.tone-violet {
-  --title-robot-tone: #9d8cff;
-}
-
-.page-title-robot.tone-coral {
-  --title-robot-tone: #fb7185;
-}
-
-.page-title-robot.tone-mint {
-  --title-robot-tone: #34d399;
-}
+.page-title-robot.tone-sky,
+.page-title-robot.tone-cyan { --title-robot-tone: #38bdf8; }
+.page-title-robot.tone-mint { --title-robot-tone: #34d399; }
+.page-title-robot.tone-orange { --title-robot-tone: #fb923c; }
+.page-title-robot.tone-red,
+.page-title-robot.tone-coral { --title-robot-tone: #ef4444; }
+.page-title-robot.tone-pink { --title-robot-tone: #f472b6; }
+.page-title-robot.tone-violet { --title-robot-tone: #a78bfa; }
+.page-title-robot.tone-indigo { --title-robot-tone: #6366f1; }
+.page-title-robot.tone-amber { --title-robot-tone: #fbbf24; }
+.page-title-robot.tone-teal { --title-robot-tone: #14b8a6; }
+.page-title-robot.tone-lime { --title-robot-tone: #84cc16; }
+.page-title-robot.tone-green { --title-robot-tone: #22c55e; }
+.page-title-robot.tone-magenta { --title-robot-tone: #ec4899; }
+.page-title-robot.tone-slate { --title-robot-tone: #94a3b8; }
 
 .page-title-robot-antenna {
   position: absolute;

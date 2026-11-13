@@ -47,6 +47,7 @@ type Config struct {
 	AgentMaxTurnTokens         int
 	AgentMaxIterations         int
 	AgentMaxHypotheses         int
+	AgentMaxConcurrentSessions int
 	AgentSubagentConcurrency   int
 	AgentSubagentMaxToolCalls  int
 	AgentSubagentMaxDuration   int
@@ -121,6 +122,7 @@ type agentSection struct {
 	MaxTurnTokens          *int       `yaml:"max_turn_tokens"`
 	MaxIterations          *int       `yaml:"max_iterations"`
 	MaxHypotheses          *int       `yaml:"max_hypotheses"`
+	MaxConcurrentSessions  *int       `yaml:"max_concurrent_sessions"`
 	SubagentMaxConcurrency *int       `yaml:"subagent_max_concurrency"`
 	SubagentMaxToolCalls   *int       `yaml:"subagent_max_tool_calls"`
 	SubagentMaxDuration    *int       `yaml:"subagent_max_duration_seconds"`
@@ -258,6 +260,7 @@ func Load() (Config, error) {
 		AgentMaxTurnTokens:         pickIntAllowZero("SOPHON_AGENT_MAX_TURN_TOKENS", file.Agent.MaxTurnTokens, 0),
 		AgentMaxIterations:         pickIntAllowZero("SOPHON_AGENT_MAX_ITERATIONS", file.Agent.MaxIterations, 40),
 		AgentMaxHypotheses:         normalizeAgentMaxHypotheses(pickIntAllowZero("SOPHON_AGENT_MAX_HYPOTHESES", file.Agent.MaxHypotheses, 200)),
+		AgentMaxConcurrentSessions: normalizeAgentMaxConcurrentSessions(pickInt("SOPHON_AGENT_MAX_CONCURRENT_SESSIONS", file.Agent.MaxConcurrentSessions, 5)),
 		AgentSubagentConcurrency:   normalizeSubagentMaxConcurrency(pickInt("SOPHON_AGENT_SUBAGENT_MAX_CONCURRENCY", file.Agent.SubagentMaxConcurrency, 2)),
 		AgentSubagentMaxToolCalls:  normalizeSubagentMaxToolCalls(pickInt("SOPHON_AGENT_SUBAGENT_MAX_TOOL_CALLS", file.Agent.SubagentMaxToolCalls, 80)),
 		AgentSubagentMaxDuration:   normalizeSubagentMaxDuration(pickInt("SOPHON_AGENT_SUBAGENT_MAX_DURATION_SECONDS", file.Agent.SubagentMaxDuration, 1800)),
@@ -676,6 +679,16 @@ func normalizeAgentMaxHypotheses(value int) int {
 	}
 	if value > 2000 {
 		return 2000
+	}
+	return value
+}
+
+func normalizeAgentMaxConcurrentSessions(value int) int {
+	if value <= 0 {
+		return 5
+	}
+	if value > 1000 {
+		return 1000
 	}
 	return value
 }

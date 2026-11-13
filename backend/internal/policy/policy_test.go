@@ -362,6 +362,7 @@ func TestEngineUsesConfiguredRulesForCommandSafety(t *testing.T) {
 	}
 
 	engine := NewEngine(db)
+	unrestrictedCtx := execctx.WithAssetRestriction(ctx, false)
 	decide := func(tool string, args map[string]interface{}) Decision {
 		t.Helper()
 		decision, err := engine.Evaluate(
@@ -429,8 +430,13 @@ func TestEngineUsesConfiguredRulesForCommandSafety(t *testing.T) {
 	}
 	if decision := decide("execute-python-script", map[string]interface{}{
 		"script": "import requests\nrequests.get('https://evil.example/secret')",
-	}); decision.Kind != DecisionAllow {
-		t.Fatalf("execute-python-script 不应再受项目资产范围限制: %+v", decision)
+	}); decision.Kind != DecisionDeny {
+		t.Fatalf("开启资产限制时 execute-python-script 应受项目范围限制: %+v", decision)
+	}
+	if decision := decide("zhizi_exec", map[string]interface{}{
+		"command": "curl -s 'https://dns.alidns.com/resolve?name=eye.oa.example.com&type=A'",
+	}); decision.Kind != DecisionDeny {
+		t.Fatalf("开启资产限制时 zhizi_exec 应受项目范围限制: %+v", decision)
 	}
 	if decision := decide("execute-python-script", map[string]interface{}{
 		"script": `files=["Kingdee.BOS.FileServer.App.Core.il","Kingdee.BOS.FileServer.Core.il","Kingdee.BOS.FileServer.Web.il"]
@@ -511,8 +517,30 @@ for name in files:
 	}
 	if decision := decide("exec", map[string]interface{}{
 		"command": "curl http://unauthorized.example/api",
-	}); decision.Kind != DecisionAllow {
-		t.Fatalf("exec 不应再受项目资产范围限制: %+v", decision)
+	}); decision.Kind != DecisionDeny {
+		t.Fatalf("开启资产限制时 exec 应受项目范围限制: %+v", decision)
+	}
+	decision, err := engine.Evaluate(
+		unrestrictedCtx,
+		"project-policy",
+		"user-1",
+		"sophon-tool-runner",
+		"exec",
+		map[string]interface{}{"command": "curl http://unauthorized.example/api"},
+	)
+	if err != nil || decision.Kind != DecisionAllow {
+		t.Fatalf("关闭资产限制后 exec 应跳过项目范围校验: decision=%+v err=%v", decision, err)
+	}
+	decision, err = engine.Evaluate(
+		unrestrictedCtx,
+		"project-policy",
+		"user-1",
+		"sophon-tool-runner",
+		"nmap",
+		map[string]interface{}{"target": "198.51.100.10"},
+	)
+	if err != nil || decision.Kind != DecisionAllow {
+		t.Fatalf("关闭资产限制后其他工具应跳过项目范围校验: decision=%+v err=%v", decision, err)
 	}
 	if decision := decide("nmap", map[string]interface{}{
 		"target": "127.0.0.1",
@@ -525,7 +553,7 @@ for name in files:
 		t.Fatalf("范围外扫描目标应拒绝: %+v", decision)
 	}
 	authorizedCtx := execctx.WithAuthorizedScopes(ctx, []string{"10.20.0.0/16"})
-	decision, err := engine.Evaluate(
+	decision, err = engine.Evaluate(
 		authorizedCtx,
 		"project-policy",
 		"user-1",
@@ -590,8 +618,19 @@ func TestEngineAppliesConfiguredInterceptRules(t *testing.T) {
 	decision, err = engine.Evaluate(ctx, "project-intercept", "user-1", "sophon-tool-runner", "exec", map[string]interface{}{
 		"command": "curl http://evil.example/health",
 	})
+	if err != nil || decision.Kind != DecisionDeny {
+		t.Fatalf("开启资产限制时 allow 规则不能绕过项目授权范围: decision=%+v err=%v", decision, err)
+	}
+	decision, err = engine.Evaluate(
+		execctx.WithAssetRestriction(ctx, false),
+		"project-intercept",
+		"user-1",
+		"sophon-tool-runner",
+		"exec",
+		map[string]interface{}{"command": "curl http://evil.example/health"},
+	)
 	if err != nil || decision.Kind != DecisionAllow {
-		t.Fatalf("exec 应跳过项目授权范围但仍按拦截规则放行: decision=%+v err=%v", decision, err)
+		t.Fatalf("关闭资产限制后应按 allow 规则放行: decision=%+v err=%v", decision, err)
 	}
 	decision, err = engine.Evaluate(ctx, "project-intercept", "user-1", "mcp-server", "nmap", map[string]interface{}{
 		"target": "evil.example",
@@ -614,7 +653,7 @@ func TestEngineAppliesConfiguredInterceptRules(t *testing.T) {
 	}
 }
 
-func TestEngineDoesNotApplyHiddenCampaignScope(t *testing.T) {
+func TestEngineAppliesCampaignScopeUnlessAssetRestrictionDisabled(t *testing.T) {
 	db, err := database.Open(filepath.Join(t.TempDir(), "policy-campaign.db"))
 	if err != nil {
 		t.Fatalf("打开数据库失败: %v", err)
@@ -672,6 +711,7 @@ func TestEngineDoesNotApplyHiddenCampaignScope(t *testing.T) {
 			},
 		}},
 		"",
+		false,
 	); err != nil {
 		t.Fatalf("创建 Campaign 失败: %v", err)
 	}
@@ -689,8 +729,19 @@ func TestEngineDoesNotApplyHiddenCampaignScope(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Campaign 范围评估失败: %v", err)
 	}
-	if decision.Kind != DecisionAllow {
-		t.Fatalf("Campaign 中 exec 也不应受目标范围限制: %+v", decision)
+	if decision.Kind != DecisionDeny {
+		t.Fatalf("开启资产限制时 Campaign 中 exec 应受目标范围限制: %+v", decision)
+	}
+	decision, err = engine.Evaluate(
+		execctx.WithAssetRestriction(campaignCtx, false),
+		"project-campaign-policy",
+		"user-1",
+		"sophon-tool-runner",
+		"exec",
+		map[string]interface{}{"command": "curl http://198.51.100.10/"},
+	)
+	if err != nil || decision.Kind != DecisionAllow {
+		t.Fatalf("关闭资产限制后 Campaign 中 exec 应跳过目标范围限制: decision=%+v err=%v", decision, err)
 	}
 
 	task, err := db.CreateCampaignReviewTask(ctx, campaignID, "user-1", 1)

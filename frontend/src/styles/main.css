@@ -441,6 +441,7 @@ a {
 }
 
 .nav a {
+  --nav-tone: var(--accent-solid);
   position: relative;
   display: flex;
   gap: 10px;
@@ -458,19 +459,34 @@ a {
     border-color 0.15s ease;
 }
 
+.nav-dashboard { --nav-tone: #38bdf8; }
+.nav-chat { --nav-tone: #34d399; }
+.nav-projects { --nav-tone: #fb923c; }
+.nav-vulnerabilities { --nav-tone: #ef4444; }
+.nav-assets { --nav-tone: #f472b6; }
+.nav-roles { --nav-tone: #a78bfa; }
+.nav-skills { --nav-tone: #6366f1; }
+.nav-mcp { --nav-tone: #fbbf24; }
+.nav-zhizi { --nav-tone: #14b8a6; }
+.nav-governance { --nav-tone: #84cc16; }
+.nav-workspace { --nav-tone: #22c55e; }
+.nav-rbac { --nav-tone: #ec4899; }
+.nav-settings { --nav-tone: #94a3b8; }
+
 .nav a:hover,
 .nav a.router-link-active {
-  color: #eceff1;
-  border-left-color: var(--accent);
-  background: rgba(255, 255, 255, 0.05);
+  color: var(--nav-tone);
+  border-left-color: var(--nav-tone);
+  background: color-mix(in srgb, var(--nav-tone) 11%, transparent);
 }
 
 .nav a.router-link-active {
-  color: var(--sidebar-active-text);
-  border-color: transparent;
-  border-left-color: #2196f3;
-  background: var(--sidebar-active);
+  color: var(--nav-tone);
+  border-color: color-mix(in srgb, var(--nav-tone) 20%, transparent);
+  border-left-color: var(--nav-tone);
+  background: color-mix(in srgb, var(--nav-tone) 14%, var(--sidebar-bg, transparent));
   font-weight: 500;
+  box-shadow: inset 3px 0 0 color-mix(in srgb, var(--nav-tone) 72%, transparent);
 }
 
 .nav a.router-link-active::after {
@@ -478,6 +494,7 @@ a {
 }
 
 .nav-icon {
+  color: var(--nav-tone);
   flex-shrink: 0;
   width: 18px;
   height: 18px;
@@ -491,7 +508,9 @@ a {
 
 .nav a:hover .nav-icon,
 .nav a.router-link-active .nav-icon {
+  color: var(--nav-tone);
   opacity: 1;
+  filter: drop-shadow(0 0 4px color-mix(in srgb, var(--nav-tone) 45%, transparent));
 }
 
 .user-panel {
@@ -2293,7 +2312,7 @@ html.paused *::after {
   .nav a:hover,
   .nav a.router-link-active {
     border-left-color: transparent;
-    border-bottom-color: var(--accent-solid);
+    border-bottom-color: var(--nav-tone);
   }
 
   .nav a.router-link-active::after {

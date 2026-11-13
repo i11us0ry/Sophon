@@ -847,7 +847,7 @@ onMounted(async () => {
   <section class="page factory-page page-projects">
     <header class="page-header project-detail-header">
       <div class="page-heading-with-robot">
-        <PageTitleRobot tone="amber" />
+        <PageTitleRobot tone="orange" />
         <div class="project-detail-heading">
           <p class="eyebrow">PROJECT CONTROL // MISSION DETAIL</p>
           <div class="project-title-line">
@@ -2454,7 +2454,7 @@ onMounted(async () => {
 <style scoped>
 /* Project mission control */
 .main-column .page-projects {
-  --project-accent: #f0a43a;
+  --project-accent: #fb923c;
   --project-mint: #34d399;
   --project-coral: #fb7185;
   --project-violet: #9d8cff;

@@ -66,6 +66,7 @@ Sophon 的目标不是让模型无限调用扫描器，而是让每次测试具�
 | 证据驱动 | 漏洞需关联工具输出、请求响应、源码位置或可复现步骤 |
 | 安全边界 | Mission Policy、授权范围、路径限制、人工审批和资源预算 |
 | MCP 与本地工具 | 支持 MCP 服务、工具白名单、YAML 工具和本地命令环境 |
+| 智子分身 | 将高并发扫描、脚本执行和工具调用分流到多台 VPS，降低本地资源压力 |
 | 代码审计 | 内置 Java、PHP、.NET、二进制和 App 逆向相关能力 |
 | 漏洞治理 | 漏洞审核、状态流转、复测、证据引用和报告导出 |
 | 审计与 RBAC | 登录审计、工具执行记录、Agent 状态、Token 用量和路由级权限 |
@@ -115,6 +116,25 @@ Mission Policy ─────────────────┘
 
 LLM ── 需要完整步骤时 ──> read_skill ──> 技能正文
 ```
+
+## 智子分身
+
+智子分身用于将扫描、脚本执行和工具调用分流到一台或多台 VPS 节点，适合资产数量大、并发会话多或本地 CPU、内存资源有限的场景。每个启用智子的会话会占用一个可用分身槽位，Agent 优先通过 `zhizi_exec` 和 `zhizi_python` 在远端执行任务。
+
+### 使用步骤
+
+1. 打开“智子分身”，添加一个或多个 VPS 地址、SSH 端口、SSH 用户、密码和远端工作目录。
+2. 选中节点执行“批量测试”。平台会探测并记录 SSH 主机指纹，只有测试成功且没有连接错误的节点会计入可用容量。
+3. 选中节点执行“批量初始化”。初始化会检查当前软件源和已有环境，在需要时切换国内镜像，安装 Python、PHP、Java、Maven、Composer 和常用 Linux 工具。
+4. 在对话的“运行设置”中开启“智子”。当前会话会独占一个可用槽位，其他会话不能抢占同一槽位。
+5. 发送任务后，Agent 优先使用 `zhizi_exec`、`zhizi_python` 在 VPS 上执行脚本和命令；任务结束或会话关闭后释放槽位。
+
+### 注意事项
+
+- Sophon 主机必须能够访问 VPS 的 SSH 端口，执行初始化的账户需要安装软件所需的 sudo 或 root 权限。
+- SSH 密码或私钥会加密保存。节点处于活跃任务时不能编辑或删除，避免运行中的任务连接到错误环境。
+- 批量初始化会检查命令是否已经存在，不会重复安装已有基础工具，并会配置国内 PyPI 和 Maven 镜像。
+- “运行设置”中的“资产限制”开启时，智子远端工具同样受项目或 Campaign 授权资产范围约束；关闭后仅跳过资产范围校验，其他安全策略仍然生效。
 
 ## 运行要求
 
@@ -241,6 +261,10 @@ Sophon 仅允许用于本公司、本组织拥有或明确控制的系统，以�
 
 本声明不构成法律意见，也不能替代正式授权文件或专业法律建议。
 
+## 更新记录
+
+- 20261113: 新增智子分身功能、修复一些小bug
+
 ## 许可证
 
 仓库当前未包含项目级 `LICENSE` 文件。除版权所有者书面授权外，保留所有权利。第三方工具和依赖遵循各自许可证。
@@ -297,6 +321,7 @@ Sophon is designed to make every test scoped, traceable, evidence-backed, review
 | Evidence-driven findings | Tool output, HTTP evidence, source locations, and reproduction steps |
 | Security boundaries | Mission Policy, authorized scope, path restrictions, HITL, and budgets |
 | MCP and local tools | MCP servers, allowlists, YAML tools, and local command execution |
+| Zhizi Clone | Distributes concurrent scanning, script execution, and tool calls across VPS nodes |
 | Code review | Java, PHP, .NET, binary analysis, and mobile reverse engineering |
 | Vulnerability governance | Review, status, retest, evidence references, and report export |
 | Audit and RBAC | Audit logs, tool execution records, token usage, and route permissions |
@@ -346,6 +371,25 @@ Mission Policy ──────────────────┘
 
 LLM ── when full steps are needed ──> read_skill ──> Skill body
 ```
+
+## Zhizi Clone
+
+Zhizi Clone distributes scanning, script execution, and tool calls across one or more VPS nodes. It is intended for large asset sets, multiple concurrent conversations, or hosts with limited local CPU and memory. Each conversation with Zhizi enabled occupies an available clone slot, and the Agent prioritizes `zhizi_exec` and `zhizi_python` for remote execution.
+
+### Setup and Usage
+
+1. Open **Zhizi Clone** and add one or more VPS addresses, SSH ports, SSH users, passwords, and remote working directories.
+2. Select the nodes and run **Batch Test**. Sophon probes and records the SSH host fingerprint. Only nodes with a successful test and no connection error contribute to available capacity.
+3. Select the nodes and run **Batch Initialize**. Initialization checks package mirrors and existing software, switches to domestic mirrors when needed, and installs Python, PHP, Java, Maven, Composer, and common Linux tools.
+4. Enable **Zhizi** in the conversation's **Run settings**. The conversation exclusively occupies one available slot.
+5. The Agent prioritizes `zhizi_exec` and `zhizi_python` so scripts and commands run on the VPS. The slot is released when the task finishes or the conversation is closed.
+
+### Notes
+
+- The Sophon host must be able to reach the VPS SSH port, and the initialization account needs root or sudo access for package installation.
+- SSH passwords and private keys are stored encrypted. Nodes with active tasks cannot be edited or deleted, preventing running tasks from switching to an incorrect environment.
+- Batch initialization checks for existing commands, avoids reinstalling available base tools, and configures domestic PyPI and Maven mirrors.
+- When **Asset restriction** is enabled in Run settings, Zhizi remote tools are also limited to authorized project or Campaign assets. Disabling it skips only asset scope checks; other security policies remain active.
 
 ## Requirements
 
@@ -471,6 +515,10 @@ Users must confirm the authorization authority, target scope, time window, permi
 To the maximum extent permitted by law, the project authors, contributors, and maintainers disclaim all liability for misuse, unauthorized testing, illegal activity, configuration errors, tool defects, model output, data disclosure, business interruption, property damage, or third-party claims.
 
 This statement is not legal advice and does not replace a formal authorization document or professional legal guidance.
+
+## Changelog
+
+- 20261113: Added the Zhizi Clone feature and fixed minor bugs.
 
 ## License
 

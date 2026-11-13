@@ -427,7 +427,7 @@ onUnmounted(() => {
   <section class="page asset-page factory-page page-assets asset-recon">
     <header class="page-header asset-header">
       <div class="page-heading-with-robot">
-        <PageTitleRobot tone="coral" />
+        <PageTitleRobot tone="pink" />
         <div>
           <p class="eyebrow">ASSET MANAGEMENT</p>
           <h1>{{ t('nav.assets') }}</h1>
@@ -1456,7 +1456,7 @@ onUnmounted(() => {
 <style scoped>
 /* Asset reconnaissance registry */
 .main-column .page-assets.asset-recon {
-  --asset-accent: #55c7e8;
+  --asset-accent: #f472b6;
   --asset-mint: #34d399;
   --asset-amber: #f0a43a;
   --asset-violet: #9d8cff;
@@ -2219,7 +2219,7 @@ onUnmounted(() => {
 
 .asset-drawer-layer,
 .asset-dialog-layer {
-  --asset-accent: #55c7e8;
+  --asset-accent: #f472b6;
   --asset-mint: #34d399;
   --asset-amber: #f0a43a;
   --asset-violet: #9d8cff;

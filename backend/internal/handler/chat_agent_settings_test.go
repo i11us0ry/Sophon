@@ -57,8 +57,18 @@ func TestConversationAgentSettingsAndStop(t *testing.T) {
 		handler.GetConversationAgentSettings,
 	)
 	if settings.Code != http.StatusOK ||
-		!strings.Contains(settings.Body.String(), `"autoContinue":true`) {
-		t.Fatalf("默认自动继续设置异常: status=%d body=%s", settings.Code, settings.Body.String())
+		!strings.Contains(settings.Body.String(), `"autoContinue":true`) ||
+		!strings.Contains(settings.Body.String(), `"assetRestrictionEnabled":true`) {
+		t.Fatalf("默认会话设置异常: status=%d body=%s", settings.Code, settings.Body.String())
+	}
+	invalid := call(
+		http.MethodPut,
+		"/api/conversations/conv-agent-settings/agent-settings",
+		`{}`,
+		handler.SetConversationAgentSettings,
+	)
+	if invalid.Code != http.StatusBadRequest {
+		t.Fatalf("空设置请求应被拒绝: status=%d body=%s", invalid.Code, invalid.Body.String())
 	}
 	update := call(
 		http.MethodPut,
@@ -72,6 +82,25 @@ func TestConversationAgentSettingsAndStop(t *testing.T) {
 	enabled, err := db.GetConversationAutoContinue(ctx, "conv-agent-settings")
 	if err != nil || enabled {
 		t.Fatalf("设置未持久化: enabled=%v err=%v", enabled, err)
+	}
+	assetRestriction, err := db.GetConversationAssetRestriction(ctx, "conv-agent-settings")
+	if err != nil || !assetRestriction {
+		t.Fatalf("更新自动继续不应覆盖资产限制: enabled=%v err=%v", assetRestriction, err)
+	}
+	update = call(
+		http.MethodPut,
+		"/api/conversations/conv-agent-settings/agent-settings",
+		`{"assetRestrictionEnabled":false}`,
+		handler.SetConversationAgentSettings,
+	)
+	if update.Code != http.StatusOK ||
+		!strings.Contains(update.Body.String(), `"autoContinue":false`) ||
+		!strings.Contains(update.Body.String(), `"assetRestrictionEnabled":false`) {
+		t.Fatalf("更新资产限制失败: status=%d body=%s", update.Code, update.Body.String())
+	}
+	assetRestriction, err = db.GetConversationAssetRestriction(ctx, "conv-agent-settings")
+	if err != nil || assetRestriction {
+		t.Fatalf("资产限制设置未持久化: enabled=%v err=%v", assetRestriction, err)
 	}
 
 	taskItem, _, err := manager.CreateIfIdle("conv-agent-settings", "user-1")

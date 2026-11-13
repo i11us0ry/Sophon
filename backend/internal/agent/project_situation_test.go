@@ -98,6 +98,26 @@ func TestProjectSituationTruncatesLongFact(t *testing.T) {
 	}
 }
 
+func TestProjectSituationDoesNotReportFalsePentestAuthorization(t *testing.T) {
+	service, ctx := openProjectToolService(t, true)
+	ctx = withMissionExecution(ctx, missionExecution{
+		Plan:  missionPlan{Mode: missionModeGeneral},
+		Phase: missionPhaseGeneral,
+	})
+	situation := service.projectSituationForContext(
+		ctx,
+		"project-tools",
+		"user-1",
+		"conv-tools",
+	)
+	if strings.Contains(situation, "渗透授权：未授予") {
+		t.Fatalf("普通任务不应误报渗透授权状态：\n%s", situation)
+	}
+	if !strings.Contains(situation, "仅作为背景，不属于本轮执行范围") {
+		t.Fatalf("应保留历史目标范围提示：\n%s", situation)
+	}
+}
+
 func TestProjectSituationExcludesAuditCellsFromCriticalMemory(t *testing.T) {
 	service, ctx := openProjectToolService(t, true)
 	now := time.Now().UTC()

@@ -58,6 +58,7 @@ func TestConversationBatchBriefingIncludesTargetAndInstruction(t *testing.T) {
 			Conversation: child,
 		}},
 		"",
+		false,
 	); err != nil {
 		t.Fatalf("创建批次失败: %v", err)
 	}

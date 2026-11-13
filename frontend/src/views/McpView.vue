@@ -586,7 +586,7 @@ onMounted(() => {
   <section class="page factory-page page-mcp mcp-control">
     <header class="page-header mcp-command-header">
       <div class="mcp-heading page-heading-with-robot">
-        <PageTitleRobot tone="cyan" />
+        <PageTitleRobot tone="amber" />
         <div>
           <p class="eyebrow">MCP FLOOR // ROBOT LINK</p>
           <h1>{{ t('mcp.controlCenter') }}</h1>
@@ -1769,7 +1769,7 @@ onMounted(() => {
 <style scoped>
 /* MCP robot control room */
 .main-column .page-mcp.mcp-control {
-  --mcp-accent: #55c7e8;
+  --mcp-accent: #fbbf24;
   --mcp-mint: #34d399;
   --mcp-amber: #f0a43a;
   --mcp-coral: #fb7185;

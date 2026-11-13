@@ -62,6 +62,26 @@ var (
 	missionAppArtifactPattern     = regexp.MustCompile(`(?i)(/[A-Za-z0-9._~@+/-]+\.(?:apk|ipa|app))\b`)
 	missionVulnerabilityIDPattern = regexp.MustCompile(`(?i)\b(?:vul|vulnerability|finding)[-_][a-z0-9-]{3,}\b|(?:\b[a-f0-9]{16,64}\b)`)
 	missionWildcardIPv4Pattern    = regexp.MustCompile(`^(\d{1,3})\.(\d{1,3})\.\*\.\*$`)
+	missionDeniedPathPatterns     = []*regexp.Regexp{
+		regexp.MustCompile(`^/opt/sophon/config\.yml$`),
+		regexp.MustCompile(`^/opt/sophon/config\.yml\.bak\.[^/]+$`),
+		regexp.MustCompile(`^/opt/sophon/\.env$`),
+		regexp.MustCompile(`^/opt/sophon/deploy/\.env[^/]*$`),
+		regexp.MustCompile(`^/opt/sophon/data/\.sophon-job-key$`),
+		regexp.MustCompile(`^/opt/sophon/data/sophon\.db[^/]*$`),
+		regexp.MustCompile(`^/opt/sophon/data/observability(?:/.*)?$`),
+		regexp.MustCompile(`^/opt/sophon/backend(?:/.*)?$`),
+		regexp.MustCompile(`^/opt/sophon/deploy(?:/.*)?$`),
+		regexp.MustCompile(`^/opt/sophon/roles(?:/.*)?$`),
+		regexp.MustCompile(`^/opt/sophon/roles\.bak\.[^/]+(?:/.*)?$`),
+		regexp.MustCompile(`^/opt/sophon/skills(?:/.*)?$`),
+		regexp.MustCompile(`^/opt/sophon/skills\.bak\.[^/]+(?:/.*)?$`),
+		regexp.MustCompile(`^/opt/sophon/tools(?:/.*)?$`),
+		regexp.MustCompile(`^/opt/sophon/tools\.bak\.[^/]+(?:/.*)?$`),
+		regexp.MustCompile(`^/opt/sophon/scripts(?:/.*)?$`),
+		regexp.MustCompile(`^/opt/sophon/thirdTools(?:/.*)?$`),
+		regexp.MustCompile(`^/opt/sophon/mcp-servers(?:/.*)?$`),
+	}
 )
 
 type missionPlan struct {
@@ -1988,7 +2008,36 @@ func (s *Service) mainAgentInstruction(ctx context.Context) string {
 	); strings.TrimSpace(policyPrompt) != "" {
 		instruction += "\n\n" + policyPrompt
 	}
+	if s != nil && s.db != nil {
+		conversationID := strings.TrimSpace(execctx.ConversationID(ctx))
+		userID := strings.TrimSpace(execctx.UserID(ctx))
+		if conversationID != "" && userID != "" {
+			if state, err := s.db.GetZhiziConversationState(ctx, conversationID, userID); err == nil &&
+				state.Enabled && state.Lease != nil {
+				instruction += zhiziExecutionPriorityGuidance(state.Lease.Node.Name)
+			}
+		}
+	}
 	return withPlatformVerificationWorkflow(instruction)
+}
+
+func zhiziExecutionPriorityGuidance(nodeName string) string {
+	nodeName = strings.TrimSpace(nodeName)
+	var builder strings.Builder
+	builder.WriteString("\n\n【智子分身执行优先级（强约束）】\n")
+	if nodeName != "" {
+		builder.WriteString("当前会话已绑定可用的智子分身 VPS：")
+		builder.WriteString(nodeName)
+		builder.WriteString("。\n")
+	} else {
+		builder.WriteString("当前会话已绑定可用的智子分身 VPS。\n")
+	}
+	builder.WriteString("1. shell 命令、Python、脚本、扫描器、文件处理、上传下载和网络请求，必须首先选择 zhizi_exec、zhizi_python、zhizi_upload、zhizi_download。\n")
+	builder.WriteString("2. 不得在没有尝试智子工具的情况下直接选择本地 exec、execute-python-script 或本地网络工具。\n")
+	builder.WriteString("3. 只有智子工具明确失败、租约不可用，或任务必须访问 Sophon 本地控制面数据时，才允许使用本地工具。\n")
+	builder.WriteString("4. 使用本地 exec 或 execute-python-script 前，必须确认并说明智子无法完成该操作。\n")
+	builder.WriteString("5. 项目元数据、read_skill、read_artifact、project_* 等控制面操作仍按原规则使用，不要要求用户复制 SSH 凭据。")
+	return builder.String()
 }
 
 func (s *Service) missionSourceAccessGuidance(ctx context.Context) string {
@@ -2295,6 +2344,9 @@ func (s *Service) activeToolsForMission(
 		if err != nil || info == nil || !missionToolAllowed(plan, phase, info.Name) {
 			continue
 		}
+		if isZhiziToolName(info.Name) && !s.hasActiveZhiziLease(ctx) {
+			continue
+		}
 		if normalizeAgentMode(mode) == agentModeDeep &&
 			plan.Mode == missionModeCodeAudit &&
 			phase == missionPhaseSourceAudit &&
@@ -2345,7 +2397,8 @@ func (s *Service) missionToolDecision(
 			return false, "明确目标已完成，禁止继续启动新的子 Agent"
 		case plainName == "exec",
 			plainName == "execute-python-script",
-			plainName == "mcp_use_tool":
+			plainName == "mcp_use_tool",
+			isZhiziToolName(plainName):
 			return false, "明确目标已完成，禁止继续执行新的工具任务"
 		}
 	}
@@ -2385,13 +2438,15 @@ func (s *Service) missionToolDecision(
 		)
 	}
 	networkCapable := missionToolIsNetworkCapable(plainName, args)
-	if !missionStageAllowsNetwork(execution.Phase) && !networkCapable {
-		if allowed, reason := s.missionLocalPathsAllowed(ctx, execution.Plan, args); !allowed {
+	if !missionStageAllowsNetwork(execution.Phase) &&
+		!networkCapable &&
+		!isZhiziToolName(plainName) {
+		if allowed, reason := missionLocalPathsAllowed(args); !allowed {
 			return false, reason
 		}
 		return true, ""
 	}
-	if missionAuthorizationScopeExempt(plainName) {
+	if !execctx.AssetRestrictionEnabled(ctx) {
 		return true, ""
 	}
 	if execution.Plan.ProjectScope ||
@@ -2420,15 +2475,6 @@ func (s *Service) missionToolDecision(
 		)
 	}
 	return true, ""
-}
-
-func missionAuthorizationScopeExempt(toolName string) bool {
-	switch strings.ToLower(strings.TrimSpace(toolName)) {
-	case "exec", "execute-python-script":
-		return true
-	default:
-		return false
-	}
 }
 
 func projectReadResourceMissionDecision(
@@ -2481,164 +2527,47 @@ func authorizeProjectReadResource(ctx context.Context, toolName, resource string
 	return nil
 }
 
-func (s *Service) missionLocalPathsAllowed(
-	ctx context.Context,
-	plan missionPlan,
-	args map[string]interface{},
-) (bool, string) {
-	if s == nil {
-		return false, "本地路径策略不可用"
-	}
+func missionLocalPathsAllowed(args map[string]interface{}) (bool, string) {
 	var content strings.Builder
 	collectProbeStrings(args, &content)
 	text := strings.TrimSpace(content.String())
 	if text == "" {
 		return true, ""
 	}
-	lower := strings.ToLower(text)
-	if strings.Contains(lower, "../") || strings.Contains(lower, "cd ..") {
-		return false, "本地分析禁止使用可逃逸工作区的相对路径"
-	}
-	pathPolicyText := strings.ReplaceAll(lower, "/dev/null", "")
-	for _, marker := range []string{
-		"~/", "$home", "${home}", "/root/", "/etc/", "/proc/", "/sys/", "/dev/",
-	} {
-		if strings.Contains(pathPolicyText, marker) {
-			return false, "本地分析禁止访问工作区外敏感路径"
-		}
-	}
-	root := strings.TrimSpace(s.configSnapshot().Storage.ArtifactRoot)
-	if root == "" {
-		return false, "存储根目录未配置，无法校验本地路径"
-	}
-	root, err := filepath.Abs(root)
-	if err != nil {
-		return false, "无法解析存储根目录"
-	}
-	conversationID := strings.TrimSpace(execctx.ConversationID(ctx))
-	workspace := filepath.Join(root, "tmp", "workspace", conversationID)
-	allowedRoots := []string{workspace}
-	readHints := []string{workspace}
-	if conversationID != "" {
-		for _, path := range []string{
-			filepath.Join(root, "chat_uploads", conversationID),
-			filepath.Join(root, "data", "conversation_artifacts", conversationID),
-		} {
-			allowedRoots = append(allowedRoots, path)
-			readHints = append(readHints, path)
-		}
-	}
-	allowedFiles := map[string]bool{}
-	for _, source := range plan.SourceRoots {
-		absolute, err := filepath.Abs(source)
-		if err != nil {
-			continue
-		}
-		if info, statErr := os.Stat(absolute); statErr == nil && info.IsDir() {
-			allowedRoots = append(allowedRoots, absolute)
-		} else {
-			allowedFiles[filepath.Clean(absolute)] = true
-		}
-		readHints = append(readHints, absolute)
-	}
-	for _, artifact := range plan.AppArtifacts {
-		absolute, err := filepath.Abs(artifact)
-		if err == nil {
-			allowedFiles[filepath.Clean(absolute)] = true
-			readHints = append(readHints, absolute)
-		}
-	}
 	for _, match := range missionSourcePathPattern.FindAllStringSubmatchIndex(text, -1) {
 		if len(match) < 4 || match[2] < 0 || match[3] <= match[2] {
 			continue
 		}
-		if missionPathCandidateIsVariableSuffix(text, match[2]) {
-			continue
-		}
-		if missionPathCandidateIsCommandPattern(text, match[2], match[3]) {
-			continue
-		}
 		value := strings.TrimSpace(text[match[2]:match[3]])
-		if missionPathLooksWriteTarget(text, match[2], match[3]) &&
-			!missionPathWithinRoot(value, workspace) {
-			suggested := "$SOPHON_WORKSPACE/" + strings.TrimPrefix(filepath.ToSlash(value), "/")
-			return false, fmt.Sprintf(
-				"本地路径超出当前会话写入范围：%s；本地分析只允许写入当前会话工作区；请改用 %s（实际目录：%s）",
-				value,
-				suggested,
-				workspace,
-			)
-		}
-		if strings.HasPrefix(value, "/bin/") ||
-			strings.HasPrefix(value, "/usr/bin/") ||
-			strings.HasPrefix(value, "/usr/local/bin/") {
-			continue
-		}
-		absolute, err := filepath.Abs(value)
-		if err != nil {
-			return false, "无法解析本地路径：" + value
-		}
-		if allowedFiles[filepath.Clean(absolute)] {
-			continue
-		}
-		allowed := false
-		for _, allowedRoot := range allowedRoots {
-			allowedRoot, err = filepath.Abs(allowedRoot)
-			if err != nil {
-				continue
+		if missionPathDenied(value) {
+			if skillName := missionSkillNameFromPath(value); skillName != "" {
+				return false, fmt.Sprintf(
+					"技能文件不能通过 exec 读取；请调用 read_skill(name=%q)",
+					skillName,
+				)
 			}
-			rel, err := filepath.Rel(allowedRoot, absolute)
-			if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
-				allowed = true
-				break
-			}
-		}
-		if !allowed {
-			suggested := "$SOPHON_WORKSPACE/" + strings.TrimPrefix(filepath.ToSlash(value), "/")
 			return false, fmt.Sprintf(
-				"本地路径超出源码、工作区或 App 包范围：%s；请改用相对路径或 %s；当前会话已授权输入：%s",
+				"本地路径命中敏感路径拒绝清单：%s；该路径禁止访问",
 				value,
-				suggested,
-				strings.Join(limitedStrings(readHints, 4), "、"),
 			)
 		}
 	}
 	return true, ""
 }
 
-func missionPathLooksWriteTarget(text string, start, end int) bool {
-	if start <= 0 || end <= start {
+func missionPathDenied(value string) bool {
+	value = strings.TrimSpace(value)
+	if !filepath.IsAbs(value) {
 		return false
 	}
-	prefixStart := start - 80
-	if prefixStart < 0 {
-		prefixStart = 0
+	candidates := []string{value}
+	if resolved, err := filepath.EvalSymlinks(value); err == nil && resolved != value {
+		candidates = append(candidates, resolved)
 	}
-	prefix := strings.TrimRight(text[prefixStart:start], " \t'\"")
-	for _, marker := range []string{">", ">>", "-d", "--output", "--output-document", "-C"} {
-		if strings.HasSuffix(prefix, marker) {
-			return true
-		}
-	}
-	segmentStart := strings.LastIndexAny(text[:start], ";\n|&") + 1
-	segment := strings.TrimSpace(text[segmentStart:start])
-	fields := strings.Fields(segment)
-	if len(fields) == 0 {
-		return false
-	}
-	command := strings.ToLower(filepath.Base(fields[0]))
-	switch command {
-	case "tee", "touch", "mkdir", "rm", "rmdir", "truncate", "chmod", "chown", "ln":
-		return true
-	case "cp", "mv", "install", "rsync":
-		suffix := text[end:]
-		if index := strings.IndexAny(suffix, ";\n|&"); index >= 0 {
-			suffix = suffix[:index]
-		}
-		return strings.TrimSpace(strings.Trim(suffix, " \t'\"")) == ""
-	case "sed":
-		for _, field := range fields[1:] {
-			if field == "-i" || strings.HasPrefix(field, "-i") {
+	for _, candidate := range candidates {
+		candidate = filepath.ToSlash(filepath.Clean(candidate))
+		for _, pattern := range missionDeniedPathPatterns {
+			if pattern.MatchString(candidate) {
 				return true
 			}
 		}
@@ -2646,88 +2575,27 @@ func missionPathLooksWriteTarget(text string, start, end int) bool {
 	return false
 }
 
-func missionPathWithinRoot(path, root string) bool {
-	absolute, err := filepath.Abs(path)
-	if err != nil {
-		return false
+func missionSkillNameFromPath(value string) string {
+	value = strings.TrimSpace(value)
+	if !filepath.IsAbs(value) {
+		return ""
 	}
-	root, err = filepath.Abs(root)
-	if err != nil {
-		return false
+	candidates := []string{value}
+	if resolved, err := filepath.EvalSymlinks(value); err == nil && resolved != value {
+		candidates = append(candidates, resolved)
 	}
-	relative, err := filepath.Rel(root, absolute)
-	return err == nil &&
-		relative != ".." &&
-		!strings.HasPrefix(relative, ".."+string(os.PathSeparator))
-}
-
-func limitedStrings(values []string, limit int) []string {
-	result := make([]string, 0, limit)
-	seen := map[string]bool{}
-	for _, value := range values {
-		value = strings.TrimSpace(value)
-		if value == "" || seen[value] {
+	for _, candidate := range candidates {
+		candidate = filepath.ToSlash(filepath.Clean(candidate))
+		const prefix = "/opt/sophon/skills/"
+		if !strings.HasPrefix(candidate, prefix) || !strings.HasSuffix(candidate, "/SKILL.md") {
 			continue
 		}
-		seen[value] = true
-		result = append(result, value)
-		if len(result) >= limit {
-			break
+		parts := strings.Split(strings.TrimPrefix(candidate, prefix), "/")
+		if len(parts) == 2 && parts[0] != "" {
+			return parts[0]
 		}
 	}
-	return result
-}
-
-func missionPathCandidateIsCommandPattern(text string, start, end int) bool {
-	if start <= 0 || end <= start || end >= len(text) {
-		return false
-	}
-	quote := text[start-1]
-	if quote != '\'' && quote != '"' {
-		return false
-	}
-	if !strings.ContainsRune(text[end:], rune(quote)) {
-		return false
-	}
-	segmentStart := strings.LastIndexAny(text[:start], ";\n|&") + 1
-	segment := strings.TrimSpace(text[segmentStart:start])
-	fields := strings.Fields(segment)
-	if len(fields) == 0 {
-		return false
-	}
-	command := filepath.Base(fields[0])
-	switch command {
-	case "awk", "sed", "grep", "egrep", "rg":
-	default:
-		return false
-	}
-	if command == "awk" || command == "sed" {
-		for _, field := range fields[1:] {
-			if field == "-f" {
-				return false
-			}
-		}
-	}
-	return true
-}
-
-func missionPathCandidateIsVariableSuffix(text string, start int) bool {
-	if start <= 1 || start >= len(text) {
-		return false
-	}
-	quote := text[start-1]
-	if quote != '\'' && quote != '"' {
-		return false
-	}
-	prefixStart := start - 80
-	if prefixStart < 0 {
-		prefixStart = 0
-	}
-	prefix := strings.TrimSpace(text[prefixStart:start])
-	if index := strings.LastIndexAny(prefix, " \t;\n|&("); index >= 0 {
-		prefix = strings.TrimSpace(prefix[index+1:])
-	}
-	return strings.Contains(prefix, "$")
+	return ""
 }
 
 func missionToolIsNetworkCapable(toolName string, args map[string]interface{}) bool {
@@ -2779,10 +2647,10 @@ func missionToolIsNetworkCapable(toolName string, args map[string]interface{}) b
 
 func missionNetworkTargets(toolName string, args map[string]interface{}) []string {
 	switch strings.ToLower(strings.TrimSpace(toolName)) {
-	case "exec":
+	case "exec", zhiziExecToolName:
 		command, _ := args["command"].(string)
 		return normalizeMissionTargets(policy.AnalyzeCommand(command).Targets)
-	case "execute-python-script":
+	case "execute-python-script", zhiziPythonToolName:
 		script, _ := args["script"].(string)
 		return normalizeMissionTargets(policy.AnalyzePythonScript(script).Targets)
 	case internetSearchToolName:

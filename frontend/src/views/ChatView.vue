@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 
 import { apiUrl } from '../api/client'
@@ -29,20 +29,7 @@ const notice = ref('')
 const showInternalTools = ref(false)
 const showRunSettings = ref(false)
 const runSettingsRef = ref<HTMLElement | null>(null)
-const showBatchModal = ref(false)
 const expandedBatchIds = ref<string[]>([])
-const batchDraft = reactive({
-  title: '',
-  instruction: '',
-  assets: '',
-  maxConcurrency: 3,
-  maxAttemptsPerTask: 2,
-  maxSegmentsPerTask: 6,
-  maxToolCallsPerTask: 60,
-  campaignMode: 'single' as 'single' | 'continuous',
-  maxRounds: 3,
-  campaignToolCallBudget: 600,
-})
 const editingMessageId = ref('')
 const editingText = ref('')
 const copyingMessageId = ref('')
@@ -328,55 +315,6 @@ async function createConversation() {
   await chat.createConversation()
 }
 
-function openBatchModal() {
-  notice.value = ''
-  batchDraft.title = ''
-  batchDraft.instruction = '请对该资产进行安全测试，记录事实、测试结果和漏洞证据。'
-  batchDraft.assets = ''
-  batchDraft.maxConcurrency = 3
-  batchDraft.maxAttemptsPerTask = 2
-  batchDraft.maxSegmentsPerTask = 6
-  batchDraft.maxToolCallsPerTask = 60
-  batchDraft.campaignMode = 'single'
-  batchDraft.maxRounds = 3
-  batchDraft.campaignToolCallBudget = 600
-  showBatchModal.value = true
-}
-
-function closeBatchModal() {
-  showBatchModal.value = false
-}
-
-async function createBatchConversations() {
-  if (!chat.selectedProjectId || !batchDraft.assets.trim()) {
-    return
-  }
-  const result = await chat.createConversationBatch({
-    projectId: chat.selectedProjectId,
-    title: batchDraft.title.trim(),
-    instruction: batchDraft.instruction.trim(),
-    assets: batchDraft.assets,
-    roleId: chat.selectedRoleId,
-    maxConcurrency: batchDraft.maxConcurrency,
-    maxAttemptsPerTask: batchDraft.maxAttemptsPerTask,
-    maxSegmentsPerTask: batchDraft.maxSegmentsPerTask,
-    maxToolCallsPerTask: batchDraft.maxToolCallsPerTask,
-    campaignMode: batchDraft.campaignMode,
-    maxRounds: batchDraft.maxRounds,
-    campaignToolCallBudget: batchDraft.campaignToolCallBudget,
-  })
-  if (!result) {
-    return
-  }
-  expandedBatchIds.value = [...new Set([...expandedBatchIds.value, result.parent.id])]
-  notice.value = t('chat.batchCreated', {
-    created: result.created,
-    reused: result.reused,
-    invalid: result.invalid,
-  })
-  closeBatchModal()
-}
-
 function isBatchExpanded(conversationId: string) {
   return expandedBatchIds.value.includes(conversationId)
 }
@@ -524,6 +462,16 @@ function onHITLToggle(event: Event) {
 function onAutoContinueToggle(event: Event) {
   const enabled = (event.target as HTMLInputElement).checked
   void chat.setAutoContinue(enabled)
+}
+
+function onAssetRestrictionToggle(event: Event) {
+  const enabled = (event.target as HTMLInputElement).checked
+  void chat.setAssetRestriction(enabled)
+}
+
+function onZhiziToggle(event: Event) {
+  const enabled = (event.target as HTMLInputElement).checked
+  void chat.setZhiziEnabled(enabled)
 }
 
 function onAgentModeChange(event: Event) {
@@ -1069,14 +1017,6 @@ onUnmounted(() => {
             @click="createConversation"
           >
             {{ t('chat.newConversation') }}
-          </button>
-          <button
-            class="button compact"
-            type="button"
-            :disabled="projectBlocked || chat.batchCreating"
-            @click="openBatchModal"
-          >
-            {{ t('chat.batchNew') }}
           </button>
         </div>
       </div>
@@ -1849,6 +1789,38 @@ onUnmounted(() => {
                   <label
                     class="composer-toggle run-setting"
                     :class="{
+                      active: chat.assetRestrictionEnabled,
+                      disabled:
+                        !chat.currentConversationId ||
+                        projectBlocked ||
+                        chat.streaming ||
+                        chat.creatingConversation ||
+                        chat.assetRestrictionLoading ||
+                        chat.assetRestrictionUpdating,
+                    }"
+                    :title="t('chat.assetRestrictionHint')"
+                  >
+                    <input
+                      type="checkbox"
+                      :checked="chat.assetRestrictionEnabled"
+                      :disabled="
+                        !chat.currentConversationId ||
+                        projectBlocked ||
+                        chat.streaming ||
+                        chat.creatingConversation ||
+                        chat.assetRestrictionLoading ||
+                        chat.assetRestrictionUpdating
+                      "
+                      @change="onAssetRestrictionToggle"
+                    />
+                    <span class="composer-toggle-track" aria-hidden="true">
+                      <span class="composer-toggle-knob"></span>
+                    </span>
+                    <span>{{ t('chat.assetRestriction') }}</span>
+                  </label>
+                  <label
+                    class="composer-toggle run-setting"
+                    :class="{
                       active: chat.autoContinue,
                       disabled:
                         !chat.currentConversationId ||
@@ -1877,6 +1849,45 @@ onUnmounted(() => {
                     <span>
                       {{ chat.autoContinue ? t('chat.autoContinue') : t('chat.pauseOnQuestion') }}
                     </span>
+                  </label>
+                  <label
+                    class="composer-toggle run-setting"
+                    :class="{
+                      active: chat.zhiziEnabled,
+                      disabled:
+                        !chat.currentConversationId ||
+                        projectBlocked ||
+                        chat.streaming ||
+                        chat.zhiziLoading ||
+                        chat.zhiziUpdating ||
+                        (!chat.zhiziEnabled && chat.zhiziAvailability.available <= 0),
+                    }"
+                    :title="
+                      chat.zhiziLeaseNodeName
+                        ? t('chat.zhiziBound', { name: chat.zhiziLeaseNodeName })
+                        : t('chat.zhiziAvailable', {
+                            available: chat.zhiziAvailability.available,
+                            total: chat.zhiziAvailability.totalSlots,
+                          })
+                    "
+                  >
+                    <input
+                      type="checkbox"
+                      :checked="chat.zhiziEnabled"
+                      :disabled="
+                        !chat.currentConversationId ||
+                        projectBlocked ||
+                        chat.streaming ||
+                        chat.zhiziLoading ||
+                        chat.zhiziUpdating ||
+                        (!chat.zhiziEnabled && chat.zhiziAvailability.available <= 0)
+                      "
+                      @change="onZhiziToggle"
+                    />
+                    <span class="composer-toggle-track" aria-hidden="true">
+                      <span class="composer-toggle-knob"></span>
+                    </span>
+                    <span>{{ t('chat.zhizi') }}</span>
                   </label>
                   <label class="composer-toggle run-setting" :class="{ active: showInternalTools }">
                     <input v-model="showInternalTools" type="checkbox" />
@@ -2009,111 +2020,6 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <div v-if="showBatchModal" class="batch-modal-backdrop" @click.self="closeBatchModal">
-      <section class="batch-modal" role="dialog" aria-modal="true">
-        <header>
-          <h3>{{ t('chat.batchNew') }}</h3>
-          <button type="button" class="text-button dark" @click="closeBatchModal">
-            {{ t('common.close') }}
-          </button>
-        </header>
-        <div class="batch-form">
-          <label>
-            <span>{{ t('chat.batchTitle') }}</span>
-            <input v-model="batchDraft.title" :placeholder="t('chat.batchTitlePlaceholder')" />
-          </label>
-          <label>
-            <span>{{ t('chat.batchInstruction') }}</span>
-            <textarea
-              v-model="batchDraft.instruction"
-              rows="4"
-              :placeholder="t('chat.batchInstructionPlaceholder')"
-            ></textarea>
-          </label>
-          <label>
-            <span>{{ t('chat.batchAssets') }}</span>
-            <textarea
-              v-model="batchDraft.assets"
-              rows="12"
-              :placeholder="t('chat.batchAssetsPlaceholder')"
-            ></textarea>
-          </label>
-          <div class="batch-budget-grid">
-            <label>
-              <span>{{ t('chat.batchConcurrency') }}</span>
-              <input
-                v-model.number="batchDraft.maxConcurrency"
-                type="number"
-                min="1"
-                max="20"
-              />
-            </label>
-            <label>
-              <span>{{ t('chat.batchAttempts') }}</span>
-              <input
-                v-model.number="batchDraft.maxAttemptsPerTask"
-                type="number"
-                min="1"
-                max="10"
-              />
-            </label>
-            <label>
-              <span>{{ t('chat.batchSegments') }}</span>
-              <input
-                v-model.number="batchDraft.maxSegmentsPerTask"
-                type="number"
-                min="1"
-                max="50"
-              />
-            </label>
-            <label>
-              <span>{{ t('chat.batchToolCalls') }}</span>
-              <input
-                v-model.number="batchDraft.maxToolCallsPerTask"
-                type="number"
-                min="1"
-                max="1000"
-              />
-            </label>
-          </div>
-          <div class="batch-mode-grid">
-            <label>
-              <span>{{ t('chat.batchCampaignMode') }}</span>
-              <select v-model="batchDraft.campaignMode">
-                <option value="single">{{ t('chat.batchModeSingle') }}</option>
-                <option value="continuous">{{ t('chat.batchModeContinuous') }}</option>
-              </select>
-            </label>
-            <template v-if="batchDraft.campaignMode === 'continuous'">
-              <label>
-                <span>{{ t('chat.batchMaxRounds') }}</span>
-                <input v-model.number="batchDraft.maxRounds" type="number" min="1" max="20" />
-              </label>
-              <label>
-                <span>{{ t('chat.batchCampaignBudget') }}</span>
-                <input
-                  v-model.number="batchDraft.campaignToolCallBudget"
-                  type="number"
-                  min="50"
-                  max="100000"
-                />
-              </label>
-            </template>
-          </div>
-          <div class="batch-form-footer">
-            <small>{{ t('chat.batchHint') }}</small>
-            <button
-              class="button"
-              type="button"
-              :disabled="chat.batchCreating || !batchDraft.assets.trim()"
-              @click="createBatchConversations"
-            >
-              {{ chat.batchCreating ? t('common.loading') : t('chat.batchCreate') }}
-            </button>
-          </div>
-        </div>
-      </section>
-    </div>
   </section>
 </template>
 
@@ -2989,84 +2895,6 @@ onUnmounted(() => {
 .batch-child-loading {
   margin: 0;
   padding: 4px 8px;
-}
-
-.batch-modal-backdrop {
-  position: fixed;
-  inset: 0;
-  z-index: 1000;
-  display: grid;
-  place-items: center;
-  padding: 24px;
-  background: rgba(4, 10, 18, 0.72);
-  backdrop-filter: blur(8px);
-}
-
-.batch-modal {
-  width: min(760px, 100%);
-  max-height: min(86dvh, 860px);
-  overflow: auto;
-  padding: 20px;
-  border: 1px solid var(--accent-line);
-  border-radius: var(--radius);
-  background: var(--surface);
-  box-shadow: none;
-}
-
-.batch-modal header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 16px;
-}
-
-.batch-modal h3 {
-  margin: 0;
-}
-
-.batch-form {
-  display: grid;
-  gap: 14px;
-}
-
-.batch-form label {
-  display: grid;
-  gap: 6px;
-  color: var(--text-secondary);
-  font-size: 13px;
-}
-
-.batch-form input,
-.batch-form textarea,
-.batch-form select {
-  width: 100%;
-  padding: 10px 12px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  color: var(--text-primary);
-  background: var(--field-bg);
-  resize: vertical;
-}
-
-.batch-form-footer {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  color: var(--text-muted);
-}
-
-.batch-budget-grid {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 10px;
-}
-
-.batch-mode-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-  gap: 10px;
 }
 
 .campaign-priority-form {

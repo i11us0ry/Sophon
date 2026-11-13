@@ -38,6 +38,21 @@ func TestConversationAutoContinueSetting(t *testing.T) {
 	if err != nil || enabled {
 		t.Fatalf("应持久化为遇到问题暂停: enabled=%v err=%v", enabled, err)
 	}
+	assetRestriction, err := db.GetConversationAssetRestriction(ctx, "conv-settings")
+	if err != nil || !assetRestriction {
+		t.Fatalf("默认应开启资产限制: enabled=%v err=%v", assetRestriction, err)
+	}
+	if err := db.SetConversationAssetRestriction(ctx, "conv-settings", false); err != nil {
+		t.Fatalf("保存资产限制失败: %v", err)
+	}
+	assetRestriction, err = db.GetConversationAssetRestriction(ctx, "conv-settings")
+	if err != nil || assetRestriction {
+		t.Fatalf("资产限制应持久化为关闭: enabled=%v err=%v", assetRestriction, err)
+	}
+	enabled, err = db.GetConversationAutoContinue(ctx, "conv-settings")
+	if err != nil || enabled {
+		t.Fatalf("更新资产限制不应覆盖自动继续设置: enabled=%v err=%v", enabled, err)
+	}
 }
 
 func TestCountProjectHypothesesOnlyCountsActive(t *testing.T) {

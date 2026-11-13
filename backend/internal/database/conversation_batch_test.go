@@ -92,6 +92,7 @@ func TestCreateConversationBatchReusesAssetsAndHidesChildren(t *testing.T) {
 		parent,
 		items,
 		"批量任务摘要",
+		false,
 	)
 	if err != nil {
 		t.Fatalf("创建批量对话失败: %v", err)

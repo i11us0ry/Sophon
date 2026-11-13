@@ -12,6 +12,7 @@ import (
 	agentpkg "sophon/internal/agent"
 	"sophon/internal/config"
 	knowledgepkg "sophon/internal/knowledge"
+	"sophon/internal/task"
 
 	"github.com/gin-gonic/gin"
 )
@@ -21,6 +22,7 @@ type SettingsHandler struct {
 	cfg            config.Config
 	knowledge      *knowledgepkg.Service
 	agent          *agentpkg.Service
+	tasks          *task.Manager
 	configPath     string
 	llmKeyStatusMu sync.Mutex
 	llmKeyStatuses map[string]llmKeyStatus
@@ -34,11 +36,13 @@ func NewSettingsHandler(
 	cfg config.Config,
 	knowledgeService *knowledgepkg.Service,
 	agentService *agentpkg.Service,
+	taskManager *task.Manager,
 ) *SettingsHandler {
 	return &SettingsHandler{
 		cfg:                cfg,
 		knowledge:          knowledgeService,
 		agent:              agentService,
+		tasks:              taskManager,
 		configPath:         strings.TrimSpace(cfg.ConfigPath),
 		llmKeyStatuses:     map[string]llmKeyStatus{},
 		llmKeyProbeLast:    map[string]time.Time{},
@@ -64,29 +68,30 @@ func (h *SettingsHandler) AIStatus(c *gin.Context) {
 
 	envLocked := make([]string, 0)
 	envFields := map[string]string{
-		"llm.provider":               "SOPHON_LLM_PROVIDER",
-		"llm.apiKey":                 "SOPHON_LLM_API_KEY",
-		"llm.apiKeys":                "SOPHON_LLM_API_KEYS",
-		"llm.baseUrl":                "SOPHON_LLM_BASE_URL",
-		"llm.model":                  "SOPHON_LLM_MODEL",
-		"llm.allowPrivateNetwork":    "SOPHON_LLM_ALLOW_PRIVATE_NETWORK",
-		"llm.timeoutSeconds":         "SOPHON_LLM_TIMEOUT_SECONDS",
-		"agent.mock":                 "SOPHON_AGENT_MOCK",
-		"agent.contextMaxChars":      "SOPHON_AGENT_CONTEXT_MAX_CHARS",
-		"agent.maxIterations":        "SOPHON_AGENT_MAX_ITERATIONS",
-		"hitl.enabled":               "SOPHON_HITL_ENABLED",
-		"hitl.tools":                 "SOPHON_HITL_TOOLS",
-		"hitl.timeoutSeconds":        "SOPHON_HITL_TIMEOUT_SECONDS",
-		"mcp.callTimeoutSeconds":     "SOPHON_MCP_CALL_TIMEOUT_SECONDS",
-		"mcp.maxConcurrentPerServer": "SOPHON_MCP_MAX_CONCURRENT_PER_SERVER",
-		"mcp.maxConcurrentTotal":     "SOPHON_MCP_MAX_CONCURRENT_TOTAL",
-		"proxy.enabled":              "SOPHON_PROXY_ENABLED",
-		"proxy.type":                 "SOPHON_PROXY_TYPE",
-		"proxy.host":                 "SOPHON_PROXY_HOST",
-		"proxy.port":                 "SOPHON_PROXY_PORT",
-		"proxy.username":             "SOPHON_PROXY_USERNAME",
-		"proxy.password":             "SOPHON_PROXY_PASSWORD",
-		"proxy.noProxy":              "SOPHON_PROXY_NO_PROXY",
+		"llm.provider":                "SOPHON_LLM_PROVIDER",
+		"llm.apiKey":                  "SOPHON_LLM_API_KEY",
+		"llm.apiKeys":                 "SOPHON_LLM_API_KEYS",
+		"llm.baseUrl":                 "SOPHON_LLM_BASE_URL",
+		"llm.model":                   "SOPHON_LLM_MODEL",
+		"llm.allowPrivateNetwork":     "SOPHON_LLM_ALLOW_PRIVATE_NETWORK",
+		"llm.timeoutSeconds":          "SOPHON_LLM_TIMEOUT_SECONDS",
+		"agent.mock":                  "SOPHON_AGENT_MOCK",
+		"agent.contextMaxChars":       "SOPHON_AGENT_CONTEXT_MAX_CHARS",
+		"agent.maxIterations":         "SOPHON_AGENT_MAX_ITERATIONS",
+		"agent.maxConcurrentSessions": "SOPHON_AGENT_MAX_CONCURRENT_SESSIONS",
+		"hitl.enabled":                "SOPHON_HITL_ENABLED",
+		"hitl.tools":                  "SOPHON_HITL_TOOLS",
+		"hitl.timeoutSeconds":         "SOPHON_HITL_TIMEOUT_SECONDS",
+		"mcp.callTimeoutSeconds":      "SOPHON_MCP_CALL_TIMEOUT_SECONDS",
+		"mcp.maxConcurrentPerServer":  "SOPHON_MCP_MAX_CONCURRENT_PER_SERVER",
+		"mcp.maxConcurrentTotal":      "SOPHON_MCP_MAX_CONCURRENT_TOTAL",
+		"proxy.enabled":               "SOPHON_PROXY_ENABLED",
+		"proxy.type":                  "SOPHON_PROXY_TYPE",
+		"proxy.host":                  "SOPHON_PROXY_HOST",
+		"proxy.port":                  "SOPHON_PROXY_PORT",
+		"proxy.username":              "SOPHON_PROXY_USERNAME",
+		"proxy.password":              "SOPHON_PROXY_PASSWORD",
+		"proxy.noProxy":               "SOPHON_PROXY_NO_PROXY",
 	}
 	for field, envKey := range envFields {
 		if config.EnvLocked(envKey) {
@@ -125,11 +130,12 @@ func (h *SettingsHandler) AIStatus(c *gin.Context) {
 				"mock":                cfg.AgentMock,
 			},
 			"agent": gin.H{
-				"mock":            cfg.AgentMock,
-				"contextMaxChars": cfg.AgentContextMaxChars,
-				"maxTurnTokens":   cfg.AgentMaxTurnTokens,
-				"maxIterations":   cfg.AgentMaxIterations,
-				"maxHypotheses":   cfg.AgentMaxHypotheses,
+				"mock":                  cfg.AgentMock,
+				"contextMaxChars":       cfg.AgentContextMaxChars,
+				"maxTurnTokens":         cfg.AgentMaxTurnTokens,
+				"maxIterations":         cfg.AgentMaxIterations,
+				"maxHypotheses":         cfg.AgentMaxHypotheses,
+				"maxConcurrentSessions": cfg.AgentMaxConcurrentSessions,
 			},
 			"hitl": gin.H{
 				"enabled":        cfg.HITLEnabled,
@@ -173,11 +179,12 @@ type settingsLLMRequest struct {
 }
 
 type settingsAgentRequest struct {
-	Mock            *bool `json:"mock"`
-	ContextMaxChars *int  `json:"contextMaxChars"`
-	MaxTurnTokens   *int  `json:"maxTurnTokens"`
-	MaxIterations   *int  `json:"maxIterations"`
-	MaxHypotheses   *int  `json:"maxHypotheses"`
+	Mock                  *bool `json:"mock"`
+	ContextMaxChars       *int  `json:"contextMaxChars"`
+	MaxTurnTokens         *int  `json:"maxTurnTokens"`
+	MaxIterations         *int  `json:"maxIterations"`
+	MaxHypotheses         *int  `json:"maxHypotheses"`
+	MaxConcurrentSessions *int  `json:"maxConcurrentSessions"`
 }
 
 type settingsHITLRequest struct {
@@ -428,6 +435,28 @@ func (h *SettingsHandler) Update(c *gin.Context) {
 				updates = append(updates, config.FieldUpdate{Path: []string{"agent", "max_hypotheses"}, Value: value})
 			}
 		}
+		if request.Agent.MaxConcurrentSessions != nil {
+			value := *request.Agent.MaxConcurrentSessions
+			if value < 1 || value > 1000 {
+				badRequest(c, "invalid_settings", "单用户同时运行 Agent 会话上限需在 1-1000 之间")
+				return
+			}
+			apply, abort := lockState(
+				"agent.maxConcurrentSessions",
+				"SOPHON_AGENT_MAX_CONCURRENT_SESSIONS",
+				value != next.AgentMaxConcurrentSessions,
+			)
+			if abort {
+				return
+			}
+			if apply {
+				next.AgentMaxConcurrentSessions = value
+				updates = append(updates, config.FieldUpdate{
+					Path:  []string{"agent", "max_concurrent_sessions"},
+					Value: value,
+				})
+			}
+		}
 		reloaded = append(reloaded, "agent")
 	}
 
@@ -661,6 +690,9 @@ func (h *SettingsHandler) Update(c *gin.Context) {
 		return
 	}
 
+	if h.tasks != nil && next.AgentMaxConcurrentSessions > 0 {
+		h.tasks.SetMaxPerUser(next.AgentMaxConcurrentSessions)
+	}
 	if h.agent != nil {
 		if err := h.agent.Reload(next); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{

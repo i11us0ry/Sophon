@@ -11,6 +11,7 @@ import (
 
 	"sophon/internal/config"
 	"sophon/internal/storage"
+	"sophon/internal/task"
 
 	"github.com/gin-gonic/gin"
 )
@@ -139,6 +140,39 @@ func TestSettingsUpdateSavesMaxHypotheses(t *testing.T) {
 	}
 	if !strings.Contains(string(raw), "max_hypotheses: 300") {
 		t.Fatalf("活跃假设上限未写入配置: %s", raw)
+	}
+}
+
+func TestSettingsUpdateSavesAgentConcurrencyAndUpdatesManager(t *testing.T) {
+	path := writeEnvLockTestConfig(t, "agent:\n  max_iterations: 40\n")
+	manager := task.NewManagerWithLimit(5)
+	handler := &SettingsHandler{
+		cfg: config.Config{
+			ConfigPath:                 path,
+			AgentMaxIterations:         40,
+			AgentMaxConcurrentSessions: 5,
+		},
+		configPath: path,
+		tasks:      manager,
+	}
+	recorder := performSettingsUpdate(t, handler, `{"agent":{"maxConcurrentSessions":12}}`)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("期望 200，实际 %d: %s", recorder.Code, recorder.Body.String())
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("读取配置失败: %v", err)
+	}
+	if !strings.Contains(string(raw), "max_concurrent_sessions: 12") {
+		t.Fatalf("Agent 并发上限未写入配置: %s", raw)
+	}
+	if got := manager.MaxPerUser(); got != 12 {
+		t.Fatalf("Manager 并发上限未立即更新: %d", got)
+	}
+
+	recorder = performSettingsUpdate(t, handler, `{"agent":{"maxConcurrentSessions":0}}`)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("非法并发上限应返回 400，实际 %d: %s", recorder.Code, recorder.Body.String())
 	}
 }
 

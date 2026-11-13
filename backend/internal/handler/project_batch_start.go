@@ -25,6 +25,7 @@ type projectBatchStartRequest struct {
 	ProjectIDs  []string `json:"projectIds"`
 	Instruction string   `json:"instruction"`
 	RoleID      string   `json:"roleId"`
+	UseZhizi    bool     `json:"useZhizi"`
 }
 
 type projectBatchStartItem struct {
@@ -83,6 +84,20 @@ func (h *ChatHandler) StartProjectsBatch(c *gin.Context) {
 	if len([]rune(instruction)) > projectSessionInstructionMaxRunes {
 		badRequest(c, "instruction_too_large", "任务要求不能超过 20000 个字符")
 		return
+	}
+	if request.UseZhizi {
+		availability, err := h.db.ZhiziAvailability(c.Request.Context())
+		if err != nil {
+			internalError(c, "zhizi_availability_failed", "统计智子分身容量失败")
+			return
+		}
+		if availability.Available <= 0 {
+			c.JSON(http.StatusConflict, gin.H{
+				"code":    "zhizi_no_capacity",
+				"message": "当前没有可用的智子分身槽位",
+			})
+			return
+		}
 	}
 
 	maxConcurrency := 5
@@ -238,6 +253,43 @@ func (h *ChatHandler) StartProjectsBatch(c *gin.Context) {
 			continue
 		}
 		result.Created++
+		if request.UseZhizi {
+			if err := h.db.SetZhiziConversationEnabled(
+				c.Request.Context(),
+				conversationID,
+				user.ID,
+				true,
+			); err != nil {
+				log.Printf(
+					"enable project session zhizi failed: project=%s conversation=%s err=%v",
+					project.ID,
+					conversationID,
+					err,
+				)
+				if markErr := h.db.FailProjectSessionCampaign(
+					c.Request.Context(),
+					campaignID,
+					user.ID,
+					err.Error(),
+				); markErr != nil {
+					log.Printf(
+						"mark project session zhizi failure failed: campaign=%s err=%v",
+						campaignID,
+						markErr,
+					)
+				}
+				result.Failed++
+				result.Items = append(result.Items, projectBatchStartItem{
+					ProjectID:      project.ID,
+					ProjectName:    project.Name,
+					ConversationID: conversationID,
+					CampaignID:     campaignID,
+					Status:         "failed",
+					Reason:         "启用智子分身失败",
+				})
+				continue
+			}
+		}
 		if err := h.startCampaignRun(campaignID, user.ID); err != nil {
 			log.Printf(
 				"start project session campaign failed: project=%s campaign=%s err=%v",

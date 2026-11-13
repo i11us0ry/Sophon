@@ -268,11 +268,14 @@ func TestRoleInstructionInjectsBlockScalarSkillSummary(t *testing.T) {
 	if !strings.Contains(instruction, "第一行说明 第二行说明") {
 		t.Fatalf("角色提示词未注入块标量技能描述: %q", instruction)
 	}
-	if !strings.Contains(instruction, skillsDir) {
-		t.Fatalf("角色提示词缺少技能目录绝对路径: %q", instruction)
+	if strings.Contains(instruction, skillsDir) {
+		t.Fatalf("角色提示词不应泄露技能目录绝对路径: %q", instruction)
 	}
 	if !strings.Contains(instruction, readSkillToolName) {
 		t.Fatalf("角色提示词未提示 read_skill 工具: %q", instruction)
+	}
+	if !strings.Contains(instruction, "禁止通过 exec、cat 或技能目录文件路径读取") {
+		t.Fatalf("角色提示词未禁止通过文件路径读取技能: %q", instruction)
 	}
 	for _, want := range []string{"仅用于补充思路", "没有成果", "漏洞覆盖上限"} {
 		if !strings.Contains(instruction, want) {

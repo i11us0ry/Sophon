@@ -13,6 +13,7 @@ type assetIDKey struct{}
 type campaignIDKey struct{}
 type campaignTaskIDKey struct{}
 type autoContinueKey struct{}
+type assetRestrictionKey struct{}
 type projectIDKey struct{}
 type runIDKey struct{}
 type runModeKey struct{}
@@ -248,6 +249,19 @@ func WithAutoContinue(ctx context.Context, enabled bool) context.Context {
 // AutoContinue 返回会话级自动继续设置，未显式设置时默认开启。
 func AutoContinue(ctx context.Context) bool {
 	value, ok := ctx.Value(autoContinueKey{}).(bool)
+	if !ok {
+		return true
+	}
+	return value
+}
+
+func WithAssetRestriction(ctx context.Context, enabled bool) context.Context {
+	return context.WithValue(ctx, assetRestrictionKey{}, enabled)
+}
+
+// AssetRestrictionEnabled 返回会话级资产限制设置，未显式设置时默认开启。
+func AssetRestrictionEnabled(ctx context.Context) bool {
+	value, ok := ctx.Value(assetRestrictionKey{}).(bool)
 	if !ok {
 		return true
 	}

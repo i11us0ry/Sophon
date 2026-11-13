@@ -16,6 +16,7 @@ import SettingsView from '../views/SettingsView.vue'
 import SkillView from '../views/SkillView.vue'
 import VulnerabilityView from '../views/VulnerabilityView.vue'
 import WorkspaceView from '../views/WorkspaceView.vue'
+import ZhiziView from '../views/ZhiziView.vue'
 import { useAuthStore } from '../stores/auth'
 
 const router = createRouter({
@@ -86,6 +87,12 @@ const router = createRouter({
       name: 'mcp',
       component: McpView,
       meta: { requiresAuth: true, permission: 'mcp:read' },
+    },
+    {
+      path: '/zhizi',
+      name: 'zhizi',
+      component: ZhiziView,
+      meta: { requiresAuth: true, permission: 'zhizi:read' },
     },
     {
       path: '/governance',

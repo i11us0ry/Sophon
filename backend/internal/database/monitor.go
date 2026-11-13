@@ -91,7 +91,7 @@ func (db *DB) FinishToolExecution(
 	finishedAt := time.Now().UTC()
 	if invokeErr != nil {
 		status = "failed"
-		errText = truncateToolExecutionText(invokeErr.Error())
+		errText = truncateToolExecutionText(redact.Text(invokeErr.Error()))
 	}
 	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), toolExecutionWriteTimeout)
 	defer cancel()
@@ -101,7 +101,7 @@ func (db *DB) FinishToolExecution(
 		 SET status = ?, result = ?, error = ?, finished_at = ?
 		 WHERE id = ?`,
 		status,
-		truncateToolExecutionText(result),
+		truncateToolExecutionText(redact.Text(result)),
 		errText,
 		finishedAt.Unix(),
 		id,

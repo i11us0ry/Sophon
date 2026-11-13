@@ -88,6 +88,15 @@ func (m *Manager) MaxPerUser() int {
 	return m.maxPerUser
 }
 
+func (m *Manager) SetMaxPerUser(maxPerUser int) {
+	if m == nil || maxPerUser <= 0 {
+		return
+	}
+	m.mu.Lock()
+	m.maxPerUser = maxPerUser
+	m.mu.Unlock()
+}
+
 // CreateIfIdle 在会话和用户并发额度均可用时创建任务。
 func (m *Manager) CreateIfIdle(conversationID, userID string) (*Task, string, error) {
 	m.mu.Lock()

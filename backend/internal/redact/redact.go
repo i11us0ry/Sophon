@@ -24,7 +24,11 @@ var (
 	sensitiveTextPattern = regexp.MustCompile(
 		`(?i)(password|passwd|pwd|token|secret|api[_-]?key|authorization|cookie|credential|密码|令牌|密钥)\s*[:=：]\s*(?:Bearer\s+)?["']?([^\s,;，；]{4,})`,
 	)
-	bearerTokenPattern = regexp.MustCompile(`(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+`)
+	bearerTokenPattern  = regexp.MustCompile(`(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+`)
+	privateKeyPattern   = regexp.MustCompile(`(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----`)
+	commonSecretPattern = regexp.MustCompile(
+		`\b(?:sk-[A-Za-z0-9_-]{16,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{30,}|ghp_[A-Za-z0-9]{20,})\b`,
+	)
 )
 
 // SensitiveKey 判断键名是否属于敏感字段（忽略大小写与下划线）。
@@ -66,11 +70,11 @@ func Value(value any, key string) any {
 		}
 		return out
 	case string:
-		runes := []rune(typed)
+		runes := []rune(Text(typed))
 		if len(runes) > FieldLimit {
 			return string(runes[:FieldLimit]) + "..."
 		}
-		return typed
+		return string(runes)
 	default:
 		return value
 	}
@@ -98,5 +102,7 @@ func Text(value string) string {
 		return value
 	}
 	value = sensitiveTextPattern.ReplaceAllString(value, "$1=***")
-	return bearerTokenPattern.ReplaceAllString(value, "Bearer ***")
+	value = privateKeyPattern.ReplaceAllString(value, "***PRIVATE_KEY***")
+	value = bearerTokenPattern.ReplaceAllString(value, "Bearer ***")
+	return commonSecretPattern.ReplaceAllString(value, "***")
 }

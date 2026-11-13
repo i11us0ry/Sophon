@@ -19,7 +19,7 @@ func TestStartToolExecutionRedactsArguments(t *testing.T) {
 
 	ctx := context.Background()
 	db.StartToolExecution(ctx, "conv-1", "user-1", "exec", map[string]interface{}{
-		"command":  "curl",
+		"command":  "curl 'https://target/?password=plain-text-secret'",
 		"password": "plain-secret",
 		"apiKey":   "sk-secret",
 		"nested":   map[string]interface{}{"token": "nested-token-value"},
@@ -37,13 +37,31 @@ func TestStartToolExecutionRedactsArguments(t *testing.T) {
 		t.Fatalf("序列化参数失败: %v", err)
 	}
 	text := string(raw)
-	for _, secret := range []string{"plain-secret", "sk-secret", "nested-token-value"} {
+	for _, secret := range []string{"plain-secret", "plain-text-secret", "sk-secret", "nested-token-value"} {
 		if strings.Contains(text, secret) {
 			t.Fatalf("工具参数未脱敏：%s", text)
 		}
 	}
 	if !strings.Contains(text, "curl") {
 		t.Fatalf("普通参数应保留：%s", text)
+	}
+	resultID := db.StartToolExecution(ctx, "conv-1", "user-1", "zhizi_exec", map[string]interface{}{
+		"command": "printf ok",
+	})
+	db.FinishToolExecution(
+		ctx,
+		resultID,
+		"Authorization: Bearer result-token\n-----BEGIN PRIVATE KEY-----\nkey-material\n-----END PRIVATE KEY-----",
+		nil,
+	)
+	stored, err := db.GetToolExecution(ctx, resultID)
+	if err != nil {
+		t.Fatalf("读取工具结果失败: %v", err)
+	}
+	for _, secret := range []string{"result-token", "key-material"} {
+		if strings.Contains(stored.Result, secret) {
+			t.Fatalf("工具结果未脱敏：%s", stored.Result)
+		}
 	}
 	firstFingerprint := ToolExecutionFingerprint(map[string]interface{}{"password": "one"})
 	secondFingerprint := ToolExecutionFingerprint(map[string]interface{}{"password": "two"})

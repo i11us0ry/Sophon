@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -127,6 +128,53 @@ func (db *DB) migrate(ctx context.Context) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_conversations_owner_updated
 		 ON conversations(owner_user_id, updated_at DESC)`,
+		`CREATE TABLE IF NOT EXISTS zhizi_nodes (
+				id TEXT PRIMARY KEY,
+				created_by_user_id TEXT NOT NULL,
+				name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+				host TEXT NOT NULL,
+				port INTEGER NOT NULL DEFAULT 22,
+				username TEXT NOT NULL,
+				auth_type TEXT NOT NULL DEFAULT 'key',
+				password_cipher TEXT NOT NULL DEFAULT '',
+				private_key_cipher TEXT NOT NULL DEFAULT '',
+				host_key_fingerprint TEXT NOT NULL DEFAULT '',
+				work_root TEXT NOT NULL DEFAULT '/home/sophon/sophon',
+				max_slots INTEGER NOT NULL DEFAULT 1,
+				enabled INTEGER NOT NULL DEFAULT 1,
+				last_test_at INTEGER NOT NULL DEFAULT 0,
+				last_test_error TEXT NOT NULL DEFAULT '',
+				init_status TEXT NOT NULL DEFAULT 'never',
+				init_message TEXT NOT NULL DEFAULT '',
+				init_started_at INTEGER NOT NULL DEFAULT 0,
+				init_finished_at INTEGER NOT NULL DEFAULT 0,
+				created_at INTEGER NOT NULL,
+				updated_at INTEGER NOT NULL
+			)`,
+		`CREATE TABLE IF NOT EXISTS zhizi_conversation_settings (
+				conversation_id TEXT PRIMARY KEY,
+				enabled INTEGER NOT NULL DEFAULT 0,
+				updated_at INTEGER NOT NULL,
+				FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+			)`,
+		`CREATE TABLE IF NOT EXISTS zhizi_leases (
+				id TEXT PRIMARY KEY,
+				node_id TEXT NOT NULL,
+				owner_user_id TEXT NOT NULL,
+				conversation_id TEXT NOT NULL,
+				status TEXT NOT NULL DEFAULT 'active',
+				expires_at INTEGER NOT NULL,
+				created_at INTEGER NOT NULL,
+				updated_at INTEGER NOT NULL,
+				FOREIGN KEY (node_id) REFERENCES zhizi_nodes(id),
+				FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+			)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_zhizi_leases_active_conversation
+			 ON zhizi_leases(conversation_id) WHERE status = 'active'`,
+		`CREATE INDEX IF NOT EXISTS idx_zhizi_leases_node_status
+			 ON zhizi_leases(node_id, status, expires_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_zhizi_leases_owner_status
+			 ON zhizi_leases(owner_user_id, status, expires_at)`,
 		`CREATE TABLE IF NOT EXISTS conversation_batches (
 			id TEXT PRIMARY KEY,
 			owner_user_id TEXT NOT NULL,
@@ -513,6 +561,7 @@ func (db *DB) migrate(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS conversation_agent_settings (
 			conversation_id TEXT PRIMARY KEY,
 			auto_continue INTEGER NOT NULL DEFAULT 1,
+			asset_restriction_enabled INTEGER NOT NULL DEFAULT 1,
 			updated_at INTEGER NOT NULL,
 			FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
 		)`,
@@ -916,6 +965,39 @@ func (db *DB) migrate(ctx context.Context) error {
 	} {
 		if _, err := db.ExecContext(ctx, cleanup); err != nil {
 			return fmt.Errorf("database cleanup: %w", err)
+		}
+	}
+	if err := db.ensureColumn(
+		ctx,
+		"conversation_agent_settings",
+		"asset_restriction_enabled",
+		`ALTER TABLE conversation_agent_settings
+		 ADD COLUMN asset_restriction_enabled INTEGER NOT NULL DEFAULT 1`,
+	); err != nil {
+		return err
+	}
+	if err := db.ensureColumn(
+		ctx,
+		"zhizi_nodes",
+		"host_key_fingerprint",
+		`ALTER TABLE zhizi_nodes ADD COLUMN host_key_fingerprint TEXT NOT NULL DEFAULT ''`,
+	); err != nil {
+		return err
+	}
+	if err := db.dropColumnIfExists(ctx, "zhizi_nodes", "known_hosts"); err != nil {
+		return err
+	}
+	for _, column := range []struct {
+		name string
+		sql  string
+	}{
+		{"init_status", `ALTER TABLE zhizi_nodes ADD COLUMN init_status TEXT NOT NULL DEFAULT 'never'`},
+		{"init_message", `ALTER TABLE zhizi_nodes ADD COLUMN init_message TEXT NOT NULL DEFAULT ''`},
+		{"init_started_at", `ALTER TABLE zhizi_nodes ADD COLUMN init_started_at INTEGER NOT NULL DEFAULT 0`},
+		{"init_finished_at", `ALTER TABLE zhizi_nodes ADD COLUMN init_finished_at INTEGER NOT NULL DEFAULT 0`},
+	} {
+		if err := db.ensureColumn(ctx, "zhizi_nodes", column.name, column.sql); err != nil {
+			return err
 		}
 	}
 	if err := db.encryptLegacyToolJobSteps(ctx); err != nil {
@@ -1662,6 +1744,36 @@ func (db *DB) DeleteExpiredSessions(ctx context.Context, at time.Time) (int64, e
 		case <-time.After(10 * time.Millisecond):
 		}
 	}
+}
+
+func (db *DB) dropColumnIfExists(ctx context.Context, table, column string) error {
+	rows, err := db.QueryContext(ctx, `PRAGMA table_info(`+table+`)`)
+	if err != nil {
+		return err
+	}
+	found := false
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, dataType string
+		var defaultValue sql.NullString
+		if err := rows.Scan(&cid, &name, &dataType, &notNull, &defaultValue, &primaryKey); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		if strings.EqualFold(name, column) {
+			found = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	_ = rows.Close()
+	if !found {
+		return nil
+	}
+	_, err = db.ExecContext(ctx, `ALTER TABLE `+table+` DROP COLUMN `+column)
+	return err
 }
 
 func scanUser(row *sql.Row) (*User, error) {

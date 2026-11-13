@@ -51,6 +51,7 @@ func (db *DB) CreateConversationBatch(
 	parent Conversation,
 	items []ConversationBatchItem,
 	parentMessage string,
+	zhiziEnabled bool,
 ) (int, int, error) {
 	if len(items) == 0 {
 		return 0, 0, sql.ErrNoRows
@@ -217,6 +218,11 @@ func (db *DB) CreateConversationBatch(
 		item.Conversation.BatchID = batch.ID
 		if err := insertConversationTx(ctx, tx, item.Conversation); err != nil {
 			return 0, 0, err
+		}
+		if zhiziEnabled {
+			if err := db.setZhiziConversationEnabledTx(ctx, tx, item.Conversation.ID, true, now); err != nil {
+				return 0, 0, err
+			}
 		}
 		group := campaignGroupForAsset(asset)
 		groupRecord := groups[group.Key]

@@ -29,7 +29,7 @@ type CampaignScheduler struct {
 	activeAssets map[string]int
 
 	runSlotsMu sync.Mutex
-	runSlots   map[string]chan struct{}
+	runSlots   map[string]int
 }
 
 type campaignRunner struct {
@@ -44,7 +44,7 @@ func NewCampaignScheduler(db *database.DB, chat *ChatHandler) *CampaignScheduler
 		running:      map[string]*campaignRunner{},
 		lastRefresh:  map[string]time.Time{},
 		activeAssets: map[string]int{},
-		runSlots:     map[string]chan struct{}{},
+		runSlots:     map[string]int{},
 	}
 }
 
@@ -260,7 +260,7 @@ func (s *CampaignScheduler) releaseAsset(assetID string) {
 	s.activeAssets[assetID]--
 }
 
-func (s *CampaignScheduler) userRunSlot(userID string) chan struct{} {
+func (s *CampaignScheduler) userRunLimit() int {
 	capacity := 5
 	if s.chat != nil && s.chat.manager != nil {
 		capacity = s.chat.manager.MaxPerUser()
@@ -268,42 +268,63 @@ func (s *CampaignScheduler) userRunSlot(userID string) chan struct{} {
 	if capacity <= 0 {
 		capacity = 5
 	}
+	return capacity
+}
+
+func (s *CampaignScheduler) acquireUserRunSlot(ctx context.Context, userID string) bool {
 	userID = strings.TrimSpace(userID)
 	if userID == "" {
 		userID = "default"
 	}
-
-	s.runSlotsMu.Lock()
-	defer s.runSlotsMu.Unlock()
-	if s.runSlots == nil {
-		s.runSlots = map[string]chan struct{}{}
-	}
-	slot := s.runSlots[userID]
-	if slot == nil {
-		slot = make(chan struct{}, capacity)
-		s.runSlots[userID] = slot
-	}
-	return slot
-}
-
-func (s *CampaignScheduler) acquireUserRunSlot(ctx context.Context, userID string) bool {
-	slot := s.userRunSlot(userID)
-	select {
-	case slot <- struct{}{}:
-		return true
-	case <-ctx.Done():
-		return false
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		capacity := s.userRunLimit()
+		s.runSlotsMu.Lock()
+		if s.runSlots == nil {
+			s.runSlots = map[string]int{}
+		}
+		if s.runSlots[userID] < capacity {
+			s.runSlots[userID]++
+			s.runSlotsMu.Unlock()
+			return true
+		}
+		s.runSlotsMu.Unlock()
+		select {
+		case <-ctx.Done():
+			return false
+		case <-ticker.C:
+		}
 	}
 }
 
 func (s *CampaignScheduler) releaseUserRunSlot(userID string) {
-	slot := s.userRunSlot(userID)
-	<-slot
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		userID = "default"
+	}
+	s.runSlotsMu.Lock()
+	if s.runSlots[userID] <= 1 {
+		delete(s.runSlots, userID)
+	} else {
+		s.runSlots[userID]--
+	}
+	s.runSlotsMu.Unlock()
 }
 
 func (s *CampaignScheduler) availableUserRunSlots(userID string) int {
-	slot := s.userRunSlot(userID)
-	return cap(slot) - len(slot)
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		userID = "default"
+	}
+	s.runSlotsMu.Lock()
+	running := s.runSlots[userID]
+	s.runSlotsMu.Unlock()
+	available := s.userRunLimit() - running
+	if available < 0 {
+		return 0
+	}
+	return available
 }
 
 func (s *CampaignScheduler) run(

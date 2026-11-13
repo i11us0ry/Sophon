@@ -56,6 +56,12 @@ func TestRoleInstructionIncludesPromptAndSkills(t *testing.T) {
 	if !strings.Contains(instruction, "演示技能说明") {
 		t.Fatalf("instruction missing skill summary: %q", instruction)
 	}
+	if strings.Contains(instruction, filepath.Join(dir, "skills")) {
+		t.Fatalf("角色提示词不应暴露技能物理目录: %q", instruction)
+	}
+	if !strings.Contains(instruction, `read_skill(name="技能名")`) {
+		t.Fatalf("角色提示词应引导使用 read_skill: %q", instruction)
+	}
 
 	if err := db.CreateConversation(ctx, database.Conversation{
 		ID:          "conv-role",

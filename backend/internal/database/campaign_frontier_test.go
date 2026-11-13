@@ -115,6 +115,7 @@ func seedCampaignP1(
 		parent,
 		items,
 		"",
+		false,
 	); err != nil {
 		t.Fatalf("创建 Campaign 失败: %v", err)
 	}

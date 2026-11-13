@@ -44,6 +44,33 @@ func TestCampaignUserRunSlotsLimitToFive(t *testing.T) {
 	}
 }
 
+func TestCampaignUserRunSlotsFollowRuntimeLimit(t *testing.T) {
+	manager := task.NewManagerWithLimit(1)
+	scheduler := NewCampaignScheduler(nil, &ChatHandler{manager: manager})
+	scheduler.acquireUserRunSlot(context.Background(), "user-1")
+
+	acquired := make(chan struct{}, 1)
+	go func() {
+		if scheduler.acquireUserRunSlot(context.Background(), "user-1") {
+			acquired <- struct{}{}
+		}
+	}()
+	select {
+	case <-acquired:
+		t.Fatalf("达到当前上限时不应获取槽位")
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	manager.SetMaxPerUser(2)
+	select {
+	case <-acquired:
+	case <-time.After(time.Second):
+		t.Fatalf("运行时调高上限后等待任务未获取槽位")
+	}
+	scheduler.releaseUserRunSlot("user-1")
+	scheduler.releaseUserRunSlot("user-1")
+}
+
 func TestTaskManagerDefaultConcurrencyIsFive(t *testing.T) {
 	if got := task.NewManager().MaxPerUser(); got != 5 {
 		t.Fatalf("默认单用户并发上限应为 5，实际 %d", got)

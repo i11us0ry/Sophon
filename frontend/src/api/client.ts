@@ -171,6 +171,7 @@ export async function apiUpload<T>(path: string, file: File): Promise<T> {
 export async function* apiStream(
   path: string,
   body: unknown,
+  signal?: AbortSignal,
 ): AsyncGenerator<SSEEvent, void, void> {
   const headers: Record<string, string> = {
     Accept: 'text/event-stream',
@@ -186,6 +187,7 @@ export async function* apiStream(
     credentials: 'include',
     headers,
     body: JSON.stringify(body),
+    signal,
   })
   if (!response.ok) {
     let errorBody: ApiErrorBody = {}

@@ -11,6 +11,8 @@ const PROCESS_DETAIL_PAGE_SIZE = 100
 const AGENT_MODE_STORAGE_KEY = 'sophon.agentMode'
 const CONVERSATION_AGENT_MODE_STORAGE_KEY = 'sophon.agentModeByConversation'
 const CONVERSATION_AGENT_MODE_LIMIT = 200
+const MESSAGE_CACHE_CONVERSATION_LIMIT = 30
+let activeStreamController: AbortController | null = null
 
 export type AgentMode = 'auto' | 'fast' | 'deep'
 
@@ -94,12 +96,29 @@ export interface ConversationPage {
   nextCursor?: string
 }
 
-export interface ConversationBatchResult {
-  parent: Conversation
-  created: number
-  reused: number
-  invalid: number
-  items: Array<{ conversationId: string; assetId: string; target: string }>
+export interface ZhiziAvailability {
+  enabledNodes: number
+  totalSlots: number
+  activeSlots: number
+  available: number
+}
+
+export interface ZhiziConversationState {
+  enabled: boolean
+  lease?: {
+    id: string
+    nodeId: string
+    conversationId: string
+    expiresAt: string
+    node: {
+      id: string
+      name: string
+      host: string
+      port: number
+      activeSlots: number
+      maxSlots: number
+    }
+  }
 }
 
 export interface CampaignStatus {
@@ -343,6 +362,7 @@ export const useChatStore = defineStore('chat', {
     agentMode: readStoredAgentMode() as AgentMode,
     agentModeByConversation: readConversationAgentModes(),
     messages: [] as ChatMessage[],
+    messagesByConversation: {} as Record<string, ChatMessage[]>,
     processDetails: [] as ProcessDetail[],
     processDetailMeta: {} as Record<
       string,
@@ -365,7 +385,6 @@ export const useChatStore = defineStore('chat', {
     pendingAttachments: [] as Attachment[],
     uploading: false,
     creatingConversation: false,
-    batchCreating: false,
     campaignLoading: false,
     currentCampaignStatus: null as CampaignStatus | null,
     campaignGroups: [] as CampaignGroup[],
@@ -384,6 +403,19 @@ export const useChatStore = defineStore('chat', {
     autoContinue: true,
     autoContinueLoading: false,
     autoContinueUpdating: false,
+    assetRestrictionEnabled: true,
+    assetRestrictionLoading: false,
+    assetRestrictionUpdating: false,
+    zhiziEnabled: false,
+    zhiziLoading: false,
+    zhiziUpdating: false,
+    zhiziAvailability: {
+      enabledNodes: 0,
+      totalSlots: 0,
+      activeSlots: 0,
+      available: 0,
+    } as ZhiziAvailability,
+    zhiziLeaseNodeName: '',
     currentConversationId: '',
     streamConversationId: '',
     taskId: '',
@@ -403,6 +435,21 @@ export const useChatStore = defineStore('chat', {
     error: '',
   }),
   actions: {
+    cacheMessages(conversationId = this.currentConversationId) {
+      const id = conversationId.trim()
+      if (!id) {
+        return
+      }
+      delete this.messagesByConversation[id]
+      this.messagesByConversation[id] = this.messages.slice(-MESSAGE_WINDOW_SIZE)
+      const cachedIds = Object.keys(this.messagesByConversation)
+      for (const staleId of cachedIds.slice(
+        0,
+        Math.max(0, cachedIds.length - MESSAGE_CACHE_CONVERSATION_LIMIT),
+      )) {
+        delete this.messagesByConversation[staleId]
+      }
+    },
     async loadConversations() {
       const [projects, response] = await Promise.all([
         apiGet<{ items: Project[] }>('/projects'),
@@ -431,6 +478,7 @@ export const useChatStore = defineStore('chat', {
         this.roles = []
         this.rolesLoaded = false
       }
+      await this.loadZhiziAvailability()
       if (!this.currentConversationId && this.conversations.length > 0) {
         await this.selectConversation(this.conversations[0].id)
       }
@@ -559,6 +607,10 @@ export const useChatStore = defineStore('chat', {
       }
     },
     async selectConversation(conversationId: string) {
+      if (conversationId !== this.currentConversationId) {
+        this.detachActiveStream()
+      }
+      this.cacheMessages()
       let conversation = this.conversations.find((item) => item.id === conversationId)
       if (!conversation) {
         try {
@@ -593,8 +645,9 @@ export const useChatStore = defineStore('chat', {
       this.hitlEnabled = false
       this.hitlOverridden = false
       this.autoContinue = true
+      this.assetRestrictionEnabled = true
       this.currentResumableRun = null
-      this.messages = []
+      this.messages = (this.messagesByConversation[conversationId] ?? []).slice()
       this.processDetails = []
       this.processDetailMeta = {}
       this.messagesHasMore = false
@@ -606,6 +659,7 @@ export const useChatStore = defineStore('chat', {
       await this.loadAttachments()
       await this.loadConversationHITL()
       await this.loadConversationAgentSettings()
+      await this.loadZhiziConversationState(conversationId)
       await this.loadPendingHITL()
       await this.loadResumableRun(conversationId)
       if (conversation?.kind === 'batch_parent' && conversation.batchId) {
@@ -639,6 +693,62 @@ export const useChatStore = defineStore('chat', {
         }
       } finally {
         this.resumableRunLoading = false
+      }
+    },
+    async loadZhiziAvailability() {
+      try {
+        this.zhiziAvailability = await apiGet<ZhiziAvailability>('/zhizi/availability')
+      } catch {
+        this.zhiziAvailability = {
+          enabledNodes: 0,
+          totalSlots: 0,
+          activeSlots: 0,
+          available: 0,
+        }
+      }
+    },
+    async loadZhiziConversationState(conversationId = this.currentConversationId) {
+      if (!conversationId) {
+        this.zhiziEnabled = false
+        this.zhiziLeaseNodeName = ''
+        return
+      }
+      this.zhiziLoading = true
+      try {
+        const state = await apiGet<ZhiziConversationState>(
+          `/zhizi/conversations/${conversationId}`,
+        )
+        if (this.currentConversationId === conversationId) {
+          this.zhiziEnabled = Boolean(state.enabled)
+          this.zhiziLeaseNodeName = state.lease?.node?.name || ''
+        }
+      } catch {
+        if (this.currentConversationId === conversationId) {
+          this.zhiziEnabled = false
+          this.zhiziLeaseNodeName = ''
+        }
+      } finally {
+        this.zhiziLoading = false
+      }
+    },
+    async setZhiziEnabled(enabled: boolean) {
+      if (!this.currentConversationId || this.zhiziUpdating) {
+        return
+      }
+      this.zhiziUpdating = true
+      this.error = ''
+      try {
+        const state = await apiPut<ZhiziConversationState>(
+          `/zhizi/conversations/${this.currentConversationId}`,
+          { enabled },
+        )
+        this.zhiziEnabled = Boolean(state.enabled)
+        this.zhiziLeaseNodeName = state.lease?.node?.name || ''
+        await this.loadZhiziAvailability()
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : '更新智子分身开关失败'
+      } finally {
+        this.zhiziUpdating = false
       }
     },
     async resumeConversation(conversationId: string) {
@@ -684,6 +794,7 @@ export const useChatStore = defineStore('chat', {
         return (item.processDetailCount ?? 0) > 0
       })
       this.messages = filtered.slice(-MESSAGE_WINDOW_SIZE)
+      this.cacheMessages(conversationId)
       this.messagesHasMore = Boolean(response.hasMore) || filtered.length > MESSAGE_WINDOW_SIZE
       this.messagesNextCursor = this.messages[0]?.id || response.nextCursor || ''
       this.messagesHasNewer = false
@@ -734,6 +845,7 @@ export const useChatStore = defineStore('chat', {
         this.messages = hasOverflow
           ? combined.slice(0, MESSAGE_WINDOW_SIZE)
           : combined
+        this.cacheMessages(conversationId)
         this.messagesHasMore = Boolean(response.hasMore)
         this.messagesNextCursor =
           this.messages[0]?.id || response.nextCursor || ''
@@ -777,6 +889,7 @@ export const useChatStore = defineStore('chat', {
         this.messages = hasOverflow
           ? combined.slice(-MESSAGE_WINDOW_SIZE)
           : combined
+        this.cacheMessages(conversationId)
         this.messagesHasNewer = Boolean(response.hasMore)
         this.messagesNextNewerCursor =
           this.messages.at(-1)?.id || cursor
@@ -1010,21 +1123,28 @@ export const useChatStore = defineStore('chat', {
       const conversationId = this.currentConversationId
       if (!conversationId) {
         this.autoContinue = true
+        this.assetRestrictionEnabled = true
         return
       }
       this.autoContinueLoading = true
+      this.assetRestrictionLoading = true
       try {
-        const response = await apiGet<{ autoContinue: boolean }>(
+        const response = await apiGet<{
+          autoContinue: boolean
+          assetRestrictionEnabled: boolean
+        }>(
           `/conversations/${conversationId}/agent-settings`,
         )
         if (this.currentConversationId === conversationId) {
           this.autoContinue = response.autoContinue
+          this.assetRestrictionEnabled = response.assetRestrictionEnabled
         }
       } catch {
         // 读取失败时保持默认自动继续，不影响对话主流程
       } finally {
         if (this.currentConversationId === conversationId) {
           this.autoContinueLoading = false
+          this.assetRestrictionLoading = false
         }
       }
     },
@@ -1037,18 +1157,49 @@ export const useChatStore = defineStore('chat', {
       this.autoContinueUpdating = true
       this.autoContinue = enabled
       try {
-        const response = await apiPut<{ autoContinue: boolean }>(
+        const response = await apiPut<{
+          autoContinue: boolean
+          assetRestrictionEnabled: boolean
+        }>(
           `/conversations/${conversationId}/agent-settings`,
           { autoContinue: enabled },
         )
         if (this.currentConversationId === conversationId) {
           this.autoContinue = response.autoContinue
+          this.assetRestrictionEnabled = response.assetRestrictionEnabled
         }
       } catch (error) {
         this.autoContinue = previous
         this.error = error instanceof Error ? error.message : '保存自动继续设置失败'
       } finally {
         this.autoContinueUpdating = false
+      }
+    },
+    async setAssetRestriction(enabled: boolean) {
+      const conversationId = this.currentConversationId
+      if (!conversationId || this.assetRestrictionUpdating) {
+        return
+      }
+      const previous = this.assetRestrictionEnabled
+      this.assetRestrictionUpdating = true
+      this.assetRestrictionEnabled = enabled
+      try {
+        const response = await apiPut<{
+          autoContinue: boolean
+          assetRestrictionEnabled: boolean
+        }>(
+          `/conversations/${conversationId}/agent-settings`,
+          { assetRestrictionEnabled: enabled },
+        )
+        if (this.currentConversationId === conversationId) {
+          this.autoContinue = response.autoContinue
+          this.assetRestrictionEnabled = response.assetRestrictionEnabled
+        }
+      } catch (error) {
+        this.assetRestrictionEnabled = previous
+        this.error = error instanceof Error ? error.message : '保存资产限制设置失败'
+      } finally {
+        this.assetRestrictionUpdating = false
       }
     },
     async stopConversation(conversationId = this.currentConversationId) {
@@ -1091,48 +1242,6 @@ export const useChatStore = defineStore('chat', {
         this.error = error instanceof Error ? error.message : '创建对话失败'
       } finally {
         this.creatingConversation = false
-      }
-    },
-    async createConversationBatch(payload: {
-      projectId: string
-      title: string
-      instruction: string
-      assets: string
-      roleId?: string
-      maxConcurrency?: number
-      maxAttemptsPerTask?: number
-      maxSegmentsPerTask?: number
-      maxToolCallsPerTask?: number
-      campaignMode?: 'single' | 'continuous'
-      maxRounds?: number
-      campaignToolCallBudget?: number
-    }) {
-      if (!payload.projectId) {
-        this.error = translate('chat.projectRequired')
-        return null
-      }
-      if (!this.projectAllowsWork(payload.projectId)) {
-        return null
-      }
-      if (this.batchCreating) {
-        return null
-      }
-      this.batchCreating = true
-      this.error = ''
-      try {
-        const result = await apiPost<ConversationBatchResult>('/conversations/batch', {
-          ...payload,
-          roleId: payload.roleId ?? '',
-        })
-        this.conversations.unshift(result.parent)
-        await this.selectConversation(result.parent.id)
-        await this.loadConversationChildren(result.parent.id, true)
-        return result
-      } catch (error) {
-        this.error = error instanceof Error ? error.message : '创建批量对话失败'
-        return null
-      } finally {
-        this.batchCreating = false
       }
     },
     async loadConversationChildren(parentId: string, force = false) {
@@ -1261,6 +1370,19 @@ export const useChatStore = defineStore('chat', {
         this.liveSteps.splice(0, this.liveSteps.length - LIVE_STEP_WINDOW_SIZE)
       }
     },
+    detachActiveStream() {
+      const controller = activeStreamController
+      activeStreamController = null
+      controller?.abort()
+      this.streaming = false
+      this.streamConversationId = ''
+      this.taskId = ''
+      this.responseText = ''
+      this.liveSteps = []
+      this.reasoningText = ''
+      this.liveReasoningByAgent = {}
+      void this.refreshConversationStatuses()
+    },
     async runStream(path: string, body: Record<string, unknown>) {
       if (this.streaming) {
         return
@@ -1272,6 +1394,8 @@ export const useChatStore = defineStore('chat', {
         this.error = translate('chat.projectRequired')
         return
       }
+      const controller = new AbortController()
+      activeStreamController = controller
       this.streaming = true
       this.streamConversationId = streamConversationID
       this.taskId = ''
@@ -1283,7 +1407,7 @@ export const useChatStore = defineStore('chat', {
       this.liveReasoningByAgent = {}
       const viewingStream = () => this.currentConversationId === streamConversationID
       try {
-        for await (const event of apiStream(path, body)) {
+        for await (const event of apiStream(path, body, controller.signal)) {
           const data = event.data || {}
           const eventConversationID = String(
             data.conversationId || streamConversationID,
@@ -1476,22 +1600,28 @@ export const useChatStore = defineStore('chat', {
           }
         }
       } catch (error) {
-        if (viewingStream()) {
+        if (!controller.signal.aborted && viewingStream()) {
           this.error = error instanceof Error ? error.message : '发送失败'
         }
       } finally {
-        this.streaming = false
-        if (this.streamConversationId === streamConversationID) {
-          this.streamConversationId = ''
-          this.taskId = ''
+        const ownsActiveStream = activeStreamController === controller
+        if (ownsActiveStream) {
+          activeStreamController = null
+          this.streaming = false
+          if (this.streamConversationId === streamConversationID) {
+            this.streamConversationId = ''
+            this.taskId = ''
+          }
         }
-        this.setConversationStatus(streamConversationID, 'idle')
+        if (!controller.signal.aborted) {
+          this.setConversationStatus(streamConversationID, 'idle')
+        }
         try {
           await this.refreshConversationStatuses()
         } catch {
           // 列表刷新失败不影响本次对话结果
         }
-        if (this.currentConversationId === streamConversationID) {
+        if (!controller.signal.aborted && this.currentConversationId === streamConversationID) {
           try {
             const messages = await this.loadLatestMessages()
             // 取消时后端可能仍在落盘：只有助手消息已有内容才清空流式缓冲。
@@ -1536,6 +1666,7 @@ export const useChatStore = defineStore('chat', {
         this.messagesNextCursor = this.messages[0]?.id || this.messagesNextCursor
         this.pruneProcessDetailsToMessageWindow()
       }
+      this.cacheMessages()
       await this.runStream('/chat/stream', {
         conversationId: this.currentConversationId,
         projectId: this.selectedProjectId,
@@ -1613,6 +1744,7 @@ export const useChatStore = defineStore('chat', {
         this.pendingAttachments = []
         this.responseText = ''
       }
+      delete this.messagesByConversation[conversationId]
       for (const [parentID, children] of Object.entries(this.conversationChildren)) {
         this.conversationChildren[parentID] = children.filter(
           (item) => item.id !== conversationId,
@@ -1641,6 +1773,9 @@ export const useChatStore = defineStore('chat', {
         this.attachments = []
         this.pendingAttachments = []
         this.responseText = ''
+      }
+      for (const conversationId of ids) {
+        delete this.messagesByConversation[conversationId]
       }
       const deleted = new Set(ids)
       for (const [parentID, children] of Object.entries(this.conversationChildren)) {

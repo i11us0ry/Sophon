@@ -89,7 +89,6 @@ func (s *Service) projectSituationForContext(
 			len(execution.Plan.PentestTargets) > 0 {
 			builder.WriteString("- 明确运行时验证目标：" + formatMissionTargets(execution.Plan) + "\n")
 		} else {
-			builder.WriteString("- 渗透授权：未授予\n")
 			builder.WriteString("- 后续出现的项目目标、未完成意图和探测记录仅作为背景，不属于本轮执行范围\n")
 		}
 		if execution.Plan.Mode == missionModeProjectWrite && len(execution.Plan.WriteTools) > 0 {

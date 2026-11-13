@@ -292,6 +292,100 @@ func TestStartProjectsBatchBindsAgentRole(t *testing.T) {
 	}
 }
 
+func TestStartProjectsBatchEnablesZhizi(t *testing.T) {
+	db, err := database.Open(filepath.Join(t.TempDir(), "project-batch-start-zhizi.db"))
+	if err != nil {
+		t.Fatalf("打开数据库失败: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	seedProjectForBatchStart(t, db, "project-zhizi", true)
+	node, err := db.CreateZhiziNode(
+		context.Background(),
+		database.ZhiziNode{
+			CreatedByUserID:    "user-1",
+			Name:               "node-batch-start",
+			Host:               "10.0.0.10",
+			Port:               22,
+			Username:           "root",
+			AuthType:           "key",
+			HostKeyFingerprint: "SHA256:n4bQgYhMfWWaL+qgxVrQFaO/TxsrC4Is0V1sFbDwCgg",
+			WorkRoot:           "/home/sophon/sophon",
+			MaxSlots:           1,
+			Enabled:            true,
+		},
+		database.ZhiziNodeSecret{PrivateKey: "unused"},
+	)
+	if err != nil {
+		t.Fatalf("创建智子节点失败: %v", err)
+	}
+	if err := db.RecordZhiziNodeTest(context.Background(), node.ID, nil); err != nil {
+		t.Fatalf("记录智子节点测试成功失败: %v", err)
+	}
+
+	handler := &ChatHandler{
+		db:      db,
+		manager: task.NewManagerWithLimit(5),
+		campaignStarter: func(_, _ string) error {
+			return nil
+		},
+	}
+	recorder := performProjectBatchStartRequest(
+		t,
+		handler,
+		projectBatchStartRequest{
+			ProjectIDs: []string{"project-zhizi"},
+			UseZhizi:   true,
+		},
+		true,
+	)
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("启用智子批量启动失败: %d %s", recorder.Code, recorder.Body.String())
+	}
+	var result projectBatchStartResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &result); err != nil {
+		t.Fatalf("解析响应失败: %v", err)
+	}
+	if result.Started != 1 || len(result.Items) != 1 {
+		t.Fatalf("批量启动统计异常: %+v", result)
+	}
+	state, err := db.GetZhiziConversationState(
+		context.Background(),
+		result.Items[0].ConversationID,
+		"user-1",
+	)
+	if err != nil {
+		t.Fatalf("读取智子会话状态失败: %v", err)
+	}
+	if !state.Enabled {
+		t.Fatalf("批量启动会话未启用智子分身: %+v", state)
+	}
+}
+
+func TestStartProjectsBatchRejectsZhiziWithoutCapacity(t *testing.T) {
+	db, err := database.Open(filepath.Join(t.TempDir(), "project-batch-start-zhizi-empty.db"))
+	if err != nil {
+		t.Fatalf("打开数据库失败: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	seedProjectForBatchStart(t, db, "project-zhizi-empty", true)
+	handler := &ChatHandler{db: db, manager: task.NewManagerWithLimit(5)}
+	recorder := performProjectBatchStartRequest(
+		t,
+		handler,
+		projectBatchStartRequest{
+			ProjectIDs: []string{"project-zhizi-empty"},
+			UseZhizi:   true,
+		},
+		true,
+	)
+	if recorder.Code != http.StatusConflict ||
+		!bytes.Contains(recorder.Body.Bytes(), []byte(`"code":"zhizi_no_capacity"`)) {
+		t.Fatalf("无智子容量应返回 409: %d %s", recorder.Code, recorder.Body.String())
+	}
+}
+
 func TestStopProjectBatchConversationStopsCampaign(t *testing.T) {
 	db, err := database.Open(filepath.Join(t.TempDir(), "project-batch-stop.db"))
 	if err != nil {

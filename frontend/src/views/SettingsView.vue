@@ -26,6 +26,7 @@ interface SettingsValues {
   }
   agent: {
     mock: boolean
+    maxConcurrentSessions: number
     contextMaxChars: number
     maxIterations: number
     maxTurnTokens: number
@@ -161,6 +162,7 @@ const passwordStrength = computed(() => {
 
 const form = reactive({
   mock: true,
+  maxConcurrentSessions: 5,
   provider: 'openai_compatible',
   baseUrl: '',
   model: '',
@@ -307,6 +309,7 @@ async function load() {
     restartHints.value = response.requiresRestart ?? []
     const values = response.values
     form.mock = values.agent.mock
+    form.maxConcurrentSessions = values.agent.maxConcurrentSessions
     form.provider = values.llm.provider || 'openai_compatible'
     form.baseUrl = values.llm.baseUrl
     form.model = values.llm.model
@@ -360,6 +363,7 @@ async function save() {
       },
       agent: {
         mock: form.mock,
+        maxConcurrentSessions: Number(form.maxConcurrentSessions),
         contextMaxChars: Number(form.contextMaxChars),
         maxIterations: Number(form.maxIterations),
         maxTurnTokens: Number(form.maxTurnTokens),
@@ -712,7 +716,7 @@ onMounted(async () => {
   <section class="page factory-page page-settings config-control">
     <header class="page-header config-header">
       <div class="config-heading page-heading-with-robot">
-        <PageTitleRobot tone="cyan" />
+        <PageTitleRobot tone="slate" />
         <div>
           <p class="eyebrow">CONFIG FLOOR // SYSTEM CONTROL</p>
           <h1>{{ t('settings.title') }}</h1>
@@ -1091,6 +1095,17 @@ onMounted(async () => {
         <label class="checkbox-line">
           <input v-model="form.mock" type="checkbox" :disabled="locked('agent.mock') || !writable" />
           <span>{{ t('settings.mockModel') }}</span>
+        </label>
+        <label class="field">
+          <span>{{ t('settings.maxConcurrentSessions') }}</span>
+          <input
+            v-model.number="form.maxConcurrentSessions"
+            type="number"
+            min="1"
+            max="1000"
+            :disabled="locked('agent.maxConcurrentSessions') || !writable"
+          />
+          <small class="field-hint">{{ t('settings.maxConcurrentSessionsHint') }}</small>
         </label>
         <label class="field">
           <span>{{ t('settings.contextLimit') }}</span>
@@ -1649,7 +1664,7 @@ onMounted(async () => {
 <style scoped>
 /* Configuration control room */
 .main-column .page-settings.config-control {
-  --config-accent: #55c7e8;
+  --config-accent: #94a3b8;
   --config-mint: #34d399;
   --config-amber: #f0a43a;
   --config-violet: #9d8cff;

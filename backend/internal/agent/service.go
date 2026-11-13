@@ -27,6 +27,7 @@ import (
 	"sophon/internal/outbound"
 	"sophon/internal/policy"
 	"sophon/internal/skillname"
+	zhizipkg "sophon/internal/zhizi"
 
 	"github.com/cloudwego/eino-ext/components/model/claude"
 	"github.com/cloudwego/eino-ext/components/model/openai"
@@ -397,6 +398,7 @@ type Service struct {
 	baseTools []tool.BaseTool
 	tools     []tool.BaseTool
 	knowledge *knowledgepkg.Service
+	zhizi     *zhizipkg.Executor
 	// 后台压缩：按会话冷却，避免每轮重复触发。
 	compactMu      sync.Mutex
 	compactLast    map[string]time.Time
@@ -446,6 +448,7 @@ func NewService(
 		cfg:          cfg,
 		model:        chatModel,
 		knowledge:    knowledgeService,
+		zhizi:        zhizipkg.NewExecutor(db),
 		projectSyncs: map[string]*projectSyncState{},
 		registry:     newToolRegistry(),
 		toolCache:    map[string]toolCacheEntry{},
@@ -463,6 +466,7 @@ func NewService(
 		newInternetSearchTool(service),
 	}
 	builtinTools = append(builtinTools, newProjectContextTools(service)...)
+	builtinTools = append(builtinTools, newZhiziTools(service)...)
 	builtinTools = append(builtinTools, newJobTools(service)...)
 	builtinTools = append(builtinTools, newProjectTools(service)...)
 	// 高频 MCP 工具保持直连，其余 MCP 工具进入注册表；两者共用 artifact 外部化包装。
@@ -628,6 +632,32 @@ func (s *Service) RunWithOptions(
 	if err != nil {
 		return "", err
 	}
+	if state, stateErr := s.db.GetZhiziConversationState(ctx, conversationID, userID); stateErr == nil &&
+		state.Enabled {
+		lease := state.Lease
+		if state.Lease == nil {
+			acquired, acquireErr := s.db.AcquireZhiziLease(
+				ctx,
+				conversationID,
+				userID,
+				zhizipkg.DefaultTTL,
+			)
+			if acquireErr != nil {
+				return "", acquireErr
+			}
+			lease = acquired
+		}
+		stopHeartbeat := func() {}
+		if lease != nil {
+			stopHeartbeat = s.startZhiziLeaseHeartbeat(ctx, lease.ID)
+		}
+		defer func() {
+			stopHeartbeat()
+			releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			defer cancel()
+			_ = s.db.ReleaseZhiziLeaseByConversation(releaseCtx, conversationID)
+		}()
+	}
 	agentMode, err := ParseAgentMode(options.AgentMode)
 	if err != nil {
 		return "", err
@@ -636,6 +666,11 @@ func (s *Service) RunWithOptions(
 	if err != nil {
 		return "", fmt.Errorf("读取会话消息失败: %w", err)
 	}
+	assetRestriction, assetRestrictionErr := s.db.GetConversationAssetRestriction(ctx, conversationID)
+	if assetRestrictionErr != nil {
+		assetRestriction = true
+	}
+	ctx = execctx.WithAssetRestriction(ctx, assetRestriction)
 	projectAssets, err := s.db.ListProjectAssets(ctx, project.ID, userID)
 	if err != nil {
 		return "", fmt.Errorf("读取项目资产失败: %w", err)
@@ -1561,6 +1596,28 @@ func (s *Service) RunWithOptions(
 	return responseText, runErr
 }
 
+func (s *Service) startZhiziLeaseHeartbeat(ctx context.Context, leaseID string) func() {
+	if s == nil || s.db == nil || strings.TrimSpace(leaseID) == "" {
+		return func() {}
+	}
+	heartbeatCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-heartbeatCtx.Done():
+				return
+			case <-ticker.C:
+				renewCtx, renewCancel := context.WithTimeout(heartbeatCtx, 5*time.Second)
+				_ = s.db.RenewZhiziLease(renewCtx, leaseID, zhizipkg.DefaultTTL)
+				renewCancel()
+			}
+		}
+	}()
+	return cancel
+}
+
 func (s *Service) runAgentSegment(
 	ctx context.Context,
 	chatAgent *adk.ChatModelAgent,
@@ -2355,7 +2412,11 @@ func (s *Service) projectBriefing(ctx context.Context, conversationID, userID st
 		builder.WriteString("\n")
 	}
 	if value := strings.TrimSpace(project.Scope); value != "" {
-		builder.WriteString("- 资产范围（仅限此范围，超出需用户确认）：")
+		if execctx.AssetRestrictionEnabled(ctx) {
+			builder.WriteString("- 资产范围（仅限此范围，超出需用户确认）：")
+		} else {
+			builder.WriteString("- 初始资产范围（资产限制已关闭，可继续跟踪和测试发现的内网关联资产）：")
+		}
 		builder.WriteString(value)
 		builder.WriteString("\n")
 	}
@@ -2374,9 +2435,10 @@ func (s *Service) roleInstruction(ctx context.Context, agentRoleID string) strin
 	var builder strings.Builder
 	builder.WriteString(role.Prompt)
 	if summary := s.skillSummaries(role.Skills); summary != "" {
-		builder.WriteString("\n\n技能参考清单（仅用于补充思路，不是必读项，也不是检查项或漏洞覆盖上限；技能正文目录：")
-		builder.WriteString(s.configSnapshot().SkillsDir)
-		builder.WriteString("；仅在常规分析没有成果、成果不理想、没有下一步思路或方向停滞时，按需调用 read_skill 读取 1-2 个最相关 SKILL.md）：\n")
+		builder.WriteString("\n\n技能参考清单（仅用于补充思路，不是必读项，也不是检查项或漏洞覆盖上限；")
+		builder.WriteString("仅在常规分析没有成果、成果不理想、没有下一步思路或方向停滞时，")
+		builder.WriteString(`按需调用 read_skill(name="技能名") 读取 1-2 个最相关技能。`)
+		builder.WriteString("禁止通过 exec、cat 或技能目录文件路径读取 SKILL.md）：\n")
 		builder.WriteString(summary)
 	}
 	return builder.String()

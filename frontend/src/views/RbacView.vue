@@ -278,7 +278,7 @@ onMounted(() => {
   <section class="page factory-page page-rbac access-control">
     <header class="page-header access-header">
       <div class="access-heading page-heading-with-robot">
-        <PageTitleRobot tone="mint" />
+        <PageTitleRobot tone="magenta" />
         <div>
           <p class="eyebrow">ACCESS GATE // IDENTITY CONTROL</p>
           <h1>{{ t('rbac.title') }}</h1>
