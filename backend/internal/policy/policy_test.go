@@ -3,7 +3,6 @@ package policy
 import (
 	"context"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -430,8 +429,8 @@ func TestEngineUsesConfiguredRulesForCommandSafety(t *testing.T) {
 	}
 	if decision := decide("execute-python-script", map[string]interface{}{
 		"script": "import requests\nrequests.get('https://evil.example/secret')",
-	}); decision.Kind != DecisionDeny || !strings.Contains(decision.Reason, "不在当前项目授权资产范围内") {
-		t.Fatalf("Python 访问范围外目标应拒绝: %+v", decision)
+	}); decision.Kind != DecisionAllow {
+		t.Fatalf("execute-python-script 不应再受项目资产范围限制: %+v", decision)
 	}
 	if decision := decide("execute-python-script", map[string]interface{}{
 		"script": `files=["Kingdee.BOS.FileServer.App.Core.il","Kingdee.BOS.FileServer.Core.il","Kingdee.BOS.FileServer.Web.il"]
@@ -512,8 +511,8 @@ for name in files:
 	}
 	if decision := decide("exec", map[string]interface{}{
 		"command": "curl http://unauthorized.example/api",
-	}); decision.Kind != DecisionDeny || !strings.Contains(decision.Reason, "不在当前项目授权资产范围内") {
-		t.Fatalf("项目内 exec 未授权目标应拒绝: %+v", decision)
+	}); decision.Kind != DecisionAllow {
+		t.Fatalf("exec 不应再受项目资产范围限制: %+v", decision)
 	}
 	if decision := decide("nmap", map[string]interface{}{
 		"target": "127.0.0.1",
@@ -591,8 +590,8 @@ func TestEngineAppliesConfiguredInterceptRules(t *testing.T) {
 	decision, err = engine.Evaluate(ctx, "project-intercept", "user-1", "sophon-tool-runner", "exec", map[string]interface{}{
 		"command": "curl http://evil.example/health",
 	})
-	if err != nil || decision.Kind != DecisionDeny || !strings.Contains(decision.Reason, "不在当前项目授权资产范围内") {
-		t.Fatalf("allow 规则不能绕过项目授权范围: decision=%+v err=%v", decision, err)
+	if err != nil || decision.Kind != DecisionAllow {
+		t.Fatalf("exec 应跳过项目授权范围但仍按拦截规则放行: decision=%+v err=%v", decision, err)
 	}
 	decision, err = engine.Evaluate(ctx, "project-intercept", "user-1", "mcp-server", "nmap", map[string]interface{}{
 		"target": "evil.example",
@@ -690,8 +689,8 @@ func TestEngineDoesNotApplyHiddenCampaignScope(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Campaign 范围评估失败: %v", err)
 	}
-	if decision.Kind != DecisionDeny || !strings.Contains(decision.Reason, "不在当前 Campaign 授权资产范围内") {
-		t.Fatalf("Campaign 范围外目标应拒绝: %+v", decision)
+	if decision.Kind != DecisionAllow {
+		t.Fatalf("Campaign 中 exec 也不应受目标范围限制: %+v", decision)
 	}
 
 	task, err := db.CreateCampaignReviewTask(ctx, campaignID, "user-1", 1)

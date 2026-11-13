@@ -10,8 +10,8 @@ import (
 )
 
 const (
-	SystemIntentAgentID   = "system-intent-router"
-	SystemIntentAgentName = "意图审核"
+	SystemMainAgentID   = "system-main-agent"
+	SystemMainAgentName = "主 Agent"
 
 	SystemReportAgentID   = "system-report-agent"
 	SystemReportAgentName = "报告生成"
@@ -504,11 +504,11 @@ type systemAgentDefinition struct {
 func systemAgentDefinitions() []systemAgentDefinition {
 	return []systemAgentDefinition{
 		{
-			ID:          SystemIntentAgentID,
-			Name:        SystemIntentAgentName,
-			Description: "平台内置意图审核能力，负责识别任务模式、授权范围、阶段顺序和工具边界，不直接执行漏洞测试。",
-			Icon:        "🧭",
-			Prompt:      intentRouterSystemPrompt,
+			ID:          SystemMainAgentID,
+			Name:        SystemMainAgentName,
+			Description: "平台默认主 Agent，负责直接理解用户请求、发现项目材料、规划任务并调用工具执行。",
+			Icon:        "◈",
+			Prompt:      defaultSystemPrompt,
 		},
 		{
 			ID:          SystemReportAgentID,

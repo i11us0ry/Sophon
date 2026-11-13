@@ -43,19 +43,43 @@ func TestRunTurnTokenSafetyBounds(t *testing.T) {
 	}
 }
 
-func TestRunBudgetUsesMissionPlanLimitsForPentest(t *testing.T) {
+func TestRunBudgetUsesMissionPlanLimitsForBoundedTask(t *testing.T) {
 	plan := missionPlan{
 		Mode:         missionModePentest,
+		Bounded:      true,
 		MaxSegments:  2,
 		MaxToolCalls: 60,
 	}
 	segments, tools := resolveRunLimits(RunOptions{}, plan)
 	if segments != 2 || tools != 60 {
-		t.Fatalf("渗透任务应使用意图预算 2/60，实际 %d/%d", segments, tools)
+		t.Fatalf("有界任务应使用意图预算 2/60，实际 %d/%d", segments, tools)
 	}
 	segments, tools = resolveRunLimits(RunOptions{MaxSegments: 1, MaxToolCalls: 30}, plan)
 	if segments != 1 || tools != 30 {
 		t.Fatalf("显式运行预算应继续收紧，实际 %d/%d", segments, tools)
+	}
+}
+
+func TestRunBudgetIgnoresUnboundedMissionPlanCaps(t *testing.T) {
+	segments, tools := resolveRunLimits(RunOptions{}, missionPlan{
+		Mode:         missionModeCodeAudit,
+		MaxSegments:  2,
+		MaxToolCalls: 60,
+	})
+	if segments != defaultRunMaxSegments || tools != defaultRunMaxToolCalls {
+		t.Fatalf("非有界任务不应继承模型预算，实际 %d/%d", segments, tools)
+	}
+}
+
+func TestSegmentsForIterationBudget(t *testing.T) {
+	if got := segmentsForIterationBudget(1000, maxSegmentIterations); got != 42 {
+		t.Fatalf("1000 轮应按 24 轮单段换算为 42 段，实际 %d", got)
+	}
+	if got := segmentsForIterationBudget(24, maxSegmentIterations); got != 1 {
+		t.Fatalf("24 轮应需要 1 段，实际 %d", got)
+	}
+	if got := segmentsForIterationBudget(0, maxSegmentIterations); got != unlimitedRunIterations() {
+		t.Fatalf("0 轮应表示不限段数，实际 %d", got)
 	}
 }
 

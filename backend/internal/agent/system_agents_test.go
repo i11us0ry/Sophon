@@ -20,13 +20,16 @@ func TestSystemAgentRolesSeedCanonicalIdentityAndPrompt(t *testing.T) {
 	if err := EnsureSystemAgentRoles(ctx, db); err != nil {
 		t.Fatalf("初始化系统 Agent 失败: %v", err)
 	}
-	intentRole, err := db.GetAgentRole(ctx, SystemIntentAgentID)
+	mainRole, err := db.GetAgentRole(ctx, SystemMainAgentID)
 	if err != nil {
-		t.Fatalf("读取意图审核失败: %v", err)
+		t.Fatalf("读取主 Agent 失败: %v", err)
 	}
-	if intentRole.Name != SystemIntentAgentName || !intentRole.Enabled || !intentRole.Builtin ||
-		intentRole.Prompt != intentRouterSystemPrompt {
-		t.Fatalf("意图审核初始状态错误: %+v", intentRole)
+	if mainRole.Name != SystemMainAgentName || !mainRole.Enabled || !mainRole.Builtin ||
+		mainRole.Prompt != defaultSystemPrompt || mainRole.Icon != "◈" {
+		t.Fatalf("主 Agent 初始状态错误: %+v", mainRole)
+	}
+	if SystemAgentEditableForRole(*mainRole) || SystemAgentDisableableForRole(*mainRole) {
+		t.Fatalf("主 Agent 必须只读且不可停用")
 	}
 	reportRole, err := db.GetAgentRole(ctx, SystemReportAgentID)
 	if err != nil {
@@ -84,37 +87,7 @@ func TestSystemAgentRolesSeedCanonicalIdentityAndPrompt(t *testing.T) {
 		}
 	}
 
-	editedPrompt := intentRole.Prompt + "\n用户补充规则：优先保持只读。"
-	intentRole.Prompt = editedPrompt
-	intentRole.Name = "临时意图名称"
-	intentRole.Description = "被篡改的描述"
-	intentRole.Icon = "x"
-	intentRole.Enabled = false
-	if err := db.UpdateAgentRole(ctx, *intentRole); err != nil {
-		t.Fatalf("更新意图审核失败: %v", err)
-	}
-	if err := EnsureSystemAgentRoles(ctx, db); err != nil {
-		t.Fatalf("重复初始化系统 Agent 失败: %v", err)
-	}
-	stored, err := db.GetAgentRole(ctx, SystemIntentAgentID)
-	if err != nil {
-		t.Fatalf("读取更新后的意图审核失败: %v", err)
-	}
-	if stored.Name != SystemIntentAgentName ||
-		stored.Description != "平台内置意图审核能力，负责识别任务模式、授权范围、阶段顺序和工具边界，不直接执行漏洞测试。" ||
-		stored.Icon != "🧭" || !stored.Enabled || !stored.Builtin || stored.Prompt != intentRouterSystemPrompt {
-		t.Fatalf("系统身份属性或 Prompt 基线未恢复: %+v", stored)
-	}
 	service := &Service{db: db}
-	runtimePrompt := service.systemAgentPrompt(
-		ctx,
-		SystemIntentAgentID,
-		SystemIntentAgentName,
-		intentRouterSystemPrompt,
-	)
-	if runtimePrompt != intentRouterSystemPrompt || strings.Contains(runtimePrompt, "优先保持只读") {
-		t.Fatalf("运行时应读取系统 Prompt 基线: %q", runtimePrompt)
-	}
 	for _, expected := range []struct {
 		id     string
 		name   string

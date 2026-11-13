@@ -65,56 +65,6 @@ func (m *fixedRouterModel) Stream(
 	return schema.StreamReaderFromArray([]*schema.Message{schema.AssistantMessage("", nil)}), nil
 }
 
-type flakyRouterModel struct {
-	calls int
-}
-
-func (m *flakyRouterModel) WithTools(_ []*schema.ToolInfo) (model.ToolCallingChatModel, error) {
-	return m, nil
-}
-
-func (m *flakyRouterModel) Generate(
-	_ context.Context,
-	_ []*schema.Message,
-	_ ...model.Option,
-) (*schema.Message, error) {
-	m.calls++
-	if m.calls == 1 {
-		return nil, context.DeadlineExceeded
-	}
-	return schema.AssistantMessage(`{
-		"mode":"asset_inventory",
-		"tasks":["asset_inventory"],
-		"confidence":0.95,
-		"reason":"重试后成功"
-	}`, nil), nil
-}
-
-func (m *flakyRouterModel) Stream(
-	_ context.Context,
-	_ []*schema.Message,
-	_ ...model.Option,
-) (*schema.StreamReader[*schema.Message], error) {
-	return schema.StreamReaderFromArray([]*schema.Message{schema.AssistantMessage("", nil)}), nil
-}
-
-func TestIntentRouterRetriesTransientFailure(t *testing.T) {
-	router := &flakyRouterModel{}
-	service := &Service{model: router}
-	plan, _, err := service.callIntentRouter(
-		context.Background(),
-		"conv-router-retry",
-		"user-1",
-		"assistant-router-retry",
-		missionTestProject(),
-		database.Conversation{},
-		"整理现有资产",
-	)
-	if err != nil || router.calls != 2 || plan.Mode != missionModeAssetInventory {
-		t.Fatalf("意图路由应重试瞬时失败: calls=%d plan=%+v err=%v", router.calls, plan, err)
-	}
-}
-
 func TestAssetOpportunityReviewAlwaysUsesLLM(t *testing.T) {
 	for _, message := range []string{
 		"整理现有资产和攻击路径 看看还有哪些资产可以挖掘有效漏洞",
@@ -139,9 +89,9 @@ func TestAssetOpportunityReviewAlwaysUsesLLM(t *testing.T) {
 			nil,
 			RunOptions{},
 		)
-		if router.routerCalls != 1 || plan.Mode != missionModeAssetInventory ||
-			plan.allowsPentest() || plan.Source != "llm" || plan.Confidence != 95 {
-			t.Fatalf("%q 必须由 LLM 分类为资产分析: calls=%d plan=%+v", message, router.routerCalls, plan)
+		if router.routerCalls != 0 || plan.Mode != missionModeAgent ||
+			plan.Source != "main_agent" || plan.Confidence != 100 {
+			t.Fatalf("%q 应直接交给主 Agent: calls=%d plan=%+v", message, router.routerCalls, plan)
 		}
 	}
 }
@@ -169,8 +119,8 @@ func TestLLMCannotInventAuthorizationQuote(t *testing.T) {
 		nil,
 		RunOptions{},
 	)
-	if plan.Mode != missionModeClarify || plan.allowsPentest() {
-		t.Fatalf("模型伪造授权引用时必须澄清: %+v", plan)
+	if plan.Mode != missionModeAgent || plan.Source != "main_agent" {
+		t.Fatalf("主 Agent 模式不应采用模型伪造授权引用: %+v", plan)
 	}
 }
 
@@ -195,8 +145,8 @@ func TestProjectScopedContinuationUsesStandingAuthorization(t *testing.T) {
 		nil,
 		RunOptions{},
 	)
-	if plan.Mode != missionModePentest || !plan.ProjectScope || !plan.allowsPentest() {
-		t.Fatalf("活动项目中的连续任务应继承项目授权: %+v", plan)
+	if plan.Mode != missionModeAgent || plan.Source != "main_agent" {
+		t.Fatalf("连续任务应直接交给主 Agent: %+v", plan)
 	}
 }
 
@@ -231,6 +181,20 @@ func TestNormalizeMissionPlanSeparatesAssetAndPentest(t *testing.T) {
 	}
 	if len(mixed.PentestTargets) != 2 {
 		t.Fatalf("应提取两个明确目标: %+v", mixed.PentestTargets)
+	}
+}
+
+func TestNormalizeMissionPlanPreservesMainAgentMode(t *testing.T) {
+	plan := normalizeMissionPlan(missionPlan{
+		Mode:       missionModeAgent,
+		Confidence: 95,
+	}, "查找已上传源码并继续审计", missionTestProject(), database.Conversation{}, missionTestAssets())
+	if plan.Mode != missionModeAgent ||
+		len(plan.Tasks) != 1 ||
+		plan.Tasks[0] != missionModeAgent ||
+		!plan.ProjectScope ||
+		plan.Objective != "查找已上传源码并继续审计" {
+		t.Fatalf("恢复后的主 Agent 任务应保留直接执行语义: %+v", plan)
 	}
 }
 
@@ -380,9 +344,8 @@ func TestRouterFailureUsesDefaultProjectWork(t *testing.T) {
 		nil,
 		RunOptions{},
 	)
-	if plan.Mode != missionModePentest || !plan.ProjectScope ||
-		plan.Source != "llm_fallback" || plan.RouterError == "" {
-		t.Fatalf("Router 失败时应进入默认项目工作: %+v", plan)
+	if plan.Mode != missionModeAgent || plan.Source != "main_agent" {
+		t.Fatalf("普通请求应直接进入主 Agent: %+v", plan)
 	}
 }
 
@@ -402,9 +365,8 @@ func TestRouterFailureUsesCurrentTurnAuthorization(t *testing.T) {
 		nil,
 		RunOptions{},
 	)
-	if plan.Mode != missionModePentest || !plan.allowsPentest() ||
-		len(plan.AuthorizedScopes) != 1 || plan.AuthorizedScopes[0] != "10.20.0.0/16" {
-		t.Fatalf("Router 失败时应使用本轮显式授权范围: %+v", plan)
+	if plan.Mode != missionModeAgent || plan.Source != "main_agent" {
+		t.Fatalf("显式测试请求也应直接交给主 Agent: %+v", plan)
 	}
 }
 
@@ -424,8 +386,8 @@ func TestRouterFailureUsesGeneralWhenNoAuthorizationExists(t *testing.T) {
 		nil,
 		RunOptions{},
 	)
-	if plan.Mode != missionModeGeneral || plan.allowsPentest() {
-		t.Fatalf("无授权时应进入普通项目工作: %+v", plan)
+	if plan.Mode != missionModeAgent || plan.Source != "main_agent" {
+		t.Fatalf("普通问题应直接进入主 Agent: %+v", plan)
 	}
 }
 
@@ -910,34 +872,40 @@ func TestResumeCodeAuditRehydratesProjectSourceAttachment(t *testing.T) {
 	}
 }
 
-func TestRecentMissionFindingsUsesMinimalFields(t *testing.T) {
+func TestEnsureMissionSourceRootsUsesProjectUploads(t *testing.T) {
 	service, ctx := openProjectToolService(t, true)
+	root := t.TempDir()
+	service.cfg.Storage.ArtifactRoot = root
 	now := time.Now().UTC()
-	if err := service.db.CreateVulnerability(ctx, database.Vulnerability{
-		ID:          "vuln-minimal-router-data",
-		ProjectID:   "project-tools",
-		OwnerUserID: "user-1",
-		Title:       "最小化候选",
-		Severity:    "high",
-		Status:      "open",
-		Target:      "https://app.example.com/api/user",
-		Description: "不应发送给意图路由器的长描述",
-		CreatedAt:   now,
-		UpdatedAt:   now,
+	if err := service.db.CreateConversation(ctx, database.Conversation{
+		ID: "conv-project-discovery", OwnerUserID: "user-1", ProjectID: "project-tools",
+		Title: "源码发现", CreatedAt: now, UpdatedAt: now,
 	}); err != nil {
-		t.Fatalf("创建测试漏洞失败: %v", err)
+		t.Fatalf("创建源码会话失败: %v", err)
 	}
-	items := service.recentMissionFindings(ctx, "project-tools", "user-1")
-	if len(items) != 1 {
-		t.Fatalf("候选漏洞数量错误: %+v", items)
+	sourcePath := filepath.Join(root, "chat_uploads", "conv-project-discovery", "WebSite.zip")
+	if err := os.MkdirAll(filepath.Dir(sourcePath), 0o700); err != nil {
+		t.Fatalf("创建源码目录失败: %v", err)
 	}
-	if _, exists := items[0]["description"]; exists {
-		t.Fatalf("意图路由器不应收到漏洞描述: %+v", items[0])
+	if err := os.WriteFile(sourcePath, []byte("source"), 0o600); err != nil {
+		t.Fatalf("写入源码附件失败: %v", err)
 	}
-	for _, field := range []string{"id", "title", "type", "target", "status"} {
-		if _, exists := items[0][field]; !exists {
-			t.Fatalf("缺少最小候选字段 %s: %+v", field, items[0])
-		}
+	if err := service.db.AddAttachment(ctx, database.Attachment{
+		ID: "att-project-discovery", ConversationID: "conv-project-discovery",
+		FileName: "WebSite.zip", StoragePath: "conv-project-discovery/WebSite.zip",
+		CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("写入项目附件记录失败: %v", err)
+	}
+
+	plan := service.ensureMissionSourceRoots(ctx, "user-1", "project-tools", missionPlan{
+		Mode: missionModeCodeValidate,
+	})
+	if !containsString(plan.SourceRoots, sourcePath) {
+		t.Fatalf("应从项目上传附件自动发现源码: %+v", plan.SourceRoots)
+	}
+	if !strings.Contains(plan.Reason, "自动定位源码") {
+		t.Fatalf("应记录自动发现源码原因: %s", plan.Reason)
 	}
 }
 
@@ -1319,7 +1287,7 @@ func TestMissionPolicyAllowsConversationScopedSourcePaths(t *testing.T) {
 	}
 }
 
-func TestCodeAuditStageOnlyBlocksAllUnauthorizedTargets(t *testing.T) {
+func TestCodeAuditStageExemptsDirectExecToolsFromTargetScope(t *testing.T) {
 	root := t.TempDir()
 	source := filepath.Join(root, "tmp", "workspace", "conv-audit", "src")
 	if err := os.MkdirAll(source, 0o700); err != nil {
@@ -1354,10 +1322,10 @@ func TestCodeAuditStageOnlyBlocksAllUnauthorizedTargets(t *testing.T) {
 	}); !allowed {
 		t.Fatalf("包含授权目标时应允许: %s", reason)
 	}
-	if allowed, _ := service.missionToolDecision(ctx, "exec", map[string]interface{}{
+	if allowed, reason := service.missionToolDecision(ctx, "exec", map[string]interface{}{
 		"command": "curl https://evil.example/",
-	}); allowed {
-		t.Fatalf("全部目标未授权时必须拒绝")
+	}); !allowed {
+		t.Fatalf("代码审计阶段 exec 不应受目标范围限制: %s", reason)
 	}
 }
 
@@ -1622,8 +1590,8 @@ func TestRetestAllResolvesEveryProjectVulnerability(t *testing.T) {
 		missionTestAssets(),
 		plan,
 	)
-	if plan.Mode != missionModeRetest || len(plan.VulnerabilityIDs) != 3 || len(plan.RetestIDs) != 3 {
-		t.Fatalf("项目级批量复测解析错误: %+v", plan)
+	if plan.Mode != missionModeAgent || plan.Source != "main_agent" {
+		t.Fatalf("复测请求应直接交给主 Agent: %+v", plan)
 	}
 }
 
@@ -1703,87 +1671,6 @@ func TestRetestFinalizationRequiresEvidenceAndWriteback(t *testing.T) {
 	)
 	if !decision.Allowed {
 		t.Fatalf("复测证据和写回齐全后应允许最终化: %+v", decision.Reasons)
-	}
-}
-
-type usageIntentRouterModel struct{}
-
-func (m *usageIntentRouterModel) WithTools(_ []*schema.ToolInfo) (model.ToolCallingChatModel, error) {
-	return m, nil
-}
-
-func (m *usageIntentRouterModel) Generate(
-	_ context.Context,
-	_ []*schema.Message,
-	_ ...model.Option,
-) (*schema.Message, error) {
-	message := schema.AssistantMessage(`{
-		"mode":"general",
-		"tasks":["general"],
-		"confidence":90,
-		"reason":"普通查询"
-	}`, nil)
-	message.ResponseMeta = &schema.ResponseMeta{
-		Usage: &schema.TokenUsage{
-			PromptTokens:     120,
-			CompletionTokens: 30,
-			TotalTokens:      150,
-		},
-	}
-	return message, nil
-}
-
-func (m *usageIntentRouterModel) Stream(
-	_ context.Context,
-	_ []*schema.Message,
-	_ ...model.Option,
-) (*schema.StreamReader[*schema.Message], error) {
-	return nil, nil
-}
-
-func TestIntentRouterRecordsTokenUsage(t *testing.T) {
-	db, err := database.Open(t.TempDir() + "/intent-usage.db")
-	if err != nil {
-		t.Fatalf("打开测试数据库失败: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	service := &Service{db: db, model: &usageIntentRouterModel{}}
-	project := missionTestProject()
-	conversation := database.Conversation{}
-	if err := db.CreateConversation(context.Background(), database.Conversation{
-		ID:          "conv-usage",
-		OwnerUserID: "user-1",
-		Title:       "Router Token 测试",
-		CreatedAt:   time.Now().UTC(),
-		UpdatedAt:   time.Now().UTC(),
-	}); err != nil {
-		t.Fatalf("创建测试会话失败: %v", err)
-	}
-	_, _, err = service.callIntentRouter(
-		context.Background(),
-		"conv-usage",
-		"user-1",
-		"assistant-usage",
-		project,
-		conversation,
-		"解释当前项目",
-	)
-	if err != nil {
-		t.Fatalf("Router 调用失败: %v", err)
-	}
-	var kind string
-	var promptTokens, completionTokens, totalTokens int
-	if err := db.QueryRowContext(
-		context.Background(),
-		`SELECT kind, prompt_tokens, completion_tokens, total_tokens
-		 FROM token_usage WHERE message_id = ?`,
-		"assistant-usage",
-	).Scan(&kind, &promptTokens, &completionTokens, &totalTokens); err != nil {
-		t.Fatalf("读取 Router Token 记录失败: %v", err)
-	}
-	if kind != "intent_router" || promptTokens != 120 || completionTokens != 30 || totalTokens != 150 {
-		t.Fatalf("Router Token 记录错误: kind=%s prompt=%d completion=%d total=%d",
-			kind, promptTokens, completionTokens, totalTokens)
 	}
 }
 
@@ -2008,7 +1895,7 @@ func TestProjectGetResourceHonorsMissionPhaseAllowlist(t *testing.T) {
 	}
 }
 
-func TestMissionToolDecisionRestrictsPentestTargets(t *testing.T) {
+func TestMissionToolDecisionExemptsDirectExecToolsFromTargetScope(t *testing.T) {
 	service := &Service{}
 	ctx := withMissionExecution(context.Background(), missionExecution{
 		Plan: missionPlan{
@@ -2037,15 +1924,25 @@ func TestMissionToolDecisionRestrictsPentestTargets(t *testing.T) {
 	}); !allowed {
 		t.Fatalf("无真实网络目标的本地命令不应触发授权检查: %s", reason)
 	}
-	if allowed, _ := service.missionToolDecision(ctx, "exec", map[string]interface{}{
+	if allowed, reason := service.missionToolDecision(ctx, "exec", map[string]interface{}{
 		"command": "curl -s https://other.example.com/",
-	}); allowed {
-		t.Fatalf("其他目标必须由 Mission Policy 拒绝")
+	}); !allowed {
+		t.Fatalf("exec 不应再受 Mission 目标范围限制: %s", reason)
 	}
-	if allowed, _ := service.missionToolDecision(ctx, "exec", map[string]interface{}{
+	if allowed, reason := service.missionToolDecision(ctx, "exec", map[string]interface{}{
 		"command": "curl -s https://other.example.com/; curl -s https://third.example.com/",
+	}); !allowed {
+		t.Fatalf("exec 多目标也不应再受 Mission 范围限制: %s", reason)
+	}
+	if allowed, reason := service.missionToolDecision(ctx, "execute-python-script", map[string]interface{}{
+		"script": "import requests\nrequests.get('https://other.example.com/')",
+	}); !allowed {
+		t.Fatalf("execute-python-script 不应再受 Mission 目标范围限制: %s", reason)
+	}
+	if allowed, _ := service.missionToolDecision(ctx, "nmap", map[string]interface{}{
+		"target": "other.example.com",
 	}); allowed {
-		t.Fatalf("全部目标均未授权时必须拒绝")
+		t.Fatalf("其他网络工具仍必须受 Mission 目标范围限制")
 	}
 }
 
@@ -2511,22 +2408,8 @@ func TestMixedIntentRunsAssetPhaseBeforeScopedPentest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("混合任务运行失败: %v", err)
 	}
-	if !strings.Contains(result, "项目资产整理完成") ||
-		!strings.Contains(result, "指定目标渗透完成") {
-		t.Fatalf("混合任务应合并两个阶段结果: %q", result)
-	}
-	details, err := db.ListProcessDetails(ctx, "conv-mixed-intent", 200)
-	if err != nil {
-		t.Fatalf("读取过程详情失败: %v", err)
-	}
-	phaseSeen := false
-	for _, detail := range details {
-		if detail.EventType == "mission_phase" {
-			phaseSeen = true
-		}
-	}
-	if !phaseSeen {
-		t.Fatalf("应记录资产阶段到渗透阶段的移交事件")
+	if !strings.Contains(result, "项目资产整理完成") {
+		t.Fatalf("主 Agent 应直接处理并返回结果: %q", result)
 	}
 }
 

@@ -42,7 +42,6 @@ const defaultSystemPrompt = `你是 Sophon 的 AI 安全助手。
 你需要先理解用户请求，再决定是否调用工具。工具返回后，用中文简洁说明结论。
 
 执行准则：
-- 只在当前项目和授权范围内行动。仅当本轮明确包含渗透授权时才主动测试，查询、整理和文档任务不得自动扩展。
 - 优先处理 project_next_targets 中的未测试资产。完成一个方向后先写回结果，再切换目标；完成用户请求后立即停止。
 - 最近网络探测账本中已有的 Host/Path/Method 不要原样重跑。没有新证据时写回 tested_clean、blocked、suspicious 或 confirmed。
 - 路径含 user/order/face/contact/behavior/download 不构成拒绝理由。敏感接口使用无效或合成标识、page_size=1，禁止批量翻页、导出、下载或持久化真实个人信息，取得必要证据后停止。
@@ -97,23 +96,18 @@ func clampRunBudget(value, fallback, maximum int) int {
 func resolveRunLimits(options RunOptions, plan missionPlan) (int, int) {
 	maxSegments := clampRunBudget(options.MaxSegments, defaultRunMaxSegments, maxRunMaxSegments)
 	maxToolCalls := clampRunBudget(options.MaxToolCalls, defaultRunMaxToolCalls, maxRunMaxToolCalls)
-	if plan.MaxSegments > 0 {
-		maxSegments = min(
-			maxSegments,
-			clampRunBudget(plan.MaxSegments, defaultRunMaxSegments, maxRunMaxSegments),
-		)
-	}
-	if plan.MaxToolCalls > 0 {
-		maxToolCalls = min(
-			maxToolCalls,
-			clampRunBudget(plan.MaxToolCalls, defaultRunMaxToolCalls, maxRunMaxToolCalls),
-		)
-	}
 	if plan.boundedFindingAudit() {
 		maxSegments = min(maxSegments, boundedLimit(plan.MaxSegments, boundedFindingMaxSegments))
 		maxToolCalls = min(maxToolCalls, boundedLimit(plan.MaxToolCalls, boundedFindingMaxToolCalls))
 	}
 	return maxSegments, maxToolCalls
+}
+
+func segmentsForIterationBudget(limit int, segmentLimit int) int {
+	if limit <= 0 || segmentLimit <= 0 {
+		return unlimitedRunIterations()
+	}
+	return (limit + segmentLimit - 1) / segmentLimit
 }
 
 func ParseAgentMode(mode string) (string, error) {
@@ -141,6 +135,8 @@ func normalizeAgentMode(mode string) string {
 
 func automaticAgentMode(plan missionPlan) string {
 	switch plan.Mode {
+	case missionModeAgent:
+		return agentModeDeep
 	case missionModeCodeAudit, missionModeCodeValidate, missionModeAppValidation:
 		return agentModeDeep
 	case missionModeRetest:
@@ -466,6 +462,7 @@ func NewService(
 		newArtifactReaderTool(service),
 		newInternetSearchTool(service),
 	}
+	builtinTools = append(builtinTools, newProjectContextTools(service)...)
 	builtinTools = append(builtinTools, newJobTools(service)...)
 	builtinTools = append(builtinTools, newProjectTools(service)...)
 	// 高频 MCP 工具保持直连，其余 MCP 工具进入注册表；两者共用 artifact 外部化包装。
@@ -853,9 +850,6 @@ func (s *Service) RunWithOptions(
 		"confidence":         intentPlan.Confidence,
 		"source":             intentPlan.Source,
 		"reason":             intentPlan.Reason,
-		"routerLatencyMs":    intentPlan.RouterLatencyMS,
-		"routerMode":         intentPlan.RouterMode,
-		"routerError":        intentPlan.RouterError,
 		"missionPhase":       missionPhase,
 		"stopAfterTasks":     true,
 	}
@@ -906,11 +900,11 @@ func (s *Service) RunWithOptions(
 	segmentLimit := configuredSegmentLimit(maxIterations)
 	maxSegmentsLimit, maxToolCallsLimit := resolveRunLimits(options, intentPlan)
 	autoContinueSegments := !intentPlan.boundedFindingAudit()
-	if maxIterations <= 0 &&
-		autoContinueSegments &&
-		options.MaxSegments <= 0 &&
-		intentPlan.MaxSegments <= 0 {
-		maxSegmentsLimit = unlimitedRunIterations()
+	if autoContinueSegments && options.MaxSegments <= 0 {
+		maxSegmentsLimit = max(
+			defaultRunMaxSegments,
+			segmentsForIterationBudget(maxIterations, segmentLimit),
+		)
 	}
 	buildAgent := func(agentCtx context.Context, limit int, includeTools bool) (*adk.ChatModelAgent, error) {
 		toolsConfig := adk.ToolsConfig{}
@@ -1156,18 +1150,36 @@ func (s *Service) RunWithOptions(
 					iterationBudgetSynthesisPrompt,
 					newAgent,
 				)
-				limit := segmentLimit
-				if iterationExhausted {
-					limit = maxIterations
+				stopNotice := ""
+				switch {
+				case iterationExhausted:
+					stopNotice = fmt.Sprintf(
+						"已达到 Agent 总迭代预算（%d/%d），本轮在强制总结后停止。",
+						maxIterations,
+						maxIterations,
+					)
+				case attempt+1 >= maxSegmentsLimit:
+					stopNotice = fmt.Sprintf(
+						"已达到任务分段预算（%d/%d），单段内部窗口为 %d 轮；总迭代预算未耗尽。",
+						attempt+1,
+						maxSegmentsLimit,
+						segmentLimit,
+					)
+				default:
+					stopNotice = fmt.Sprintf(
+						"有界任务已达到单段内部窗口（%d/%d），本轮按任务自身预算停止。",
+						segmentLimit,
+						segmentLimit,
+					)
 				}
 				if strings.TrimSpace(summary) == "" {
-					summary = maxIterationsResult(segmentCapture, limit)
+					if partial := segmentCapture.finalText(); partial != "" {
+						summary = partial + "\n\n---\n" + stopNotice
+					} else {
+						summary = stopNotice
+					}
 				} else {
-					summary += "\n\n---\n\n" + fmt.Sprintf(
-						"已达到 Agent 迭代预算（%d/%d），本轮在强制总结后停止。",
-						limit,
-						limit,
-					)
+					summary += "\n\n---\n\n" + stopNotice
 				}
 				if terminal {
 					result := summary

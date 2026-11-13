@@ -910,6 +910,14 @@ func (db *DB) migrate(ctx context.Context) error {
 			return fmt.Errorf("database migration: %w", err)
 		}
 	}
+	for _, cleanup := range []string{
+		`DROP TABLE IF EXISTS intent_drafts`,
+		`DELETE FROM agent_roles WHERE id = 'system-intent-router'`,
+	} {
+		if _, err := db.ExecContext(ctx, cleanup); err != nil {
+			return fmt.Errorf("database cleanup: %w", err)
+		}
+	}
 	if err := db.encryptLegacyToolJobSteps(ctx); err != nil {
 		return fmt.Errorf("encrypt legacy tool job steps: %w", err)
 	}

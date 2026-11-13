@@ -80,9 +80,7 @@ async function load() {
   error.value = ''
   try {
     const roleResponse = await apiGet<{ items: AgentRole[] }>('/agent-roles?includeInternal=true')
-    roles.value = (roleResponse.items ?? []).filter(
-      (role) => role.id !== 'system-intent-router',
-    )
+    roles.value = roleResponse.items ?? []
     if (canReadSkills.value) {
       try {
         const skillResponse = await apiGet<{ items: SkillItem[] }>('/skills')

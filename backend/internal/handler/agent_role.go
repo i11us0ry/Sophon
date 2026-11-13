@@ -58,9 +58,6 @@ func (h *AgentRoleHandler) List(c *gin.Context) {
 	systemItems := make([]agentRoleListItem, 0, 2)
 	items := make([]agentRoleListItem, 0, len(roles))
 	for _, role := range roles {
-		if role.ID == agentpkg.SystemIntentAgentID {
-			continue
-		}
 		_, isSystem := agentpkg.SystemAgentDefinitionForRole(role)
 		if isSystem && !includeInternal && role.ID != agentpkg.SystemRetestAgentID {
 			continue
