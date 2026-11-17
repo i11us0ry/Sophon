@@ -2,6 +2,7 @@
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 
 import { apiDelete, apiGet, apiPost, apiPut } from '../api/client'
+import DataPagination from '../components/DataPagination.vue'
 import PageTitleRobot from '../components/PageTitleRobot.vue'
 import { useI18n } from '../i18n'
 import { useAuthStore } from '../stores/auth'
@@ -75,6 +76,7 @@ const filters = reactive({
   projectId: '',
   kind: '',
   status: '',
+  sort: 'updated_desc',
 })
 
 const pagination = reactive({
@@ -192,6 +194,7 @@ async function load(resetPage = false) {
     if (filters.status) {
       query.set('status', filters.status)
     }
+    query.set('sort', filters.sort)
     const response = await apiGet<{ items: Asset[]; total: number }>(
       `/assets?${query.toString()}`,
     )
@@ -254,6 +257,7 @@ function resetFilters() {
   filters.projectId = ''
   filters.kind = ''
   filters.status = ''
+  filters.sort = 'updated_desc'
   void load(true)
 }
 
@@ -403,12 +407,14 @@ function applyFilters() {
   void load(true)
 }
 
-function goPage(offset: number) {
-  const next = pagination.page + offset
-  if (next < 1 || next > pagination.totalPages) {
-    return
-  }
-  pagination.page = next
+function changeAssetPage(page: number) {
+  pagination.page = page
+  void load()
+}
+
+function changeAssetPageSize(pageSize: number) {
+  pagination.pageSize = pageSize
+  pagination.page = 1
   void load()
 }
 
@@ -528,6 +534,16 @@ onUnmounted(() => {
           <option value="">{{ t('asset.allKinds') }}</option>
           <option v-for="kind in KNOWN_KINDS" :key="kind" :value="kind">{{ kindLabel(kind) }}</option>
         </select>
+        <select v-model="filters.sort" :aria-label="t('asset.sort')" @change="applyFilters">
+          <option value="updated_desc">{{ t('asset.sortUpdatedDesc') }}</option>
+          <option value="updated_asc">{{ t('asset.sortUpdatedAsc') }}</option>
+          <option value="name_asc">{{ t('asset.sortNameAsc') }}</option>
+          <option value="name_desc">{{ t('asset.sortNameDesc') }}</option>
+          <option value="risk_desc">{{ t('asset.sortRiskDesc') }}</option>
+          <option value="risk_asc">{{ t('asset.sortRiskAsc') }}</option>
+          <option value="criticality_desc">{{ t('asset.sortCriticalityDesc') }}</option>
+          <option value="criticality_asc">{{ t('asset.sortCriticalityAsc') }}</option>
+        </select>
         <button class="button" type="button" @click="applyFilters">{{ t('common.query') }}</button>
         <button class="button compact" type="button" @click="resetFilters">{{ t('common.reset') }}</button>
       </div>
@@ -613,13 +629,15 @@ onUnmounted(() => {
           </tbody>
         </table>
       </div>
-      <footer class="asset-pagination">
-        <span>{{ t('asset.pagination', { total: pagination.total, page: pagination.page, totalPages: pagination.totalPages }) }}</span>
-        <div>
-          <button class="button compact" type="button" :disabled="pagination.page <= 1" @click="goPage(-1)">{{ t('asset.prev') }}</button>
-          <button class="button compact" type="button" :disabled="pagination.page >= pagination.totalPages" @click="goPage(1)">{{ t('asset.next') }}</button>
-        </div>
-      </footer>
+      <DataPagination
+        :total="pagination.total"
+        :page="pagination.page"
+        :page-size="pagination.pageSize"
+        :total-pages="pagination.totalPages"
+        :disabled="loading"
+        @page-change="changeAssetPage"
+        @page-size-change="changeAssetPageSize"
+      />
     </section>
 
     <Teleport to="body">
@@ -778,20 +796,6 @@ onUnmounted(() => {
 
 .asset-table tbody tr:hover {
   background: var(--surface-soft);
-}
-
-.pagination {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-top: 12px;
-  color: var(--text-muted);
-  font-size: 13px;
-}
-
-.pagination-actions {
-  display: flex;
-  gap: 8px;
 }
 
 .kind-badge,
@@ -1289,17 +1293,6 @@ onUnmounted(() => {
   color: var(--danger);
 }
 
-.asset-table-section .asset-pagination {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-top: 12px;
-  padding: 0;
-  border: 0;
-  color: var(--text-muted);
-  font-size: 13px;
-}
-
 .asset-table-section .asset-empty,
 .asset-table-section .asset-loading {
   min-height: 180px;
@@ -1439,12 +1432,6 @@ onUnmounted(() => {
   .asset-table-section .asset-row-actions .button {
     flex: 1;
     justify-content: center;
-  }
-
-  .asset-table-section .asset-pagination {
-    align-items: flex-start;
-    flex-direction: column;
-    gap: 8px;
   }
 
   .asset-drawer {
@@ -2121,23 +2108,6 @@ onUnmounted(() => {
   color: var(--asset-coral);
 }
 
-.asset-pagination {
-  display: flex;
-  gap: 10px;
-  align-items: center;
-  justify-content: space-between;
-  padding: 8px 10px;
-  border-top: 1px solid var(--border);
-  color: var(--text-muted);
-  font-family: var(--mono);
-  font-size: 8px;
-}
-
-.asset-pagination > div {
-  display: flex;
-  gap: 6px;
-}
-
 .asset-loading,
 .asset-empty {
   display: grid;
@@ -2616,11 +2586,6 @@ onUnmounted(() => {
 
   .asset-value-cell code {
     max-width: calc(100vw - 110px);
-  }
-
-  .asset-pagination {
-    align-items: flex-start;
-    flex-direction: column;
   }
 
   .asset-drawer {

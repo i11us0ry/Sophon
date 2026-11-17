@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 )
@@ -1146,6 +1147,7 @@ type AssetFilter struct {
 	Kind        string
 	Status      string
 	Search      string
+	Sort        string
 	Limit       int
 	Offset      int
 }
@@ -1222,6 +1224,41 @@ func (db *DB) ListAssetsFiltered(
 	if err := rows.Err(); err != nil {
 		return nil, 0, err
 	}
+	sort.SliceStable(items, func(i, j int) bool {
+		left, right := items[i], items[j]
+		switch strings.ToLower(strings.TrimSpace(filter.Sort)) {
+		case "updated_asc":
+			return left.UpdatedAt.Before(right.UpdatedAt)
+		case "name_asc":
+			return strings.ToLower(left.Name) < strings.ToLower(right.Name)
+		case "name_desc":
+			return strings.ToLower(left.Name) > strings.ToLower(right.Name)
+		case "risk_desc":
+			if left.RiskScore == right.RiskScore {
+				return left.UpdatedAt.After(right.UpdatedAt)
+			}
+			return left.RiskScore > right.RiskScore
+		case "risk_asc":
+			if left.RiskScore == right.RiskScore {
+				return left.UpdatedAt.After(right.UpdatedAt)
+			}
+			return left.RiskScore < right.RiskScore
+		case "criticality_desc":
+			leftRank, rightRank := assetCriticalityRank(left.Criticality), assetCriticalityRank(right.Criticality)
+			if leftRank == rightRank {
+				return left.UpdatedAt.After(right.UpdatedAt)
+			}
+			return leftRank > rightRank
+		case "criticality_asc":
+			leftRank, rightRank := assetCriticalityRank(left.Criticality), assetCriticalityRank(right.Criticality)
+			if leftRank == rightRank {
+				return left.UpdatedAt.After(right.UpdatedAt)
+			}
+			return leftRank < rightRank
+		default:
+			return left.UpdatedAt.After(right.UpdatedAt)
+		}
+	})
 	total := len(items)
 	limit, offset := normalizeProjectPage(filter.Limit, filter.Offset)
 	if offset >= total {
@@ -1232,6 +1269,21 @@ func (db *DB) ListAssetsFiltered(
 		end = total
 	}
 	return items[offset:end], total, nil
+}
+
+func assetCriticalityRank(value string) int {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "critical":
+		return 4
+	case "high":
+		return 3
+	case "medium":
+		return 2
+	case "low":
+		return 1
+	default:
+		return 0
+	}
 }
 
 func validStoredAsset(item Asset) bool {

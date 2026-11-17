@@ -58,6 +58,7 @@ func TestConversationAgentSettingsAndStop(t *testing.T) {
 	)
 	if settings.Code != http.StatusOK ||
 		!strings.Contains(settings.Body.String(), `"autoContinue":true`) ||
+		!strings.Contains(settings.Body.String(), `"agentMode":""`) ||
 		!strings.Contains(settings.Body.String(), `"assetRestrictionEnabled":true`) {
 		t.Fatalf("默认会话设置异常: status=%d body=%s", settings.Code, settings.Body.String())
 	}
@@ -69,6 +70,16 @@ func TestConversationAgentSettingsAndStop(t *testing.T) {
 	)
 	if invalid.Code != http.StatusBadRequest {
 		t.Fatalf("空设置请求应被拒绝: status=%d body=%s", invalid.Code, invalid.Body.String())
+	}
+	invalid = call(
+		http.MethodPut,
+		"/api/conversations/conv-agent-settings/agent-settings",
+		`{"agentMode":"turbo"}`,
+		handler.SetConversationAgentSettings,
+	)
+	if invalid.Code != http.StatusBadRequest ||
+		!strings.Contains(invalid.Body.String(), `"code":"invalid_agent_mode"`) {
+		t.Fatalf("非法 Agent 模式应被拒绝: status=%d body=%s", invalid.Code, invalid.Body.String())
 	}
 	update := call(
 		http.MethodPut,
@@ -101,6 +112,19 @@ func TestConversationAgentSettingsAndStop(t *testing.T) {
 	assetRestriction, err = db.GetConversationAssetRestriction(ctx, "conv-agent-settings")
 	if err != nil || assetRestriction {
 		t.Fatalf("资产限制设置未持久化: enabled=%v err=%v", assetRestriction, err)
+	}
+	update = call(
+		http.MethodPut,
+		"/api/conversations/conv-agent-settings/agent-settings",
+		`{"agentMode":"FAST"}`,
+		handler.SetConversationAgentSettings,
+	)
+	if update.Code != http.StatusOK ||
+		!strings.Contains(update.Body.String(), `"agentMode":"fast"`) {
+		t.Fatalf("更新 Agent 模式失败: status=%d body=%s", update.Code, update.Body.String())
+	}
+	if mode, err := db.GetConversationAgentMode(ctx, "conv-agent-settings"); err != nil || mode != "fast" {
+		t.Fatalf("Agent 模式未持久化: mode=%q err=%v", mode, err)
 	}
 
 	taskItem, _, err := manager.CreateIfIdle("conv-agent-settings", "user-1")

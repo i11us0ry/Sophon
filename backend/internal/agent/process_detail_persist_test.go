@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"strings"
 	"testing"
 )
@@ -72,5 +73,32 @@ func TestPersistEventTruncatesLargeReasoning(t *testing.T) {
 	}
 	if details[0].Data["truncated"] != true {
 		t.Fatalf("落库推理缺少 truncated 标记: %+v", details[0].Data)
+	}
+}
+
+func TestPersistEventPersistsAfterContextCancel(t *testing.T) {
+	service, usage, ctx := newConsumeTestEnv(t)
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+
+	event := Event{
+		Type:    "tool_result",
+		Message: "exec",
+		Data: map[string]interface{}{
+			"toolCallId": "call-canceled",
+			"toolName":   "exec",
+			"result":     "completed before cancellation",
+		},
+	}
+	if err := service.persistEvent(canceled, usage.conversationID, usage.messageID, event); err != nil {
+		t.Fatalf("取消态写入过程明细失败: %v", err)
+	}
+
+	details, err := service.db.ListProcessDetails(ctx, usage.conversationID, 10)
+	if err != nil {
+		t.Fatalf("读取过程明细失败: %v", err)
+	}
+	if len(details) != 1 {
+		t.Fatalf("过程明细数量异常: %+v", details)
 	}
 }

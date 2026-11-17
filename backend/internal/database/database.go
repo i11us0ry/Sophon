@@ -561,6 +561,7 @@ func (db *DB) migrate(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS conversation_agent_settings (
 			conversation_id TEXT PRIMARY KEY,
 			auto_continue INTEGER NOT NULL DEFAULT 1,
+			agent_mode TEXT NOT NULL DEFAULT '',
 			asset_restriction_enabled INTEGER NOT NULL DEFAULT 1,
 			updated_at INTEGER NOT NULL,
 			FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
@@ -966,6 +967,15 @@ func (db *DB) migrate(ctx context.Context) error {
 		if _, err := db.ExecContext(ctx, cleanup); err != nil {
 			return fmt.Errorf("database cleanup: %w", err)
 		}
+	}
+	if err := db.ensureColumn(
+		ctx,
+		"conversation_agent_settings",
+		"agent_mode",
+		`ALTER TABLE conversation_agent_settings
+		 ADD COLUMN agent_mode TEXT NOT NULL DEFAULT ''`,
+	); err != nil {
+		return err
 	}
 	if err := db.ensureColumn(
 		ctx,

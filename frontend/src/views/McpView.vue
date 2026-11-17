@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 
 import { apiDelete, apiGet, apiPost, apiPut } from '../api/client'
+import DataPagination from '../components/DataPagination.vue'
 import PageTitleRobot from '../components/PageTitleRobot.vue'
 import { useI18n } from '../i18n'
 
@@ -58,12 +59,13 @@ interface AgentToolInventory {
 }
 
 interface ToolSection {
-  key: string
+  key: 'direct' | 'searchable'
   title: string
   hint: string
   empty: string
   visible: number
   total: number
+  totalPages: number
   items: AgentToolItem[]
 }
 
@@ -120,6 +122,11 @@ const doctorOpen = ref(false)
 const editorOpen = ref(false)
 
 const toolItems = computed(() => [...directTools.value, ...searchableTools.value])
+const serverPage = reactive({ page: 1, pageSize: 20 })
+const toolPages = reactive({
+  direct: { page: 1, pageSize: 20 },
+  searchable: { page: 1, pageSize: 20 },
+})
 const editingServer = computed(
   () => servers.value.find((server) => server.id === editingId.value) ?? null,
 )
@@ -145,6 +152,13 @@ const filteredServers = computed(() => {
     }
     return true
   })
+})
+const serverTotalPages = computed(() =>
+  Math.max(1, Math.ceil(filteredServers.value.length / serverPage.pageSize)),
+)
+const visibleServers = computed(() => {
+  const start = (serverPage.page - 1) * serverPage.pageSize
+  return filteredServers.value.slice(start, start + serverPage.pageSize)
 })
 
 const serverStats = computed(() => {
@@ -201,7 +215,14 @@ const toolSections = computed<ToolSection[]>(() => {
       empty: t('mcp.directToolsEmpty'),
       visible: filteredDirectTools.value.length,
       total: directTools.value.length,
-      items: filteredDirectTools.value,
+      totalPages: Math.max(
+        1,
+        Math.ceil(filteredDirectTools.value.length / toolPages.direct.pageSize),
+      ),
+      items: filteredDirectTools.value.slice(
+        (toolPages.direct.page - 1) * toolPages.direct.pageSize,
+        toolPages.direct.page * toolPages.direct.pageSize,
+      ),
     },
     {
       key: 'searchable',
@@ -214,7 +235,14 @@ const toolSections = computed<ToolSection[]>(() => {
       empty: t('mcp.searchableToolsEmpty'),
       visible: filteredSearchableTools.value.length,
       total: searchableTools.value.length,
-      items: filteredSearchableTools.value,
+      totalPages: Math.max(
+        1,
+        Math.ceil(filteredSearchableTools.value.length / toolPages.searchable.pageSize),
+      ),
+      items: filteredSearchableTools.value.slice(
+        (toolPages.searchable.page - 1) * toolPages.searchable.pageSize,
+        toolPages.searchable.page * toolPages.searchable.pageSize,
+      ),
     },
   ]
   if (toolMode.value === 'all') {
@@ -576,6 +604,40 @@ function test(server: MCPServer) {
   })
 }
 
+function changeServerPage(page: number) {
+  serverPage.page = page
+}
+
+function changeServerPageSize(pageSize: number) {
+  serverPage.pageSize = pageSize
+  serverPage.page = 1
+}
+
+function changeToolPage(key: 'direct' | 'searchable', page: number) {
+  toolPages[key].page = page
+}
+
+function changeToolPageSize(key: 'direct' | 'searchable', pageSize: number) {
+  toolPages[key].pageSize = pageSize
+  toolPages[key].page = 1
+}
+
+watch([serverSearch, serverHealth], () => {
+  serverPage.page = 1
+})
+
+watch([toolSearch, toolStatus, toolSource, toolMode], () => {
+  toolPages.direct.page = 1
+  toolPages.searchable.page = 1
+})
+
+watch(
+  () => filteredServers.value.length,
+  () => {
+    serverPage.page = Math.min(serverPage.page, serverTotalPages.value)
+  },
+)
+
 onMounted(() => {
   void load()
   void loadTools()
@@ -772,7 +834,7 @@ onMounted(() => {
 
         <div v-if="filteredServers.length" class="robot-fleet-list">
           <article
-            v-for="server in filteredServers"
+            v-for="server in visibleServers"
             :key="server.id"
             class="robot-service-row"
             :class="[
@@ -835,6 +897,14 @@ onMounted(() => {
           <span class="empty-robot" aria-hidden="true"><i></i><b></b><b></b></span>
           <strong>{{ serverSearch || serverHealth ? t('mcp.noServers') : t('mcp.empty') }}</strong>
         </div>
+        <DataPagination
+          :total="filteredServers.length"
+          :page="serverPage.page"
+          :page-size="serverPage.pageSize"
+          :total-pages="serverTotalPages"
+          @page-change="changeServerPage"
+          @page-size-change="changeServerPageSize"
+        />
       </div>
 
       <aside class="mcp-fleet-rail">
@@ -1016,6 +1086,14 @@ onMounted(() => {
           <div v-else class="mcp-empty-state compact">
             <strong>{{ section.empty }}</strong>
           </div>
+          <DataPagination
+            :total="section.visible"
+            :page="toolPages[section.key].page"
+            :page-size="toolPages[section.key].pageSize"
+            :total-pages="section.totalPages"
+            @page-change="changeToolPage(section.key, $event)"
+            @page-size-change="changeToolPageSize(section.key, $event)"
+          />
         </section>
       </section>
     </section>

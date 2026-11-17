@@ -24,7 +24,6 @@ type workerBudgetState struct {
 	maxCPUSeconds  float64
 	usedCPUSeconds float64
 	budgetToken    string
-	cancel         context.CancelFunc
 }
 
 func (b *workerBudgetState) reserve(name string) error {
@@ -34,17 +33,11 @@ func (b *workerBudgetState) reserve(name string) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.maxCalls > 0 && b.calls >= b.maxCalls {
-		if b.cancel != nil {
-			b.cancel()
-		}
-		return fmt.Errorf("Worker 工具调用预算已耗尽（%d/%d），已终止当前 Worker", b.calls, b.maxCalls)
+		return fmt.Errorf("Worker 工具调用预算已耗尽（%d/%d），禁止继续调用工具，请立即总结当前成果", b.calls, b.maxCalls)
 	}
 	if b.maxCPUSeconds > 0 && b.usedCPUSeconds >= b.maxCPUSeconds {
-		if b.cancel != nil {
-			b.cancel()
-		}
 		return fmt.Errorf(
-			"Worker CPU 预算已耗尽（%.3f/%.3f 秒），已终止当前 Worker",
+			"Worker CPU 预算已耗尽（%.3f/%.3f 秒），禁止继续调用工具，请立即总结当前成果",
 			b.usedCPUSeconds,
 			b.maxCPUSeconds,
 		)
@@ -63,12 +56,7 @@ func (b *workerBudgetState) recordCPUUsage(result string) {
 	}
 	b.mu.Lock()
 	b.usedCPUSeconds += seconds
-	exhausted := b.maxCPUSeconds > 0 && b.usedCPUSeconds >= b.maxCPUSeconds
-	cancel := b.cancel
 	b.mu.Unlock()
-	if exhausted && cancel != nil {
-		cancel()
-	}
 }
 
 func (b *workerBudgetState) remainingCPUSeconds() float64 {
@@ -106,13 +94,12 @@ func parseWorkerCPUUsage(result, token string) float64 {
 func withWorkerBudget(
 	ctx context.Context,
 	cfg config.Config,
-	cancel context.CancelFunc,
+	_ context.CancelFunc,
 ) context.Context {
 	state := &workerBudgetState{
 		maxCalls:      cfg.AgentSubagentMaxToolCalls,
 		maxCPUSeconds: float64(cfg.AgentSubagentMaxCPUSeconds),
 		budgetToken:   randomID(),
-		cancel:        cancel,
 	}
 	return context.WithValue(ctx, workerBudgetKey{}, state)
 }

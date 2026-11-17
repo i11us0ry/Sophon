@@ -40,6 +40,24 @@ type ProjectWithCounts struct {
 	Counts ProjectCounts `json:"counts"`
 }
 
+type ProjectListFilter struct {
+	OwnerUserID string
+	Search      string
+	Status      string
+	RiskOnly    bool
+	Sort        string
+	Limit       int
+	Offset      int
+}
+
+type ProjectListStats struct {
+	Total  int `json:"total"`
+	Active int `json:"active"`
+	Paused int `json:"paused"`
+	Done   int `json:"done"`
+	Risk   int `json:"risk"`
+}
+
 func (db *DB) ProjectSummary(
 	ctx context.Context,
 	projectID string,
@@ -202,6 +220,169 @@ func (db *DB) ListProjectsWithCountsPage(
 		items = items[:limit]
 	}
 	return items, hasMore, nil
+}
+
+func (db *DB) ListProjectsWithCountsOffset(
+	ctx context.Context,
+	filter ProjectListFilter,
+) ([]ProjectWithCounts, int, ProjectListStats, error) {
+	var stats ProjectListStats
+	if err := db.QueryRowContext(
+		ctx,
+		`SELECT
+			COUNT(*),
+			COALESCE(SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN status = 'paused' THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN status = 'done' THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN EXISTS (
+				SELECT 1 FROM vulnerabilities v WHERE v.project_id = projects.id
+			) THEN 1 ELSE 0 END), 0)
+		 FROM projects WHERE owner_user_id = ?`,
+		filter.OwnerUserID,
+	).Scan(
+		&stats.Total,
+		&stats.Active,
+		&stats.Paused,
+		&stats.Done,
+		&stats.Risk,
+	); err != nil {
+		return nil, 0, stats, err
+	}
+
+	where, args := buildProjectListWhere(filter)
+	limit := filter.Limit
+	if limit <= 0 || limit > 100 {
+		limit = 20
+	}
+	offset := filter.Offset
+	if offset < 0 {
+		offset = 0
+	}
+	var total int
+	if err := db.QueryRowContext(
+		ctx,
+		`SELECT COUNT(*) FROM projects p`+where,
+		args...,
+	).Scan(&total); err != nil {
+		return nil, 0, stats, err
+	}
+	order := projectListOrder(filter.Sort)
+
+	query := `WITH page AS (
+			SELECT
+				p.id, p.owner_user_id, p.name, p.description, p.goals, p.scope, p.status,
+				p.created_at, p.updated_at, p.rowid AS project_rowid
+			FROM projects p` + where + `
+			ORDER BY ` + order + `
+			LIMIT ? OFFSET ?
+		)
+		SELECT
+			p.id, p.owner_user_id, p.name, p.description, p.goals, p.scope, p.status,
+			p.created_at, p.updated_at,
+			(SELECT COUNT(*) FROM project_facts f WHERE f.project_id = p.id),
+			(SELECT COUNT(*) FROM project_graph_nodes g WHERE g.project_id = p.id),
+			(SELECT COUNT(*) FROM assets a WHERE a.project_id = p.id),
+			(SELECT COUNT(*) FROM conversations c WHERE c.project_id = p.id),
+			(SELECT COUNT(*) FROM vulnerabilities v WHERE v.project_id = p.id),
+			COALESCE(SUM(t.prompt_tokens), 0),
+			COALESCE(SUM(t.completion_tokens), 0),
+			COALESCE(SUM(t.total_tokens), 0),
+			COALESCE(MAX(t.estimated), 0)
+		FROM page p
+		LEFT JOIN token_usage t
+		  ON t.project_id = p.id AND t.user_id = p.owner_user_id
+		GROUP BY p.id, p.owner_user_id, p.name, p.description, p.goals, p.scope, p.status,
+			p.created_at, p.updated_at, p.project_rowid
+		ORDER BY ` + order
+	pageArgs := append(append([]interface{}{}, args...), limit, offset)
+	rows, err := db.QueryContext(ctx, query, pageArgs...)
+	if err != nil {
+		return nil, 0, stats, err
+	}
+	defer rows.Close()
+
+	items := make([]ProjectWithCounts, 0)
+	for rows.Next() {
+		var item ProjectWithCounts
+		var createdAt int64
+		var updatedAt int64
+		var estimated int
+		if err := rows.Scan(
+			&item.ID,
+			&item.OwnerUserID,
+			&item.Name,
+			&item.Description,
+			&item.Goals,
+			&item.Scope,
+			&item.Status,
+			&createdAt,
+			&updatedAt,
+			&item.Counts.Facts,
+			&item.Counts.AttackSteps,
+			&item.Counts.Assets,
+			&item.Counts.Conversations,
+			&item.Counts.Vulnerabilities,
+			&item.Counts.PromptTokens,
+			&item.Counts.CompletionTokens,
+			&item.Counts.TotalTokens,
+			&estimated,
+		); err != nil {
+			return nil, 0, stats, err
+		}
+		item.Counts.TokenUsageEstimated = estimated != 0
+		item.CreatedAt = time.Unix(createdAt, 0)
+		item.UpdatedAt = time.Unix(updatedAt, 0)
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, stats, err
+	}
+	return items, total, stats, nil
+}
+
+func projectListOrder(sort string) string {
+	switch strings.ToLower(strings.TrimSpace(sort)) {
+	case "updated_asc":
+		return "p.updated_at ASC, project_rowid ASC"
+	case "name_asc":
+		return "p.name COLLATE NOCASE ASC, p.updated_at DESC, project_rowid DESC"
+	case "name_desc":
+		return "p.name COLLATE NOCASE DESC, p.updated_at DESC, project_rowid DESC"
+	case "status_asc":
+		return "p.status COLLATE NOCASE ASC, p.updated_at DESC, project_rowid DESC"
+	case "risk_desc":
+		return `(SELECT COUNT(*) FROM vulnerabilities v WHERE v.project_id = p.id) DESC,
+			p.updated_at DESC, project_rowid DESC`
+	case "risk_asc":
+		return `(SELECT COUNT(*) FROM vulnerabilities v WHERE v.project_id = p.id) ASC,
+			p.updated_at DESC, project_rowid DESC`
+	default:
+		return "p.updated_at DESC, project_rowid DESC"
+	}
+}
+
+func buildProjectListWhere(filter ProjectListFilter) (string, []interface{}) {
+	clauses := []string{"p.owner_user_id = ?"}
+	args := []interface{}{filter.OwnerUserID}
+	if value := strings.TrimSpace(filter.Status); value != "" {
+		clauses = append(clauses, "p.status = ?")
+		args = append(args, value)
+	}
+	if value := strings.TrimSpace(filter.Search); value != "" {
+		pattern := "%" + escapeLikePattern(value) + "%"
+		clauses = append(
+			clauses,
+			`(p.name LIKE ? ESCAPE '\' OR p.description LIKE ? ESCAPE '\')`,
+		)
+		args = append(args, pattern, pattern)
+	}
+	if filter.RiskOnly {
+		clauses = append(
+			clauses,
+			`EXISTS (SELECT 1 FROM vulnerabilities v WHERE v.project_id = p.id)`,
+		)
+	}
+	return " WHERE " + strings.Join(clauses, " AND "), args
 }
 
 func normalizeProjectPage(limit, offset int) (int, int) {

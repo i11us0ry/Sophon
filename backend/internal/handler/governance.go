@@ -25,7 +25,7 @@ func (h *GovernanceHandler) ListAuditLogs(c *gin.Context) {
 		unauthorized(c)
 		return
 	}
-	limit := 50
+	limit := 20
 	if parsed, err := strconv.Atoi(strings.TrimSpace(c.Query("limit"))); err == nil && auditPageSizes[parsed] {
 		limit = parsed
 	}
@@ -69,7 +69,7 @@ func (h *GovernanceHandler) ListAuditLogs(c *gin.Context) {
 	})
 }
 
-var auditPageSizes = map[int]bool{50: true, 100: true, 500: true, 1000: true}
+var auditPageSizes = map[int]bool{10: true, 20: true, 50: true, 100: true}
 
 func (h *GovernanceHandler) ListToolExecutions(c *gin.Context) {
 	user := middleware.UserFromContext(c)
@@ -77,12 +77,42 @@ func (h *GovernanceHandler) ListToolExecutions(c *gin.Context) {
 		unauthorized(c)
 		return
 	}
-	items, err := h.db.ListToolExecutions(c.Request.Context(), user.ID, 200)
+	limit := clampQueryInt(c.Query("limit"), 20, 1, 100)
+	offset := clampQueryInt(c.Query("offset"), 0, 0, 1000000)
+	status := strings.ToLower(strings.TrimSpace(c.Query("status")))
+	switch status {
+	case "", "running", "success", "failed":
+	default:
+		badRequest(c, "invalid_execution_status", "执行状态筛选不合法")
+		return
+	}
+	items, total, stats, err := h.db.ListToolExecutionsFiltered(
+		c.Request.Context(),
+		database.ToolExecutionFilter{
+			UserID: user.ID,
+			Status: status,
+			Search: strings.TrimSpace(c.Query("search")),
+			Sort:   strings.TrimSpace(c.Query("sort")),
+			Limit:  limit,
+			Offset: offset,
+		},
+	)
 	if err != nil {
 		internalError(c, "list_monitor_failed", "读取工具执行记录失败")
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"items": items})
+	totalPages := (total + limit - 1) / limit
+	if totalPages == 0 {
+		totalPages = 1
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"items":      items,
+		"total":      total,
+		"page":       offset/limit + 1,
+		"pageSize":   limit,
+		"totalPages": totalPages,
+		"stats":      stats,
+	})
 }
 
 func (h *GovernanceHandler) ListPendingHITL(c *gin.Context) {

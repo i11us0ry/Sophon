@@ -2,6 +2,7 @@
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 
 import { apiDelete, apiGet, apiPost, apiPut } from '../api/client'
+import DataPagination from '../components/DataPagination.vue'
 import PageTitleRobot from '../components/PageTitleRobot.vue'
 import { useAuthStore } from '../stores/auth'
 import { useI18n } from '../i18n'
@@ -45,6 +46,16 @@ interface ZhiziAvailability {
 interface ZhiziListResponse {
   items: ZhiziNode[]
   availability: ZhiziAvailability
+  stats: {
+    total: number
+    ready: number
+    busy: number
+    error: number
+  }
+  total: number
+  page: number
+  pageSize: number
+  totalPages: number
 }
 
 interface ZhiziBatchTestResponse {
@@ -75,6 +86,19 @@ const filters = reactive({
   status: '',
   authType: '',
 })
+const sortValue = ref('name_asc')
+const pagination = reactive({
+  page: 1,
+  pageSize: 20,
+  total: 0,
+  totalPages: 1,
+})
+const nodeStats = reactive({
+  total: 0,
+  ready: 0,
+  busy: 0,
+  error: 0,
+})
 const error = ref('')
 const notice = ref('')
 const drawerOpen = ref(false)
@@ -95,14 +119,6 @@ const form = reactive({
 
 const canWrite = computed(() => auth.hasPermission('zhizi:write'))
 const canDelete = computed(() => auth.hasPermission('zhizi:delete'))
-const sortedNodes = computed(() =>
-  [...nodes.value].sort((left, right) => {
-    if (left.enabled !== right.enabled) {
-      return left.enabled ? -1 : 1
-    }
-    return left.name.localeCompare(right.name)
-  }),
-)
 type NodeRuntimeStatus = 'ready' | 'busy' | 'error' | 'unverified' | 'disabled'
 
 function nodeRuntimeStatus(node: ZhiziNode): NodeRuntimeStatus {
@@ -125,24 +141,7 @@ function nodeRuntimeStatus(node: ZhiziNode): NodeRuntimeStatus {
 }
 
 const filteredNodes = computed(() => {
-  const search = filters.search.trim().toLowerCase()
-  return sortedNodes.value.filter((node) => {
-    if (search && ![
-      node.name,
-      node.host,
-      node.username,
-      node.hostKeyFingerprint,
-    ].some((value) => value.toLowerCase().includes(search))) {
-      return false
-    }
-    if (filters.authType && node.authType !== filters.authType) {
-      return false
-    }
-    if (filters.status && nodeRuntimeStatus(node) !== filters.status) {
-      return false
-    }
-    return true
-  })
+  return nodes.value
 })
 const selectableNodes = computed(() =>
   filteredNodes.value.filter((node) => node.enabled && Boolean(node.hostKeyFingerprint)),
@@ -152,33 +151,49 @@ const allSelectableSelected = computed(
     selectableNodes.value.length > 0 &&
     selectableNodes.value.every((node) => selectedNodeIDs.value.includes(node.id)),
 )
-const readyNodeCount = computed(
-  () => nodes.value.filter((node) => ['ready', 'busy'].includes(nodeRuntimeStatus(node))).length,
-)
-const busyNodeCount = computed(
-  () => nodes.value.filter((node) => node.activeSlots > 0).length,
-)
-const errorNodeCount = computed(
-  () => nodes.value.filter((node) => nodeRuntimeStatus(node) === 'error').length,
-)
 const hasRunningInitialization = computed(
   () => nodes.value.some((node) => node.initStatus === 'queued' || node.initStatus === 'running'),
 )
 let initPollTimer: number | undefined
+let searchTimer: number | undefined
 
-async function load() {
+async function load(resetPage = false) {
+  if (resetPage) {
+    pagination.page = 1
+  }
   loading.value = true
   error.value = ''
   try {
-    const response = await apiGet<ZhiziListResponse>('/zhizi/nodes')
+    const query = new URLSearchParams({
+      limit: String(pagination.pageSize),
+      offset: String((pagination.page - 1) * pagination.pageSize),
+      sort: sortValue.value,
+    })
+    if (filters.search.trim()) {
+      query.set('search', filters.search.trim())
+    }
+    if (filters.status) {
+      query.set('status', filters.status)
+    }
+    if (filters.authType) {
+      query.set('authType', filters.authType)
+    }
+    const response = await apiGet<ZhiziListResponse>(`/zhizi/nodes?${query.toString()}`)
+    const totalPages = Math.max(1, response.totalPages ?? 1)
+    if (pagination.page > totalPages) {
+      pagination.page = totalPages
+      return await load()
+    }
     nodes.value = response.items ?? []
     availability.value = response.availability
-    const selectable = new Set(
-      nodes.value
-        .filter((node) => node.enabled && Boolean(node.hostKeyFingerprint))
-        .map((node) => node.id),
-    )
-    selectedNodeIDs.value = selectedNodeIDs.value.filter((id) => selectable.has(id))
+    nodeStats.total = response.stats?.total ?? 0
+    nodeStats.ready = response.stats?.ready ?? 0
+    nodeStats.busy = response.stats?.busy ?? 0
+    nodeStats.error = response.stats?.error ?? 0
+    pagination.total = response.total ?? 0
+    pagination.page = response.page ?? 1
+    pagination.pageSize = response.pageSize ?? pagination.pageSize
+    pagination.totalPages = totalPages
     scheduleInitPoll()
   } catch (loadError) {
     error.value = loadError instanceof Error ? loadError.message : t('zhizi.loadFailed')
@@ -526,12 +541,51 @@ function resetFilters() {
   filters.search = ''
   filters.status = ''
   filters.authType = ''
+  sortValue.value = 'name_asc'
+  void load(true)
+}
+
+function setNodeStatusFilter(status: string) {
+  filters.status = status
+  void load(true)
+}
+
+function onZhiziFilterChange() {
+  void load(true)
+}
+
+function onZhiziSortChange() {
+  void load(true)
+}
+
+function scheduleZhiziSearch() {
+  if (searchTimer) {
+    window.clearTimeout(searchTimer)
+  }
+  searchTimer = window.setTimeout(() => {
+    searchTimer = undefined
+    void load(true)
+  }, 300)
+}
+
+function changeZhiziPage(page: number) {
+  pagination.page = page
+  void load()
+}
+
+function changeZhiziPageSize(pageSize: number) {
+  pagination.pageSize = pageSize
+  pagination.page = 1
+  void load()
 }
 
 onMounted(load)
 onUnmounted(() => {
   if (initPollTimer) {
     window.clearTimeout(initPollTimer)
+  }
+  if (searchTimer) {
+    window.clearTimeout(searchTimer)
   }
 })
 </script>
@@ -548,7 +602,7 @@ onUnmounted(() => {
         </div>
       </div>
       <div class="header-actions">
-        <button class="button" type="button" :disabled="loading" @click="load">
+        <button class="button" type="button" :disabled="loading" @click="load(false)">
           {{ t('common.refresh') }}
         </button>
         <button v-if="canWrite" class="button zhizi-primary" type="button" @click="openCreate">
@@ -563,21 +617,21 @@ onUnmounted(() => {
     <div class="stat-row">
       <button class="stat-chip" type="button" @click="resetFilters">
         <small>{{ t('zhizi.totalNodes') }}</small>
-        <strong>{{ nodes.length }}</strong>
+        <strong>{{ nodeStats.total }}</strong>
       </button>
-      <button class="stat-chip tone-ready" type="button" @click="filters.status = 'ready'">
+      <button class="stat-chip tone-ready" type="button" @click="setNodeStatusFilter('ready')">
         <small>{{ t('zhizi.readyNodes') }}</small>
-        <strong>{{ readyNodeCount }}</strong>
+        <strong>{{ nodeStats.ready }}</strong>
       </button>
-      <button class="stat-chip tone-busy" type="button" @click="filters.status = 'busy'">
+      <button class="stat-chip tone-busy" type="button" @click="setNodeStatusFilter('busy')">
         <small>{{ t('zhizi.busyNodes') }}</small>
-        <strong>{{ busyNodeCount }}</strong>
+        <strong>{{ nodeStats.busy }}</strong>
       </button>
-      <button class="stat-chip tone-error" type="button" @click="filters.status = 'error'">
+      <button class="stat-chip tone-error" type="button" @click="setNodeStatusFilter('error')">
         <small>{{ t('zhizi.errorNodes') }}</small>
-        <strong>{{ errorNodeCount }}</strong>
+        <strong>{{ nodeStats.error }}</strong>
       </button>
-      <button class="stat-chip tone-slots" type="button" @click="filters.status = ''">
+      <button class="stat-chip tone-slots" type="button" @click="setNodeStatusFilter('')">
         <small>{{ t('zhizi.availableSlots') }}</small>
         <strong>{{ availability.available }}</strong>
       </button>
@@ -589,17 +643,25 @@ onUnmounted(() => {
         type="search"
         :placeholder="t('zhizi.searchPlaceholder')"
         :aria-label="t('zhizi.searchPlaceholder')"
+        @input="scheduleZhiziSearch"
       />
-      <select v-model="filters.status" :aria-label="t('common.status')">
+      <select v-model="filters.status" :aria-label="t('common.status')" @change="onZhiziFilterChange">
         <option value="">{{ t('zhizi.allStatus') }}</option>
         <option v-for="status in ['ready', 'busy', 'error', 'unverified', 'disabled']" :key="status" :value="status">
           {{ t(`zhizi.nodeStatus.${status}`) }}
         </option>
       </select>
-      <select v-model="filters.authType" :aria-label="t('zhizi.auth')">
+      <select v-model="filters.authType" :aria-label="t('zhizi.auth')" @change="onZhiziFilterChange">
         <option value="">{{ t('zhizi.allAuthTypes') }}</option>
         <option value="password">{{ t('zhizi.passwordAuth') }}</option>
         <option value="key">{{ t('zhizi.keyAuth') }}</option>
+      </select>
+      <select v-model="sortValue" :aria-label="t('zhizi.sort')" @change="onZhiziSortChange">
+        <option value="name_asc">{{ t('zhizi.sortNameAsc') }}</option>
+        <option value="name_desc">{{ t('zhizi.sortNameDesc') }}</option>
+        <option value="status_asc">{{ t('zhizi.sortStatus') }}</option>
+        <option value="slots_desc">{{ t('zhizi.sortSlots') }}</option>
+        <option value="last_test_desc">{{ t('zhizi.sortLastTest') }}</option>
       </select>
       <button class="button compact" type="button" @click="resetFilters">{{ t('common.reset') }}</button>
     </div>
@@ -756,6 +818,15 @@ onUnmounted(() => {
         </tbody>
       </table>
     </div>
+    <DataPagination
+      :total="pagination.total"
+      :page="pagination.page"
+      :page-size="pagination.pageSize"
+      :total-pages="pagination.totalPages"
+      :disabled="loading"
+      @page-change="changeZhiziPage"
+      @page-size-change="changeZhiziPageSize"
+    />
 
     <Teleport to="body">
     <div v-if="drawerOpen" class="zhizi-drawer-layer" @click.self="closeDrawer">

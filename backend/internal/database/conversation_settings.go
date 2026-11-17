@@ -88,3 +88,44 @@ func (db *DB) SetConversationAssetRestriction(
 	)
 	return err
 }
+
+// GetConversationAgentMode 返回会话显式选择的 Agent 模式，空值表示沿用角色或自动解析。
+func (db *DB) GetConversationAgentMode(
+	ctx context.Context,
+	conversationID string,
+) (string, error) {
+	var value string
+	err := db.QueryRowContext(
+		ctx,
+		`SELECT agent_mode FROM conversation_agent_settings WHERE conversation_id = ?`,
+		conversationID,
+	).Scan(&value)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return value, nil
+}
+
+// SetConversationAgentMode 持久化会话显式选择的 Agent 模式。
+func (db *DB) SetConversationAgentMode(
+	ctx context.Context,
+	conversationID string,
+	mode string,
+) error {
+	_, err := db.ExecContext(
+		ctx,
+		`INSERT INTO conversation_agent_settings (
+			conversation_id, auto_continue, agent_mode, updated_at
+		) VALUES (?, 1, ?, ?)
+		ON CONFLICT(conversation_id) DO UPDATE SET
+			agent_mode = excluded.agent_mode,
+			updated_at = excluded.updated_at`,
+		conversationID,
+		mode,
+		time.Now().UTC().Unix(),
+	)
+	return err
+}

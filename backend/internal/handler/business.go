@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -222,6 +223,48 @@ func (h *BusinessHandler) ListProjects(c *gin.Context) {
 	before := strings.TrimSpace(c.Query("before"))
 	if len(before) > 128 {
 		badRequest(c, "invalid_cursor", "项目游标不合法")
+		return
+	}
+	if rawOffset := strings.TrimSpace(c.Query("offset")); rawOffset != "" {
+		offset, err := strconv.Atoi(rawOffset)
+		if err != nil || offset < 0 {
+			badRequest(c, "invalid_offset", "offset 参数不合法")
+			return
+		}
+		riskOnly := false
+		if rawRisk := strings.ToLower(strings.TrimSpace(c.Query("risk"))); rawRisk != "" {
+			riskOnly = rawRisk == "1" || rawRisk == "true"
+		}
+		items, total, stats, err := h.db.ListProjectsWithCountsOffset(
+			c.Request.Context(),
+			database.ProjectListFilter{
+				OwnerUserID: user.ID,
+				Search:      strings.TrimSpace(c.Query("search")),
+				Status:      strings.TrimSpace(c.Query("status")),
+				RiskOnly:    riskOnly,
+				Sort:        strings.TrimSpace(c.Query("sort")),
+				Limit:       limit,
+				Offset:      offset,
+			},
+		)
+		if err != nil {
+			internalError(c, "list_projects_failed", "读取项目失败")
+			return
+		}
+		totalPages := (total + limit - 1) / limit
+		if totalPages == 0 {
+			totalPages = 1
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"items":      items,
+			"total":      total,
+			"page":       offset/limit + 1,
+			"pageSize":   limit,
+			"totalPages": totalPages,
+			"hasMore":    offset+len(items) < total,
+			"nextOffset": offset + len(items),
+			"stats":      stats,
+		})
 		return
 	}
 	items, hasMore, err := h.db.ListProjectsWithCountsPage(
@@ -600,6 +643,7 @@ func (h *BusinessHandler) ListAssets(c *gin.Context) {
 				Kind:        strings.TrimSpace(c.Query("kind")),
 				Status:      strings.TrimSpace(c.Query("status")),
 				Search:      strings.TrimSpace(c.Query("search")),
+				Sort:        strings.TrimSpace(c.Query("sort")),
 				Limit:       limit,
 				Offset:      offset,
 			},
@@ -920,6 +964,7 @@ func (h *BusinessHandler) ListVulnerabilities(c *gin.Context) {
 			Severity:    strings.TrimSpace(c.Query("severity")),
 			Status:      strings.TrimSpace(c.Query("status")),
 			Search:      strings.TrimSpace(c.Query("search")),
+			Sort:        strings.TrimSpace(c.Query("sort")),
 			Limit:       limit,
 			Offset:      offset,
 		},
@@ -1404,7 +1449,57 @@ func (h *BusinessHandler) ListSkills(c *gin.Context) {
 		}
 		items = append(items, skillMetadataResponse(parseSkillMetadata(entry.Name(), h.skillsDir)))
 	}
+	if strings.TrimSpace(c.Query("offset")) != "" {
+		search := strings.ToLower(strings.TrimSpace(c.Query("search")))
+		if search != "" {
+			filtered := make([]gin.H, 0, len(items))
+			for _, item := range items {
+				haystack := strings.ToLower(fmt.Sprint(
+					item["name"], " ", item["description"], " ", item["tags"],
+				))
+				if strings.Contains(haystack, search) {
+					filtered = append(filtered, item)
+				}
+			}
+			items = filtered
+		}
+		sortSkillItems(items, c.Query("sort"))
+		total := len(items)
+		limit := clampQueryInt(c.Query("limit"), 20, 1, 100)
+		offset := clampQueryInt(c.Query("offset"), 0, 0, 1000000)
+		if offset > total {
+			offset = total
+		}
+		end := offset + limit
+		if end > total {
+			end = total
+		}
+		totalPages := (total + limit - 1) / limit
+		if totalPages == 0 {
+			totalPages = 1
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"items":      items[offset:end],
+			"total":      total,
+			"page":       offset/limit + 1,
+			"pageSize":   limit,
+			"totalPages": totalPages,
+		})
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{"items": items})
+}
+
+func sortSkillItems(items []gin.H, sortValue string) {
+	descending := strings.EqualFold(strings.TrimSpace(sortValue), "name_desc")
+	sort.SliceStable(items, func(i, j int) bool {
+		left := strings.ToLower(fmt.Sprint(items[i]["name"]))
+		right := strings.ToLower(fmt.Sprint(items[j]["name"]))
+		if descending {
+			return left > right
+		}
+		return left < right
+	})
 }
 
 func (h *BusinessHandler) GetSkill(c *gin.Context) {

@@ -38,7 +38,7 @@ func newZhiziTools(service *Service) []tool.BaseTool {
 }
 
 func isZhiziToolName(name string) bool {
-	switch strings.TrimSpace(name) {
+	switch strings.ToLower(strings.TrimSpace(name)) {
 	case zhiziExecToolName, zhiziPythonToolName, zhiziUploadToolName,
 		zhiziDownloadToolName, zhiziStatusToolName:
 		return true
@@ -307,6 +307,9 @@ func zhiziExecutionContext(ctx context.Context, service *Service) (string, strin
 	userID := strings.TrimSpace(execctx.UserID(ctx))
 	if conversationID == "" || userID == "" {
 		return "", "", fmt.Errorf("缺少会话上下文")
+	}
+	if !service.hasActiveZhiziLease(ctx) {
+		return "", "", fmt.Errorf("当前对话未启用智子分身，或没有可用的智子租约")
 	}
 	return conversationID, userID, nil
 }

@@ -435,6 +435,48 @@ export const useChatStore = defineStore('chat', {
     error: '',
   }),
   actions: {
+    async loadAllProjectOptions() {
+      const items: Project[] = []
+      const seen = new Set<string>()
+      const seenCursors = new Set<string>()
+      let before = ''
+      while (true) {
+        const query = new URLSearchParams({ limit: '100' })
+        if (before) {
+          query.set('before', before)
+        }
+        const response = await apiGet<{
+          items: Project[]
+          hasMore?: boolean
+          nextCursor?: string
+        }>(`/projects?${query.toString()}`)
+        for (const project of response.items ?? []) {
+          if (!seen.has(project.id)) {
+            seen.add(project.id)
+            items.push(project)
+          }
+        }
+        const nextCursor = response.nextCursor?.trim() || ''
+        if (!response.hasMore || !nextCursor || seenCursors.has(nextCursor)) {
+          break
+        }
+        seenCursors.add(nextCursor)
+        before = nextCursor
+      }
+      return items
+    },
+    async ensureProjectOption(projectId: string) {
+      const id = projectId.trim()
+      if (!id || this.projects.some((project) => project.id === id)) {
+        return
+      }
+      try {
+        const project = await apiGet<Project>(`/projects/${id}`)
+        this.projects = [...this.projects, project]
+      } catch {
+        // 保留“项目信息未加载”状态，由发送前校验给出明确提示。
+      }
+    },
     cacheMessages(conversationId = this.currentConversationId) {
       const id = conversationId.trim()
       if (!id) {
@@ -452,10 +494,10 @@ export const useChatStore = defineStore('chat', {
     },
     async loadConversations() {
       const [projects, response] = await Promise.all([
-        apiGet<{ items: Project[] }>('/projects'),
+        this.loadAllProjectOptions(),
         apiGet<ConversationPage>('/conversations?limit=100'),
       ])
-      this.projects = projects.items
+      this.projects = projects
       this.conversations = response.items
       this.conversationChildren = {}
       this.conversationChildrenTotal = {}
@@ -509,11 +551,21 @@ export const useChatStore = defineStore('chat', {
       this.agentMode = normalizeAgentMode(mode)
       if (this.currentConversationId) {
         this.rememberAgentMode(this.currentConversationId, this.agentMode)
+        void this.persistConversationAgentMode(this.currentConversationId, this.agentMode)
       }
       try {
         window.localStorage.setItem(AGENT_MODE_STORAGE_KEY, this.agentMode)
       } catch {
         // 本地存储不可用时仍保留本次页面会话内的选择。
+      }
+    },
+    async persistConversationAgentMode(conversationId: string, mode: AgentMode) {
+      try {
+        await apiPut(`/conversations/${conversationId}/agent-settings`, {
+          agentMode: mode,
+        })
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : '保存 Agent 模式失败'
       }
     },
     selectRole(roleId: string) {
@@ -553,9 +605,12 @@ export const useChatStore = defineStore('chat', {
       if (project?.status === 'active') {
         return true
       }
-      const statusKey = project?.status ? `projectStatus.${project.status}` : 'projectStatus.archived'
+      if (!project) {
+        this.error = translate('chat.projectUnavailable')
+        return false
+      }
       this.error = translate('chat.projectInactive', {
-        status: translate(statusKey),
+        status: translate(`projectStatus.${project.status}`),
       })
       return false
     },
@@ -637,6 +692,7 @@ export const useChatStore = defineStore('chat', {
         this.agentModeByConversation[conversationId] ??
         normalizeAgentMode(role?.defaultMode)
       this.selectedProjectId = conversation?.projectId ?? ''
+      await this.ensureProjectOption(this.selectedProjectId)
       this.responseText = ''
       this.liveSteps = []
       this.reasoningText = ''
@@ -1131,6 +1187,7 @@ export const useChatStore = defineStore('chat', {
       try {
         const response = await apiGet<{
           autoContinue: boolean
+          agentMode?: string
           assetRestrictionEnabled: boolean
         }>(
           `/conversations/${conversationId}/agent-settings`,
@@ -1138,6 +1195,10 @@ export const useChatStore = defineStore('chat', {
         if (this.currentConversationId === conversationId) {
           this.autoContinue = response.autoContinue
           this.assetRestrictionEnabled = response.assetRestrictionEnabled
+          if (isAgentMode(response.agentMode)) {
+            this.agentMode = normalizeAgentMode(response.agentMode)
+            this.rememberAgentMode(conversationId, this.agentMode)
+          }
         }
       } catch {
         // 读取失败时保持默认自动继续，不影响对话主流程

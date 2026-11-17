@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -64,7 +65,71 @@ func (h *ZhiziHandler) List(c *gin.Context) {
 		internalError(c, "zhizi_availability_failed", "统计智子分身容量失败")
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"items": items, "availability": availability})
+	stats := map[string]int{
+		"total": len(items),
+	}
+	for _, item := range items {
+		switch zhiziNodeRuntimeStatus(item) {
+		case "ready":
+			stats["ready"]++
+		case "busy":
+			stats["busy"]++
+		case "error":
+			stats["error"]++
+		}
+	}
+	if strings.TrimSpace(c.Query("offset")) == "" {
+		c.JSON(http.StatusOK, gin.H{"items": items, "availability": availability, "stats": stats})
+		return
+	}
+	search := strings.ToLower(strings.TrimSpace(c.Query("search")))
+	statusFilter := strings.ToLower(strings.TrimSpace(c.Query("status")))
+	authFilter := strings.ToLower(strings.TrimSpace(c.Query("authType")))
+	filtered := make([]database.ZhiziNode, 0, len(items))
+	for _, item := range items {
+		if authFilter != "" && strings.ToLower(item.AuthType) != authFilter {
+			continue
+		}
+		if statusFilter != "" && zhiziNodeRuntimeStatus(item) != statusFilter {
+			continue
+		}
+		if search != "" {
+			haystack := strings.ToLower(strings.Join([]string{
+				item.Name,
+				item.Host,
+				item.Username,
+				item.HostKeyFingerprint,
+			}, " "))
+			if !strings.Contains(haystack, search) {
+				continue
+			}
+		}
+		filtered = append(filtered, item)
+	}
+	sortZhiziNodes(filtered, c.Query("sort"))
+	total := len(filtered)
+	limit := clampQueryInt(c.Query("limit"), 20, 1, 100)
+	offset := clampQueryInt(c.Query("offset"), 0, 0, 1000000)
+	if offset > total {
+		offset = total
+	}
+	end := offset + limit
+	if end > total {
+		end = total
+	}
+	totalPages := (total + limit - 1) / limit
+	if totalPages == 0 {
+		totalPages = 1
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"items":        filtered[offset:end],
+		"availability": availability,
+		"stats":        stats,
+		"total":        total,
+		"page":         offset/limit + 1,
+		"pageSize":     limit,
+		"totalPages":   totalPages,
+	})
 }
 
 func (h *ZhiziHandler) Create(c *gin.Context) {
@@ -737,5 +802,70 @@ func respondZhiziNodeStateConflict(c *gin.Context, err error) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+func zhiziNodeRuntimeStatus(item database.ZhiziNode) string {
+	if !item.Enabled {
+		return "disabled"
+	}
+	if strings.TrimSpace(item.HostKeyFingerprint) == "" {
+		return "unverified"
+	}
+	if strings.TrimSpace(item.LastTestError) != "" {
+		return "error"
+	}
+	if item.LastTestAt.IsZero() {
+		return "unverified"
+	}
+	if item.ActiveSlots > 0 {
+		return "busy"
+	}
+	return "ready"
+}
+
+func sortZhiziNodes(items []database.ZhiziNode, sortValue string) {
+	statusRank := func(item database.ZhiziNode) int {
+		switch zhiziNodeRuntimeStatus(item) {
+		case "ready":
+			return 0
+		case "busy":
+			return 1
+		case "error":
+			return 2
+		case "unverified":
+			return 3
+		default:
+			return 4
+		}
+	}
+	switch strings.ToLower(strings.TrimSpace(sortValue)) {
+	case "name_desc":
+		sort.SliceStable(items, func(i, j int) bool {
+			return strings.ToLower(items[i].Name) > strings.ToLower(items[j].Name)
+		})
+	case "status_asc":
+		sort.SliceStable(items, func(i, j int) bool {
+			left, right := statusRank(items[i]), statusRank(items[j])
+			if left == right {
+				return strings.ToLower(items[i].Name) < strings.ToLower(items[j].Name)
+			}
+			return left < right
+		})
+	case "slots_desc":
+		sort.SliceStable(items, func(i, j int) bool {
+			if items[i].ActiveSlots == items[j].ActiveSlots {
+				return strings.ToLower(items[i].Name) < strings.ToLower(items[j].Name)
+			}
+			return items[i].ActiveSlots > items[j].ActiveSlots
+		})
+	case "last_test_desc":
+		sort.SliceStable(items, func(i, j int) bool {
+			return items[i].LastTestAt.After(items[j].LastTestAt)
+		})
+	default:
+		sort.SliceStable(items, func(i, j int) bool {
+			return strings.ToLower(items[i].Name) < strings.ToLower(items[j].Name)
+		})
 	}
 }

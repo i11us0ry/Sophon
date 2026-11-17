@@ -53,6 +53,21 @@ func TestConversationAutoContinueSetting(t *testing.T) {
 	if err != nil || enabled {
 		t.Fatalf("更新资产限制不应覆盖自动继续设置: enabled=%v err=%v", enabled, err)
 	}
+	agentMode, err := db.GetConversationAgentMode(ctx, "conv-settings")
+	if err != nil || agentMode != "" {
+		t.Fatalf("默认不应预设 Agent 模式: mode=%q err=%v", agentMode, err)
+	}
+	if err := db.SetConversationAgentMode(ctx, "conv-settings", "fast"); err != nil {
+		t.Fatalf("保存 Agent 模式失败: %v", err)
+	}
+	agentMode, err = db.GetConversationAgentMode(ctx, "conv-settings")
+	if err != nil || agentMode != "fast" {
+		t.Fatalf("Agent 模式未持久化: mode=%q err=%v", agentMode, err)
+	}
+	assetRestriction, err = db.GetConversationAssetRestriction(ctx, "conv-settings")
+	if err != nil || assetRestriction {
+		t.Fatalf("更新 Agent 模式不应覆盖资产限制: enabled=%v err=%v", assetRestriction, err)
+	}
 }
 
 func TestCountProjectHypothesesOnlyCountsActive(t *testing.T) {

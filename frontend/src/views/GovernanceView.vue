@@ -2,6 +2,7 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 
 import { apiGet, apiPost } from '../api/client'
+import DataPagination from '../components/DataPagination.vue'
 import PageTitleRobot from '../components/PageTitleRobot.vue'
 import { useI18n } from '../i18n'
 import { useAuthStore } from '../stores/auth'
@@ -77,9 +78,16 @@ interface ContextCompaction {
 const auditLogs = ref<AuditLog[]>([])
 const auditTotal = ref(0)
 const auditPage = ref(1)
-const auditPageSize = ref(50)
+const auditPageSize = ref(20)
 const auditTotalPages = ref(1)
 const toolExecutions = ref<ToolExecution[]>([])
+const executionStats = ref({ total: 0, running: 0, success: 0, failed: 0 })
+const executionPagination = ref({
+  page: 1,
+  pageSize: 20,
+  total: 0,
+  totalPages: 1,
+})
 const pendingHITL = ref<HITLRequest[]>([])
 const contextMetrics = ref<ContextMetrics>({
   compactions: { total: 0, minor: 0, major: 0, avgRatio: 0, avgLatencyMs: 0, lastAt: null },
@@ -102,12 +110,14 @@ const expandedHITL = ref('')
 const selectedAudit = ref<AuditLog | null>(null)
 const executionFilter = ref<'' | 'running' | 'success' | 'failed'>('')
 const executionSearch = ref('')
+const executionSort = ref<'time_desc' | 'time_asc' | 'tool_asc' | 'tool_desc'>('time_desc')
 const isAdmin = computed(() => auth.user?.role === 'admin')
 let refreshTimer: number | undefined
 let searchTimer: number | undefined
+let executionSearchTimer: number | undefined
 
 const failedExecutions = computed(
-  () => toolExecutions.value.filter((item) => item.status === 'failed' || item.error).length,
+  () => executionStats.value.failed,
 )
 const failedAudits = computed(
   () => auditLogs.value.filter((item) => item.result && item.result !== 'success').length,
@@ -116,17 +126,14 @@ const successfulAudits = computed(
   () => auditLogs.value.filter((item) => item.result === 'success').length,
 )
 const runningExecutions = computed(
-  () =>
-    toolExecutions.value.filter(
-      (item) => item.status !== 'failed' && !item.error && !item.finishedAt,
-    ).length,
+  () => executionStats.value.running,
 )
 const executionSuccessRate = computed(() => {
-  const total = toolExecutions.value.length
+  const total = executionStats.value.total
   if (!total) {
     return 0
   }
-  return Math.round(((total - failedExecutions.value) / total) * 100)
+  return Math.round((executionStats.value.success / total) * 100)
 })
 const auditSuccessRate = computed(() => {
   const total = auditLogs.value.length
@@ -135,27 +142,6 @@ const auditSuccessRate = computed(() => {
   }
   return Math.round((successfulAudits.value / total) * 100)
 })
-const filteredExecutions = computed(() => {
-  const query = executionSearch.value.trim().toLowerCase()
-  return toolExecutions.value.filter((execution) => {
-    if (executionFilter.value === 'running' && executionStatusClass(execution) !== 'state-running') {
-      return false
-    }
-    if (executionFilter.value === 'success' && executionStatusClass(execution) !== 'state-success') {
-      return false
-    }
-    if (executionFilter.value === 'failed' && executionStatusClass(execution) !== 'state-failed') {
-      return false
-    }
-    if (!query) {
-      return true
-    }
-    return `${execution.toolName} ${execution.conversationId} ${execution.result} ${execution.error}`
-      .toLowerCase()
-      .includes(query)
-  })
-})
-
 function formatTime(value: string | null) {
   if (!value) {
     return '-'
@@ -253,12 +239,11 @@ async function load() {
   loading.value = true
   error.value = ''
   try {
-    const [, monitor, hitl] = await Promise.all([
+    const [, , hitl] = await Promise.all([
       loadAudit(),
-      apiGet<{ items: ToolExecution[] }>('/monitor/executions'),
+      loadToolExecutions(),
       apiGet<{ items: HITLRequest[] }>('/hitl/pending'),
     ])
-    toolExecutions.value = monitor.items ?? []
     pendingHITL.value = hitl.items ?? []
     await loadContextMetrics()
   } catch (err) {
@@ -266,6 +251,55 @@ async function load() {
   } finally {
     loading.value = false
   }
+}
+
+async function loadToolExecutions() {
+  const params = new URLSearchParams({
+    limit: String(executionPagination.value.pageSize),
+    offset: String(
+      (executionPagination.value.page - 1) * executionPagination.value.pageSize,
+    ),
+    sort: executionSort.value,
+  })
+  if (executionFilter.value) {
+    params.set('status', executionFilter.value)
+  }
+  if (executionSearch.value.trim()) {
+    params.set('search', executionSearch.value.trim())
+  }
+  const response = await apiGet<{
+    items: ToolExecution[]
+    total: number
+    page: number
+    pageSize: number
+    totalPages: number
+    stats: typeof executionStats.value
+  }>(`/monitor/executions?${params.toString()}`)
+  executionPagination.value = {
+    page: response.page ?? 1,
+    pageSize: response.pageSize ?? executionPagination.value.pageSize,
+    total: response.total ?? 0,
+    totalPages: response.totalPages ?? 1,
+  }
+  executionStats.value = response.stats ?? executionStats.value
+  toolExecutions.value = response.items ?? []
+}
+
+function setExecutionFilter(filter: '' | 'running' | 'success' | 'failed') {
+  executionFilter.value = filter
+  executionPagination.value.page = 1
+  void loadToolExecutions()
+}
+
+function changeExecutionPage(page: number) {
+  executionPagination.value.page = page
+  void loadToolExecutions()
+}
+
+function changeExecutionPageSize(pageSize: number) {
+  executionPagination.value.pageSize = pageSize
+  executionPagination.value.page = 1
+  void loadToolExecutions()
 }
 
 // 指标接口单独降级：无 dashboard 权限时不影响其余治理数据展示。
@@ -321,21 +355,18 @@ async function loadAudit() {
   auditTotalPages.value = response.totalPages ?? 1
 }
 
-function goAuditPage(offset: number) {
-  const next = auditPage.value + offset
-  if (next < 1 || next > auditTotalPages.value) {
-    return
-  }
-  auditPage.value = next
+function changeAuditPage(page: number) {
+  auditPage.value = page
+  void loadAudit()
+}
+
+function changeAuditPageSize(pageSize: number) {
+  auditPageSize.value = pageSize
+  auditPage.value = 1
   void loadAudit()
 }
 
 watch(resultFilter, () => {
-  auditPage.value = 1
-  void loadAudit()
-})
-
-watch(auditPageSize, () => {
   auditPage.value = 1
   void loadAudit()
 })
@@ -348,6 +379,21 @@ watch(keyword, () => {
     auditPage.value = 1
     void loadAudit()
   }, 300)
+})
+
+watch(executionSearch, () => {
+  if (executionSearchTimer) {
+    window.clearTimeout(executionSearchTimer)
+  }
+  executionSearchTimer = window.setTimeout(() => {
+    executionPagination.value.page = 1
+    void loadToolExecutions()
+  }, 300)
+})
+
+watch(executionSort, () => {
+  executionPagination.value.page = 1
+  void loadToolExecutions()
 })
 
 watch(auditScope, () => {
@@ -395,6 +441,9 @@ onUnmounted(() => {
   }
   if (searchTimer) {
     window.clearTimeout(searchTimer)
+  }
+  if (executionSearchTimer) {
+    window.clearTimeout(executionSearchTimer)
   }
 })
 </script>
@@ -574,7 +623,7 @@ onUnmounted(() => {
         </div>
         <div class="audit-run-summary">
           <span>{{ t('governance.successRate') }} <strong>{{ executionSuccessRate }}%</strong></span>
-          <span class="audit-floor-count">{{ toolExecutions.length }}</span>
+          <span class="audit-floor-count">{{ executionPagination.total }}</span>
         </div>
       </header>
       <div class="audit-toolbar">
@@ -583,15 +632,21 @@ onUnmounted(() => {
           <input v-model="executionSearch" type="search" :placeholder="t('governance.searchExecutions')" />
         </label>
         <div class="audit-segmented">
-          <button type="button" :class="{ active: executionFilter === '' }" @click="executionFilter = ''">{{ t('governance.executionAll') }}</button>
-          <button type="button" :class="{ active: executionFilter === 'running' }" @click="executionFilter = 'running'">{{ t('governance.running') }}</button>
-          <button type="button" :class="{ active: executionFilter === 'success' }" @click="executionFilter = 'success'">{{ t('governance.success') }}</button>
-          <button type="button" :class="{ active: executionFilter === 'failed' }" @click="executionFilter = 'failed'">{{ t('governance.failed') }}</button>
+          <button type="button" :class="{ active: executionFilter === '' }" @click="setExecutionFilter('')">{{ t('governance.executionAll') }}</button>
+          <button type="button" :class="{ active: executionFilter === 'running' }" @click="setExecutionFilter('running')">{{ t('governance.running') }}</button>
+          <button type="button" :class="{ active: executionFilter === 'success' }" @click="setExecutionFilter('success')">{{ t('governance.success') }}</button>
+          <button type="button" :class="{ active: executionFilter === 'failed' }" @click="setExecutionFilter('failed')">{{ t('governance.failed') }}</button>
         </div>
+        <select v-model="executionSort" :aria-label="t('governance.executionSort')">
+          <option value="time_desc">{{ t('governance.sortTimeDesc') }}</option>
+          <option value="time_asc">{{ t('governance.sortTimeAsc') }}</option>
+          <option value="tool_asc">{{ t('governance.sortToolAsc') }}</option>
+          <option value="tool_desc">{{ t('governance.sortToolDesc') }}</option>
+        </select>
       </div>
-      <div v-if="filteredExecutions.length" class="audit-execution-list">
+      <div v-if="toolExecutions.length" class="audit-execution-list">
         <button
-          v-for="execution in filteredExecutions"
+          v-for="execution in toolExecutions"
           :key="execution.id"
           class="audit-execution-row"
           :class="`tone-${executionTone(execution)}`"
@@ -610,6 +665,15 @@ onUnmounted(() => {
       <div v-else class="audit-empty-state compact">
         <strong>{{ t('governance.executionsEmpty') }}</strong>
       </div>
+      <DataPagination
+        :total="executionPagination.total"
+        :page="executionPagination.page"
+        :page-size="executionPagination.pageSize"
+        :total-pages="executionPagination.totalPages"
+        :disabled="loading"
+        @page-change="changeExecutionPage"
+        @page-size-change="changeExecutionPageSize"
+      />
     </section>
 
     <section v-else-if="activeTab === 'audit'" class="audit-floor-panel">
@@ -638,15 +702,6 @@ onUnmounted(() => {
           <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6" /><path d="m16 16 4 4" /></svg>
           <input v-model="keyword" type="search" :placeholder="t('governance.searchPlaceholder')" />
         </label>
-        <select
-          v-model.number="auditPageSize"
-          :aria-label="t('governance.pageSizeLabel')"
-        >
-          <option :value="50">{{ t('governance.pageSize', { size: 50 }) }}</option>
-          <option :value="100">{{ t('governance.pageSize', { size: 100 }) }}</option>
-          <option :value="500">{{ t('governance.pageSize', { size: 500 }) }}</option>
-          <option :value="1000">{{ t('governance.pageSize', { size: 1000 }) }}</option>
-        </select>
         <span>{{ t('common.total', { count: auditTotal }) }}</span>
       </div>
       <div v-if="auditLogs.length" class="audit-log-table">
@@ -675,13 +730,15 @@ onUnmounted(() => {
         </button>
       </div>
       <div v-else class="audit-empty-state compact"><strong>{{ t('governance.auditEmpty') }}</strong></div>
-      <footer v-if="auditLogs.length" class="audit-pagination">
-        <span>{{ t('governance.pageInfo', { page: auditPage, totalPages: auditTotalPages }) }}</span>
-        <div>
-          <button class="button compact" type="button" :disabled="auditPage <= 1" @click="goAuditPage(-1)">{{ t('vulnerability.prev') }}</button>
-          <button class="button compact" type="button" :disabled="auditPage >= auditTotalPages" @click="goAuditPage(1)">{{ t('vulnerability.next') }}</button>
-        </div>
-      </footer>
+      <DataPagination
+        :total="auditTotal"
+        :page="auditPage"
+        :page-size="auditPageSize"
+        :total-pages="auditTotalPages"
+        :disabled="loading"
+        @page-change="changeAuditPage"
+        @page-size-change="changeAuditPageSize"
+      />
     </section>
 
     <section v-else class="audit-floor-panel">

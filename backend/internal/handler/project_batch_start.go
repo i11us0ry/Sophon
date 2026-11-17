@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -8,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	agentpkg "sophon/internal/agent"
 	"sophon/internal/database"
 	"sophon/internal/middleware"
 
@@ -22,10 +24,14 @@ const (
 const defaultProjectSessionInstruction = "请对当前项目授权范围内的全部资产进行自主渗透测试。先读取项目目标、授权资产、事实黑板、攻击路径和已有漏洞，制定计划后持续执行测试与证据验证，并及时写回事实、测试覆盖和漏洞证据。直到目标完成、证据充分或存在明确技术阻断再结束。"
 
 type projectBatchStartRequest struct {
-	ProjectIDs  []string `json:"projectIds"`
-	Instruction string   `json:"instruction"`
-	RoleID      string   `json:"roleId"`
-	UseZhizi    bool     `json:"useZhizi"`
+	ProjectIDs              []string `json:"projectIds"`
+	Instruction             string   `json:"instruction"`
+	RoleID                  string   `json:"roleId"`
+	UseZhizi                bool     `json:"useZhizi"`
+	AgentMode               *string  `json:"agentMode,omitempty"`
+	HITLEnabled             *bool    `json:"hitlEnabled,omitempty"`
+	AutoContinue            *bool    `json:"autoContinue,omitempty"`
+	AssetRestrictionEnabled *bool    `json:"assetRestrictionEnabled,omitempty"`
 }
 
 type projectBatchStartItem struct {
@@ -75,6 +81,15 @@ func (h *ChatHandler) StartProjectsBatch(c *gin.Context) {
 			return
 		}
 		roleID = resolved
+	}
+	agentMode := ""
+	if request.AgentMode != nil {
+		resolved, err := agentpkg.ParseAgentMode(strings.TrimSpace(*request.AgentMode))
+		if err != nil {
+			badRequest(c, "invalid_agent_mode", err.Error())
+			return
+		}
+		agentMode = resolved
 	}
 
 	instruction := strings.TrimSpace(request.Instruction)
@@ -253,6 +268,41 @@ func (h *ChatHandler) StartProjectsBatch(c *gin.Context) {
 			continue
 		}
 		result.Created++
+		if err := h.applyProjectBatchRunSettings(
+			c.Request.Context(),
+			conversationID,
+			request,
+			agentMode,
+		); err != nil {
+			log.Printf(
+				"apply project session run settings failed: project=%s conversation=%s err=%v",
+				project.ID,
+				conversationID,
+				err,
+			)
+			if markErr := h.db.FailProjectSessionCampaign(
+				c.Request.Context(),
+				campaignID,
+				user.ID,
+				err.Error(),
+			); markErr != nil {
+				log.Printf(
+					"mark project session run settings failure failed: campaign=%s err=%v",
+					campaignID,
+					markErr,
+				)
+			}
+			result.Failed++
+			result.Items = append(result.Items, projectBatchStartItem{
+				ProjectID:      project.ID,
+				ProjectName:    project.Name,
+				ConversationID: conversationID,
+				CampaignID:     campaignID,
+				Status:         "failed",
+				Reason:         "应用会话运行设置失败",
+			})
+			continue
+		}
 		if request.UseZhizi {
 			if err := h.db.SetZhiziConversationEnabled(
 				c.Request.Context(),
@@ -338,6 +388,47 @@ func (h *ChatHandler) StartProjectsBatch(c *gin.Context) {
 		status = http.StatusCreated
 	}
 	c.JSON(status, result)
+}
+
+func (h *ChatHandler) applyProjectBatchRunSettings(
+	ctx context.Context,
+	conversationID string,
+	request projectBatchStartRequest,
+	agentMode string,
+) error {
+	if request.AgentMode != nil {
+		if err := h.db.SetConversationAgentMode(ctx, conversationID, agentMode); err != nil {
+			return fmt.Errorf("保存 Agent 模式失败: %w", err)
+		}
+	}
+	if request.AutoContinue != nil {
+		if err := h.db.SetConversationAutoContinue(
+			ctx,
+			conversationID,
+			*request.AutoContinue,
+		); err != nil {
+			return fmt.Errorf("保存自动继续设置失败: %w", err)
+		}
+	}
+	if request.AssetRestrictionEnabled != nil {
+		if err := h.db.SetConversationAssetRestriction(
+			ctx,
+			conversationID,
+			*request.AssetRestrictionEnabled,
+		); err != nil {
+			return fmt.Errorf("保存资产限制设置失败: %w", err)
+		}
+	}
+	if request.HITLEnabled != nil {
+		if err := h.db.SetConversationHITLOverride(
+			ctx,
+			conversationID,
+			*request.HITLEnabled,
+		); err != nil {
+			return fmt.Errorf("保存人工审批设置失败: %w", err)
+		}
+	}
+	return nil
 }
 
 func uniqueProjectBatchIDs(ids []string) []string {

@@ -290,6 +290,21 @@ func TestStartProjectsBatchBindsAgentRole(t *testing.T) {
 		!bytes.Contains(recorder.Body.Bytes(), []byte(`"code":"invalid_agent_role"`)) {
 		t.Fatalf("非法角色应返回 400: %d %s", recorder.Code, recorder.Body.String())
 	}
+	invalidMode := "turbo"
+	recorder = performProjectBatchStartRequest(
+		t,
+		handler,
+		projectBatchStartRequest{
+			ProjectIDs: []string{"project-role"},
+			RoleID:     "role-batch",
+			AgentMode:  &invalidMode,
+		},
+		true,
+	)
+	if recorder.Code != http.StatusBadRequest ||
+		!bytes.Contains(recorder.Body.Bytes(), []byte(`"code":"invalid_agent_mode"`)) {
+		t.Fatalf("非法 Agent 模式应返回 400: %d %s", recorder.Code, recorder.Body.String())
+	}
 }
 
 func TestStartProjectsBatchEnablesZhizi(t *testing.T) {
@@ -330,12 +345,20 @@ func TestStartProjectsBatchEnablesZhizi(t *testing.T) {
 			return nil
 		},
 	}
+	agentMode := "fast"
+	hitlEnabled := false
+	autoContinue := false
+	assetRestrictionEnabled := false
 	recorder := performProjectBatchStartRequest(
 		t,
 		handler,
 		projectBatchStartRequest{
-			ProjectIDs: []string{"project-zhizi"},
-			UseZhizi:   true,
+			ProjectIDs:              []string{"project-zhizi"},
+			UseZhizi:                true,
+			AgentMode:               &agentMode,
+			HITLEnabled:             &hitlEnabled,
+			AutoContinue:            &autoContinue,
+			AssetRestrictionEnabled: &assetRestrictionEnabled,
 		},
 		true,
 	)
@@ -359,6 +382,20 @@ func TestStartProjectsBatchEnablesZhizi(t *testing.T) {
 	}
 	if !state.Enabled {
 		t.Fatalf("批量启动会话未启用智子分身: %+v", state)
+	}
+	conversationID := result.Items[0].ConversationID
+	if mode, err := db.GetConversationAgentMode(context.Background(), conversationID); err != nil || mode != "fast" {
+		t.Fatalf("Agent 模式未写入批量子会话: mode=%q err=%v", mode, err)
+	}
+	if enabled, err := db.GetConversationAutoContinue(context.Background(), conversationID); err != nil || enabled {
+		t.Fatalf("自动继续设置未写入批量子会话: enabled=%v err=%v", enabled, err)
+	}
+	if enabled, err := db.GetConversationAssetRestriction(context.Background(), conversationID); err != nil || enabled {
+		t.Fatalf("资产限制设置未写入批量子会话: enabled=%v err=%v", enabled, err)
+	}
+	override, err := db.GetConversationHITLOverride(context.Background(), conversationID)
+	if err != nil || override == nil || *override {
+		t.Fatalf("人工审批设置未写入批量子会话: override=%v err=%v", override, err)
 	}
 }
 

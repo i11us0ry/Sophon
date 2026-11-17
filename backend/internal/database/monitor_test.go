@@ -70,6 +70,55 @@ func TestStartToolExecutionRedactsArguments(t *testing.T) {
 	}
 }
 
+func TestListToolExecutionsFilteredPaginatesAndSorts(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "tool-execution-pagination.db"))
+	if err != nil {
+		t.Fatalf("打开数据库失败: %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+
+	execID := db.StartToolExecution(ctx, "conv-1", "user-1", "exec", map[string]interface{}{})
+	db.FinishToolExecution(ctx, execID, "ok", nil)
+	failedID := db.StartToolExecution(ctx, "conv-1", "user-1", "nmap", map[string]interface{}{})
+	db.FinishToolExecution(ctx, failedID, "", errors.New("nmap failed"))
+	_ = db.StartToolExecution(ctx, "conv-1", "user-1", "zhizi_exec", map[string]interface{}{})
+
+	items, total, stats, err := db.ListToolExecutionsFiltered(ctx, ToolExecutionFilter{
+		UserID: "user-1",
+		Sort:   "tool_asc",
+		Limit:  2,
+	})
+	if err != nil {
+		t.Fatalf("读取工具执行分页失败: %v", err)
+	}
+	if total != 3 || len(items) != 2 {
+		t.Fatalf("工具执行分页异常: total=%d items=%+v", total, items)
+	}
+	if stats.Total != 3 || stats.Running != 1 || stats.Success != 1 || stats.Failed != 1 {
+		t.Fatalf("工具执行统计异常: %+v", stats)
+	}
+	if items[0].ToolName != "exec" || items[1].ToolName != "nmap" {
+		t.Fatalf("工具名称排序异常: %+v", items)
+	}
+	failed, failedTotal, _, err := db.ListToolExecutionsFiltered(ctx, ToolExecutionFilter{
+		UserID: "user-1",
+		Status: "failed",
+		Limit:  20,
+	})
+	if err != nil || failedTotal != 1 || len(failed) != 1 || failed[0].ID != failedID {
+		t.Fatalf("失败状态筛选异常: total=%d items=%+v err=%v", failedTotal, failed, err)
+	}
+	searched, searchedTotal, _, err := db.ListToolExecutionsFiltered(ctx, ToolExecutionFilter{
+		UserID: "user-1",
+		Search: "zhizi",
+		Limit:  20,
+	})
+	if err != nil || searchedTotal != 1 || len(searched) != 1 || searched[0].ToolName != "zhizi_exec" {
+		t.Fatalf("工具搜索异常: total=%d items=%+v err=%v", searchedTotal, searched, err)
+	}
+}
+
 func TestFindRecentCompletedToolExecutionByFingerprint(t *testing.T) {
 	db, err := Open(filepath.Join(t.TempDir(), "probe-dedupe.db"))
 	if err != nil {

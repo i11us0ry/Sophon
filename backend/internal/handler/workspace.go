@@ -110,6 +110,7 @@ func (h *WorkspaceHandler) List(c *gin.Context) {
 		Size  int64  `json:"size"`
 		MTime int64  `json:"mtime"`
 	}
+	search := strings.ToLower(strings.TrimSpace(c.Query("search")))
 	entries := make([]workspaceEntry, 0, len(dirEntries))
 	for _, entry := range dirEntries {
 		if entry.Type()&os.ModeSymlink != 0 {
@@ -124,6 +125,9 @@ func (h *WorkspaceHandler) List(c *gin.Context) {
 		if relErr != nil {
 			continue
 		}
+		if search != "" && !strings.Contains(strings.ToLower(entry.Name()), search) {
+			continue
+		}
 		entries = append(entries, workspaceEntry{
 			Name:  entry.Name(),
 			Path:  filepath.ToSlash(rel),
@@ -132,11 +136,31 @@ func (h *WorkspaceHandler) List(c *gin.Context) {
 			MTime: info.ModTime().UnixMilli(),
 		})
 	}
+	sortKey := strings.ToLower(strings.TrimSpace(c.Query("sort")))
+	if sortKey != "size" && sortKey != "mtime" {
+		sortKey = "name"
+	}
+	direction := strings.ToLower(strings.TrimSpace(c.Query("direction")))
+	if direction != "desc" {
+		direction = "asc"
+	}
 	sort.SliceStable(entries, func(i, j int) bool {
 		if entries[i].Dir != entries[j].Dir {
 			return entries[i].Dir
 		}
-		return strings.ToLower(entries[i].Name) < strings.ToLower(entries[j].Name)
+		var result int
+		switch sortKey {
+		case "size":
+			result = int(entries[i].Size - entries[j].Size)
+		case "mtime":
+			result = int(entries[i].MTime - entries[j].MTime)
+		default:
+			result = strings.Compare(strings.ToLower(entries[i].Name), strings.ToLower(entries[j].Name))
+		}
+		if direction == "desc" {
+			return result > 0
+		}
+		return result < 0
 	})
 	total := len(entries)
 	limit := clampQueryInt(c.Query("limit"), workspaceDefaultListLimit, 1, workspaceMaxListLimit)

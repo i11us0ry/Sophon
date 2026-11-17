@@ -2,6 +2,7 @@ package handler
 
 import (
 	"net/http"
+	"sort"
 	"strings"
 
 	"sophon/internal/database"
@@ -94,11 +95,97 @@ func (h *RBACHandler) ListUsers(c *gin.Context) {
 		internalError(c, "list_users_failed", "读取用户失败")
 		return
 	}
-	result := make([]gin.H, 0, len(users))
+	stats := map[string]int{"total": len(users)}
 	for index := range users {
-		result = append(result, rbacUserResponse(&users[index]))
+		if users[index].Enabled {
+			stats["enabled"]++
+		}
 	}
-	c.JSON(http.StatusOK, gin.H{"items": result})
+	if strings.TrimSpace(c.Query("offset")) == "" {
+		result := make([]gin.H, 0, len(users))
+		for index := range users {
+			result = append(result, rbacUserResponse(&users[index]))
+		}
+		c.JSON(http.StatusOK, gin.H{"items": result, "stats": stats})
+		return
+	}
+	search := strings.ToLower(strings.TrimSpace(c.Query("search")))
+	status := strings.ToLower(strings.TrimSpace(c.Query("status")))
+	filtered := make([]database.User, 0, len(users))
+	for _, user := range users {
+		if status == "enabled" && !user.Enabled {
+			continue
+		}
+		if status == "disabled" && user.Enabled {
+			continue
+		}
+		if search != "" {
+			haystack := strings.ToLower(strings.Join([]string{
+				user.Username,
+				user.DisplayName,
+				user.Role,
+			}, " "))
+			if !strings.Contains(haystack, search) {
+				continue
+			}
+		}
+		filtered = append(filtered, user)
+	}
+	sortUsers(filtered, c.Query("sort"))
+	total := len(filtered)
+	limit := clampQueryInt(c.Query("limit"), 20, 1, 100)
+	offset := clampQueryInt(c.Query("offset"), 0, 0, 1000000)
+	if offset > total {
+		offset = total
+	}
+	end := offset + limit
+	if end > total {
+		end = total
+	}
+	result := make([]gin.H, 0, end-offset)
+	for index := offset; index < end; index++ {
+		result = append(result, rbacUserResponse(&filtered[index]))
+	}
+	totalPages := (total + limit - 1) / limit
+	if totalPages == 0 {
+		totalPages = 1
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"items":      result,
+		"stats":      stats,
+		"total":      total,
+		"page":       offset/limit + 1,
+		"pageSize":   limit,
+		"totalPages": totalPages,
+	})
+}
+
+func sortUsers(users []database.User, sortValue string) {
+	switch strings.ToLower(strings.TrimSpace(sortValue)) {
+	case "username_desc":
+		sort.SliceStable(users, func(i, j int) bool {
+			return strings.ToLower(users[i].Username) > strings.ToLower(users[j].Username)
+		})
+	case "created_desc":
+		sort.SliceStable(users, func(i, j int) bool {
+			return users[i].CreatedAt.After(users[j].CreatedAt)
+		})
+	case "created_asc":
+		sort.SliceStable(users, func(i, j int) bool {
+			return users[i].CreatedAt.Before(users[j].CreatedAt)
+		})
+	case "role_asc":
+		sort.SliceStable(users, func(i, j int) bool {
+			if users[i].Role == users[j].Role {
+				return strings.ToLower(users[i].Username) < strings.ToLower(users[j].Username)
+			}
+			return users[i].Role < users[j].Role
+		})
+	default:
+		sort.SliceStable(users, func(i, j int) bool {
+			return strings.ToLower(users[i].Username) < strings.ToLower(users[j].Username)
+		})
+	}
 }
 
 func (h *RBACHandler) CreateUser(c *gin.Context) {

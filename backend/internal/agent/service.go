@@ -2059,7 +2059,7 @@ func (s *Service) RunTool(
 
 // activeTools 返回当前启用的工具；MCP 工具管理页停用的工具不会进入 Agent。
 func (s *Service) activeTools(ctx context.Context) []tool.BaseTool {
-	return s.filterEnabledTools(ctx, s.tools)
+	return s.filterZhiziTools(ctx, s.filterEnabledTools(ctx, s.tools))
 }
 
 // activeToolsForMode 根据 Fast/Deep Path 收窄主 Agent 的工具面。
@@ -2106,8 +2106,30 @@ func isSubAgentEntryToolName(name string) bool {
 // 遵守工具启停配置，并按能力模式与 MCP 继承策略收窄可用工具。
 func (s *Service) subAgentActiveTools(ctx context.Context) []tool.BaseTool {
 	items := s.filterEnabledTools(ctx, s.baseTools)
+	items = s.filterZhiziTools(ctx, items)
 	items = s.applySubagentMCPScope(ctx, items)
 	return s.gateSubagentTools(ctx, items)
+}
+
+func (s *Service) filterZhiziTools(ctx context.Context, items []tool.BaseTool) []tool.BaseTool {
+	if s.hasActiveZhiziLease(ctx) {
+		return items
+	}
+	filtered := make([]tool.BaseTool, 0, len(items))
+	for _, item := range items {
+		if item == nil {
+			continue
+		}
+		info, err := item.Info(ctx)
+		if err != nil || info == nil {
+			continue
+		}
+		if isZhiziToolName(info.Name) {
+			continue
+		}
+		filtered = append(filtered, item)
+	}
+	return filtered
 }
 
 func (s *Service) filterEnabledTools(ctx context.Context, items []tool.BaseTool) []tool.BaseTool {
@@ -3380,7 +3402,9 @@ func (s *Service) persistEvent(
 	event Event,
 ) error {
 	stored := truncateStoredProcessEvent(event)
-	return s.db.AddProcessDetail(ctx, database.ProcessDetail{
+	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+	defer cancel()
+	if err := s.db.AddProcessDetail(writeCtx, database.ProcessDetail{
 		ID:             randomID(),
 		ConversationID: conversationID,
 		MessageID:      assistantMessageID,
@@ -3388,7 +3412,16 @@ func (s *Service) persistEvent(
 		Message:        event.Message,
 		Data:           stored.Data,
 		CreatedAt:      time.Now().UTC(),
-	})
+	}); err != nil {
+		log.Printf(
+			"agent: 保存过程明细失败 conversation=%s message=%s event=%s: %v",
+			conversationID,
+			assistantMessageID,
+			event.Type,
+			err,
+		)
+	}
+	return nil
 }
 
 // truncateStoredProcessEvent 只处理落库副本，避免影响模型上下文和实时事件。

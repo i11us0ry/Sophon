@@ -506,6 +506,10 @@ func (s *CampaignScheduler) runTask(
 			nil,
 		)
 	}
+	agentMode := ""
+	if value, err := s.db.GetConversationAgentMode(ctx, item.ConversationID); err == nil {
+		agentMode = value
+	}
 	result, runErr := s.chat.agent.RunWithOptions(
 		runCtx,
 		item.ConversationID,
@@ -513,6 +517,7 @@ func (s *CampaignScheduler) runTask(
 		assistantMessageID,
 		nil,
 		agentpkg.RunOptions{
+			AgentMode:      agentMode,
 			CampaignID:     item.CampaignID,
 			CampaignTaskID: item.ID,
 			MaxSegments:    item.MaxSegments,

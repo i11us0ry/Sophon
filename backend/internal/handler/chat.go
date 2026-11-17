@@ -321,8 +321,14 @@ func (h *ChatHandler) GetConversationAgentSettings(c *gin.Context) {
 		internalError(c, "load_agent_settings_failed", "读取会话设置失败")
 		return
 	}
+	agentMode, err := h.db.GetConversationAgentMode(c.Request.Context(), conversation.ID)
+	if err != nil {
+		internalError(c, "load_agent_settings_failed", "读取会话设置失败")
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"autoContinue":            autoContinue,
+		"agentMode":               agentMode,
 		"assetRestrictionEnabled": assetRestriction,
 	})
 }
@@ -333,19 +339,44 @@ func (h *ChatHandler) SetConversationAgentSettings(c *gin.Context) {
 		return
 	}
 	var request struct {
-		AutoContinue            *bool `json:"autoContinue"`
-		AssetRestrictionEnabled *bool `json:"assetRestrictionEnabled"`
+		AutoContinue            *bool   `json:"autoContinue"`
+		AgentMode               *string `json:"agentMode"`
+		AssetRestrictionEnabled *bool   `json:"assetRestrictionEnabled"`
 	}
 	if err := c.ShouldBindJSON(&request); err != nil ||
-		(request.AutoContinue == nil && request.AssetRestrictionEnabled == nil) {
+		(request.AutoContinue == nil &&
+			request.AgentMode == nil &&
+			request.AssetRestrictionEnabled == nil) {
 		badRequest(c, "invalid_request", "至少提供一个有效的会话设置")
 		return
+	}
+	agentMode := ""
+	if request.AgentMode != nil {
+		agentMode = strings.TrimSpace(*request.AgentMode)
+		if agentMode != "" {
+			normalized, err := agentpkg.ParseAgentMode(agentMode)
+			if err != nil {
+				badRequest(c, "invalid_agent_mode", err.Error())
+				return
+			}
+			agentMode = normalized
+		}
 	}
 	if request.AutoContinue != nil {
 		if err := h.db.SetConversationAutoContinue(
 			c.Request.Context(),
 			conversation.ID,
 			*request.AutoContinue,
+		); err != nil {
+			internalError(c, "save_agent_settings_failed", "保存会话设置失败")
+			return
+		}
+	}
+	if request.AgentMode != nil {
+		if err := h.db.SetConversationAgentMode(
+			c.Request.Context(),
+			conversation.ID,
+			agentMode,
 		); err != nil {
 			internalError(c, "save_agent_settings_failed", "保存会话设置失败")
 			return
@@ -371,8 +402,14 @@ func (h *ChatHandler) SetConversationAgentSettings(c *gin.Context) {
 		internalError(c, "load_agent_settings_failed", "读取会话设置失败")
 		return
 	}
+	agentMode, err = h.db.GetConversationAgentMode(c.Request.Context(), conversation.ID)
+	if err != nil {
+		internalError(c, "load_agent_settings_failed", "读取会话设置失败")
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"autoContinue":            autoContinue,
+		"agentMode":               agentMode,
 		"assetRestrictionEnabled": assetRestriction,
 	})
 }

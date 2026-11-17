@@ -31,6 +31,22 @@ type ToolExecution struct {
 	FinishedAt     *time.Time             `json:"finishedAt"`
 }
 
+type ToolExecutionFilter struct {
+	UserID string
+	Status string
+	Search string
+	Sort   string
+	Limit  int
+	Offset int
+}
+
+type ToolExecutionStats struct {
+	Total   int `json:"total"`
+	Running int `json:"running"`
+	Success int `json:"success"`
+	Failed  int `json:"failed"`
+}
+
 func ToolExecutionFingerprint(args map[string]interface{}) string {
 	raw, err := json.Marshal(args)
 	if err != nil {
@@ -148,22 +164,95 @@ func (db *DB) ListToolExecutions(
 	userID string,
 	limit int,
 ) ([]ToolExecution, error) {
+	items, _, _, err := db.ListToolExecutionsFiltered(ctx, ToolExecutionFilter{
+		UserID: userID,
+		Limit:  limit,
+	})
+	return items, err
+}
+
+func (db *DB) ListToolExecutionsFiltered(
+	ctx context.Context,
+	filter ToolExecutionFilter,
+) ([]ToolExecution, int, ToolExecutionStats, error) {
+	var stats ToolExecutionStats
+	if err := db.QueryRowContext(
+		ctx,
+		`SELECT
+			COUNT(*),
+			COALESCE(SUM(CASE WHEN status <> 'failed'
+				AND COALESCE(error, '') = '' AND finished_at IS NULL THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN status <> 'failed'
+				AND COALESCE(error, '') = '' AND finished_at IS NOT NULL THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN status = 'failed' OR COALESCE(error, '') <> ''
+				THEN 1 ELSE 0 END), 0)
+		 FROM tool_executions WHERE user_id = ?`,
+		filter.UserID,
+	).Scan(&stats.Total, &stats.Running, &stats.Success, &stats.Failed); err != nil {
+		return nil, 0, stats, err
+	}
+
+	clauses := []string{"user_id = ?"}
+	args := []interface{}{filter.UserID}
+	switch strings.ToLower(strings.TrimSpace(filter.Status)) {
+	case "running":
+		clauses = append(
+			clauses,
+			"status <> 'failed' AND COALESCE(error, '') = '' AND finished_at IS NULL",
+		)
+	case "success":
+		clauses = append(
+			clauses,
+			"status <> 'failed' AND COALESCE(error, '') = '' AND finished_at IS NOT NULL",
+		)
+	case "failed":
+		clauses = append(clauses, "(status = 'failed' OR COALESCE(error, '') <> '')")
+	}
+	if value := strings.TrimSpace(filter.Search); value != "" {
+		pattern := "%" + escapeLikePattern(value) + "%"
+		clauses = append(
+			clauses,
+			`(tool_name LIKE ? ESCAPE '\' OR conversation_id LIKE ? ESCAPE '\'
+			 OR result LIKE ? ESCAPE '\' OR error LIKE ? ESCAPE '\')`,
+		)
+		args = append(args, pattern, pattern, pattern, pattern)
+	}
+	where := " WHERE " + strings.Join(clauses, " AND ")
+	var total int
+	if err := db.QueryRowContext(
+		ctx,
+		`SELECT COUNT(*) FROM tool_executions`+where,
+		args...,
+	).Scan(&total); err != nil {
+		return nil, 0, stats, err
+	}
+	order := " ORDER BY started_at DESC, id DESC"
+	switch strings.ToLower(strings.TrimSpace(filter.Sort)) {
+	case "time_asc":
+		order = " ORDER BY started_at ASC, id ASC"
+	case "tool_asc":
+		order = " ORDER BY tool_name COLLATE NOCASE ASC, started_at DESC, id DESC"
+	case "tool_desc":
+		order = " ORDER BY tool_name COLLATE NOCASE DESC, started_at DESC, id DESC"
+	}
+	limit := filter.Limit
 	if limit <= 0 || limit > 500 {
-		limit = 100
+		limit = 20
+	}
+	offset := filter.Offset
+	if offset < 0 {
+		offset = 0
 	}
 	rows, err := db.QueryContext(
 		ctx,
 		`SELECT id, conversation_id, user_id, tool_name, arguments, fingerprint,
 			status, result, error, started_at, finished_at
-		 FROM tool_executions
-		 WHERE user_id = ?
-		 ORDER BY started_at DESC
-		 LIMIT ?`,
-		userID,
-		limit,
+		 FROM tool_executions`+where+order+`
+		 LIMIT ? OFFSET ?`,
+		append(args, limit, offset)...,
 	)
 	if err != nil {
-		return nil, err
+		return nil, 0, stats, err
 	}
 	defer rows.Close()
 
@@ -186,7 +275,7 @@ func (db *DB) ListToolExecutions(
 			&startedAt,
 			&finishedAt,
 		); err != nil {
-			return nil, err
+			return nil, 0, stats, err
 		}
 		item.StartedAt = time.Unix(startedAt, 0)
 		_ = json.Unmarshal([]byte(raw), &item.Arguments)
@@ -196,7 +285,10 @@ func (db *DB) ListToolExecutions(
 		}
 		items = append(items, item)
 	}
-	return items, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, 0, stats, err
+	}
+	return items, total, stats, nil
 }
 
 func (db *DB) GetToolExecution(

@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 
 import { apiDelete, apiGet, apiPost, apiPut, apiUrl } from '../api/client'
+import DataPagination from '../components/DataPagination.vue'
 import PageTitleRobot from '../components/PageTitleRobot.vue'
 import { useI18n } from '../i18n'
 
@@ -34,8 +35,19 @@ interface Project {
 
 interface ProjectPage {
   items: Project[]
-  hasMore: boolean
-  nextCursor?: string
+  total?: number
+  page?: number
+  pageSize?: number
+  totalPages?: number
+  stats?: ProjectStats
+}
+
+interface ProjectStats {
+  total: number
+  active: number
+  paused: number
+  done: number
+  risk: number
 }
 
 interface ProjectBatchResult {
@@ -71,9 +83,6 @@ const router = useRouter()
 const projects = ref<Project[]>([])
 const selected = ref<string[]>([])
 const loading = ref(false)
-const loadingMore = ref(false)
-const hasMore = ref(false)
-const nextCursor = ref('')
 const error = ref('')
 const notice = ref('')
 const createDraft = reactive({
@@ -92,12 +101,17 @@ const editingId = ref('')
 const searchText = ref('')
 const statusFilter = ref('')
 const riskFilter = ref(false)
+const projectSort = ref('updated_desc')
 const batchDraft = reactive({
   assets: '',
 })
 const batchStartInstruction = ref('')
 const batchStartRoleId = ref('')
 const batchStartUseZhizi = ref(false)
+const batchStartAgentMode = ref<'fast' | 'deep'>('deep')
+const batchStartHITL = ref(true)
+const batchStartAssetRestriction = ref(true)
+const batchStartAutoContinue = ref(true)
 const zhiziLoading = ref(false)
 const zhiziAvailability = ref<ZhiziAvailability>({
   enabledNodes: 0,
@@ -110,6 +124,20 @@ const rolesLoading = ref(false)
 const deleteTarget = ref<Project | null>(null)
 const deleteBatch = ref(false)
 const deleting = ref(false)
+const pagination = reactive({
+  page: 1,
+  pageSize: 20,
+  total: 0,
+  totalPages: 1,
+})
+const projectStats = reactive<ProjectStats>({
+  total: 0,
+  active: 0,
+  paused: 0,
+  done: 0,
+  risk: 0,
+})
+let projectFilterTimer: number | undefined
 
 const PROJECT_STATUSES = ['planning', 'active', 'paused', 'done', 'archived'] as const
 const PROJECT_BATCH_MAX_ASSETS = 500
@@ -128,40 +156,11 @@ function projectInitial(value: string) {
   return first.toUpperCase()
 }
 
-const filteredProjects = computed(() => {
-  const keyword = searchText.value.trim().toLowerCase()
-  return projects.value.filter((project) => {
-    if (riskFilter.value && (project.counts?.vulnerabilities ?? 0) === 0) {
-      return false
-    }
-    if (statusFilter.value && project.status !== statusFilter.value) {
-      return false
-    }
-    if (!keyword) {
-      return true
-    }
-    return `${project.name} ${project.description}`.toLowerCase().includes(keyword)
-  })
-})
-
-const statusCounts = computed(() => {
-  const counts: Record<string, number> = {}
-  for (const project of projects.value) {
-    counts[project.status] = (counts[project.status] ?? 0) + 1
-  }
-  return counts
-})
-
-const projectStats = computed(() => ({
-  total: projects.value.length,
-  active: statusCounts.value.active ?? 0,
-  paused: statusCounts.value.paused ?? 0,
-  done: statusCounts.value.done ?? 0,
-  risk: projects.value.filter((project) => (project.counts?.vulnerabilities ?? 0) > 0).length,
-}))
-
 const batchAssetCount = computed(
   () => batchDraft.assets.split(/\r?\n/).filter((line) => line.trim()).length,
+)
+const projectFiltersActive = computed(
+  () => Boolean(searchText.value.trim() || statusFilter.value || riskFilter.value),
 )
 
 function formatTime(value: string) {
@@ -192,14 +191,43 @@ function projectTokenTitle(project: Project) {
   return parts.join(' · ')
 }
 
-async function load() {
+async function load(resetPage = false) {
+  if (resetPage) {
+    pagination.page = 1
+  }
   loading.value = true
   error.value = ''
   try {
-    const response = await apiGet<ProjectPage>('/projects?limit=100')
+    const query = new URLSearchParams({
+      limit: String(pagination.pageSize),
+      offset: String((pagination.page - 1) * pagination.pageSize),
+    })
+    if (searchText.value.trim()) {
+      query.set('search', searchText.value.trim())
+    }
+    if (statusFilter.value) {
+      query.set('status', statusFilter.value)
+    }
+    if (riskFilter.value) {
+      query.set('risk', '1')
+    }
+    query.set('sort', projectSort.value)
+    const response = await apiGet<ProjectPage>(`/projects?${query.toString()}`)
+    const totalPages = Math.max(1, response.totalPages ?? 1)
+    if (pagination.page > totalPages) {
+      pagination.page = totalPages
+      return await load()
+    }
     projects.value = response.items ?? []
-    hasMore.value = Boolean(response.hasMore)
-    nextCursor.value = response.nextCursor || ''
+    pagination.total = response.total ?? 0
+    pagination.totalPages = totalPages
+    if (response.stats) {
+      projectStats.total = response.stats.total ?? 0
+      projectStats.active = response.stats.active ?? 0
+      projectStats.paused = response.stats.paused ?? 0
+      projectStats.done = response.stats.done ?? 0
+      projectStats.risk = response.stats.risk ?? 0
+    }
   } catch (err) {
     error.value = err instanceof Error ? err.message : t('message.readProjectsFailed')
   } finally {
@@ -207,25 +235,30 @@ async function load() {
   }
 }
 
-async function loadMore() {
-  if (!hasMore.value || !nextCursor.value || loadingMore.value) {
-    return
+function scheduleProjectFilterLoad() {
+  if (projectFilterTimer) {
+    window.clearTimeout(projectFilterTimer)
   }
-  loadingMore.value = true
-  error.value = ''
-  try {
-    const response = await apiGet<ProjectPage>(
-      `/projects?limit=100&before=${encodeURIComponent(nextCursor.value)}`,
-    )
-    const existing = new Set(projects.value.map((item) => item.id))
-    projects.value.push(...response.items.filter((item) => !existing.has(item.id)))
-    hasMore.value = Boolean(response.hasMore)
-    nextCursor.value = response.nextCursor || ''
-  } catch (err) {
-    error.value = err instanceof Error ? err.message : t('message.readProjectsFailed')
-  } finally {
-    loadingMore.value = false
-  }
+  projectFilterTimer = window.setTimeout(() => {
+    projectFilterTimer = undefined
+    void load(true)
+  }, 250)
+}
+
+function changeProjectPage(page: number) {
+  pagination.page = page
+  void load()
+}
+
+function changeProjectPageSize(pageSize: number) {
+  pagination.pageSize = pageSize
+  pagination.page = 1
+  void load()
+}
+
+function onStatusFilterChange() {
+  riskFilter.value = false
+  void load(true)
 }
 
 async function loadAgentRoles() {
@@ -324,6 +357,10 @@ function openBatchStart() {
   notice.value = ''
   batchStartInstruction.value = t('project.batchStartDefaultInstruction')
   batchStartUseZhizi.value = false
+  batchStartAgentMode.value = 'deep'
+  batchStartHITL.value = true
+  batchStartAssetRestriction.value = true
+  batchStartAutoContinue.value = true
   void loadZhiziAvailability()
   if (!agentRoles.value.some((role) => role.id === batchStartRoleId.value)) {
     batchStartRoleId.value = agentRoles.value[0]?.id ?? ''
@@ -355,6 +392,10 @@ function closeBatchStart() {
   showBatchStart.value = false
   batchStartInstruction.value = ''
   batchStartUseZhizi.value = false
+  batchStartAgentMode.value = 'deep'
+  batchStartHITL.value = true
+  batchStartAssetRestriction.value = true
+  batchStartAutoContinue.value = true
 }
 
 function createProject() {
@@ -438,6 +479,10 @@ async function startSelectedProjects() {
       instruction: batchStartInstruction.value.trim(),
       roleId: batchStartRoleId.value,
       useZhizi: batchStartUseZhizi.value,
+      agentMode: batchStartAgentMode.value,
+      hitlEnabled: batchStartHITL.value,
+      assetRestrictionEnabled: batchStartAssetRestriction.value,
+      autoContinue: batchStartAutoContinue.value,
     })
     showBatchStart.value = false
     selected.value = []
@@ -463,17 +508,25 @@ function openProject(project: Project) {
 function selectStatus(status: string) {
   statusFilter.value = status
   riskFilter.value = false
+  void load(true)
 }
 
 function selectRiskProjects() {
   statusFilter.value = ''
   riskFilter.value = true
+  void load(true)
 }
 
 function resetProjectFilters() {
   searchText.value = ''
   statusFilter.value = ''
   riskFilter.value = false
+  projectSort.value = 'updated_desc'
+  void load(true)
+}
+
+function onProjectSortChange() {
+  void load(true)
 }
 
 function toggleSelect(projectId: string) {
@@ -486,12 +539,17 @@ function toggleSelect(projectId: string) {
 
 const allSelected = computed(
   () =>
-    filteredProjects.value.length > 0 &&
-    selected.value.length === filteredProjects.value.length,
+    projects.value.length > 0 &&
+    projects.value.every((project) => selected.value.includes(project.id)),
 )
 
 function toggleAll() {
-  selected.value = allSelected.value ? [] : filteredProjects.value.map((item) => item.id)
+  const pageIDs = projects.value.map((item) => item.id)
+  if (allSelected.value) {
+    selected.value = selected.value.filter((id) => !pageIDs.includes(id))
+    return
+  }
+  selected.value = [...new Set([...selected.value, ...pageIDs])]
 }
 
 function requestDelete(project: Project) {
@@ -551,6 +609,12 @@ onMounted(() => {
   void load()
   void loadAgentRoles()
   void loadZhiziAvailability()
+})
+
+onUnmounted(() => {
+  if (projectFilterTimer) {
+    window.clearTimeout(projectFilterTimer)
+  }
 })
 </script>
 
@@ -673,23 +737,38 @@ onMounted(() => {
           type="search"
           :aria-label="t('project.searchPlaceholder')"
           :placeholder="t('project.searchPlaceholder')"
+          @input="scheduleProjectFilterLoad"
         />
         <select
           v-model="statusFilter"
           class="project-status-filter"
           :aria-label="t('project.statusLabel')"
-          @change="riskFilter = false"
+          @change="onStatusFilterChange"
         >
         <option value="">{{ t('project.statusAll') }}</option>
         <option v-for="status in PROJECT_STATUSES" :key="status" :value="status">
           {{ statusLabel(status) }}
         </option>
       </select>
+      <select
+        v-model="projectSort"
+        class="project-status-filter"
+        :aria-label="t('project.sort')"
+        @change="onProjectSortChange"
+      >
+        <option value="updated_desc">{{ t('project.sortUpdatedDesc') }}</option>
+        <option value="updated_asc">{{ t('project.sortUpdatedAsc') }}</option>
+        <option value="name_asc">{{ t('project.sortNameAsc') }}</option>
+        <option value="name_desc">{{ t('project.sortNameDesc') }}</option>
+        <option value="status_asc">{{ t('project.sortStatus') }}</option>
+        <option value="risk_desc">{{ t('project.sortRiskDesc') }}</option>
+        <option value="risk_asc">{{ t('project.sortRiskAsc') }}</option>
+      </select>
       <span class="project-filter-stats">
         {{ t('project.filterStats', {
-          total: projects.length,
-          shown: filteredProjects.length,
-          active: statusCounts.active ?? 0,
+          total: projectStats.total,
+          shown: pagination.total,
+          active: projectStats.active,
         }) }}
       </span>
         <button class="button compact" type="button" @click="resetProjectFilters">
@@ -732,7 +811,7 @@ onMounted(() => {
     <section class="project-inventory">
       <div class="project-grid">
       <article
-        v-for="project in filteredProjects"
+        v-for="project in projects"
         :key="project.id"
         class="project-card"
         :class="`project-status-${project.status}`"
@@ -836,20 +915,19 @@ onMounted(() => {
         </div>
       </article>
 
-      <p v-if="!projects.length && !loading" class="empty-projects">{{ t('project.empty') }}</p>
-      <p v-else-if="!filteredProjects.length && !loading" class="empty-projects">
-        {{ t('project.searchEmpty') }}
+      <p v-if="!projects.length && !loading" class="empty-projects">
+        {{ projectFiltersActive ? t('project.searchEmpty') : t('project.empty') }}
       </p>
       </div>
-      <button
-        v-if="hasMore"
-        class="button load-more-projects"
-        type="button"
-        :disabled="loadingMore"
-        @click="loadMore"
-      >
-        {{ loadingMore ? t('common.loading') : t('common.loadMore') }}
-      </button>
+      <DataPagination
+        :total="pagination.total"
+        :page="pagination.page"
+        :page-size="pagination.pageSize"
+        :total-pages="pagination.totalPages"
+        :disabled="loading"
+        @page-change="changeProjectPage"
+        @page-size-change="changeProjectPageSize"
+      />
     </section>
 
     <div v-if="showCreate" class="modal-mask" @click="closeCreate"></div>
@@ -990,6 +1068,44 @@ onMounted(() => {
             </option>
           </select>
         </label>
+        <div class="batch-start-run-settings">
+          <strong class="batch-start-run-title">
+            {{ t('project.batchStartRunSettings') }}
+          </strong>
+          <label class="field">
+            <span>{{ t('chat.agentMode') }}</span>
+            <select v-model="batchStartAgentMode" :disabled="batchStarting">
+              <option value="fast">{{ t('chat.fastPath') }}</option>
+              <option value="deep">{{ t('chat.deepPath') }}</option>
+            </select>
+          </label>
+          <div class="batch-start-toggle-grid">
+            <label class="batch-start-toggle" :title="t('chat.manualApprovalHint')">
+              <input
+                v-model="batchStartHITL"
+                type="checkbox"
+                :disabled="batchStarting"
+              />
+              <span>{{ t('chat.manualApproval') }}</span>
+            </label>
+            <label class="batch-start-toggle" :title="t('chat.assetRestrictionHint')">
+              <input
+                v-model="batchStartAssetRestriction"
+                type="checkbox"
+                :disabled="batchStarting"
+              />
+              <span>{{ t('chat.assetRestriction') }}</span>
+            </label>
+            <label class="batch-start-toggle" :title="t('chat.autoContinueHint')">
+              <input
+                v-model="batchStartAutoContinue"
+                type="checkbox"
+                :disabled="batchStarting"
+              />
+              <span>{{ t('chat.autoContinue') }}</span>
+            </label>
+          </div>
+        </div>
         <label class="field batch-start-zhizi-field">
           <span>{{ t('project.batchStartUseZhizi') }}</span>
           <span class="batch-start-zhizi-control">
@@ -1283,6 +1399,45 @@ onMounted(() => {
   line-height: 1.6;
 }
 
+.batch-start-run-settings {
+  display: grid;
+  gap: 10px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.batch-start-run-title {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.batch-start-toggle-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 8px;
+}
+
+.batch-start-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--field-bg);
+  color: inherit;
+  font-size: 13px;
+}
+
+.batch-start-toggle input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--project-accent);
+}
+
 .batch-start-zhizi-control {
   display: flex;
   align-items: center;
@@ -1357,11 +1512,6 @@ onMounted(() => {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   gap: 10px;
-}
-
-.load-more-projects {
-  width: 100%;
-  margin-top: 12px;
 }
 
 .project-card {
@@ -2174,13 +2324,6 @@ onMounted(() => {
   border: 0;
   border-radius: 0;
   background: var(--project-panel);
-}
-
-.main-column .page-projects .load-more-projects {
-  width: 100%;
-  margin: 0;
-  border-width: 1px 0 0;
-  border-radius: 0;
 }
 
 .main-column .page-projects .modal-mask {

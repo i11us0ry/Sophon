@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 
+import DataPagination from '../components/DataPagination.vue'
 import PageTitleRobot from '../components/PageTitleRobot.vue'
 import { useAuthStore } from '../stores/auth'
 import { useRbacStore, type Role, type RoleUser } from '../stores/rbac'
@@ -19,12 +20,14 @@ const userDrawerOpen = ref(false)
 const roleDrawerOpen = ref(false)
 const userSearch = ref('')
 const userStatusFilter = ref<'' | 'enabled' | 'disabled'>('')
+const userSort = ref('username_asc')
 const roleSearch = ref('')
 const permissionSearch = ref('')
 const deleteTarget = ref<{ type: 'user'; user: RoleUser } | { type: 'role'; role: Role } | null>(
   null,
 )
 const deleting = ref(false)
+let userSearchTimer: number | undefined
 
 const userDraft = reactive({
   username: '',
@@ -39,24 +42,8 @@ const roleDraft = reactive({
 })
 
 const canWrite = computed(() => auth.hasPermission('rbac:write'))
-const activeUsers = computed(() => rbac.users.filter((user) => user.enabled).length)
-const filteredUsers = computed(() => {
-  const keyword = userSearch.value.trim().toLowerCase()
-  return rbac.users.filter((user) => {
-    if (userStatusFilter.value === 'enabled' && !user.enabled) {
-      return false
-    }
-    if (userStatusFilter.value === 'disabled' && user.enabled) {
-      return false
-    }
-    if (!keyword) {
-      return true
-    }
-    return `${user.username} ${user.displayName} ${user.role}`
-      .toLowerCase()
-      .includes(keyword)
-  })
-})
+const activeUsers = computed(() => rbac.userStats.enabled)
+const filteredUsers = computed(() => rbac.users)
 const filteredRoles = computed(() => {
   const keyword = roleSearch.value.trim().toLowerCase()
   if (!keyword) {
@@ -269,8 +256,58 @@ async function confirmDelete() {
   }
 }
 
+async function loadUserPage(resetPage = false) {
+  try {
+    await rbac.loadUsers({
+      page: resetPage ? 1 : rbac.userPagination.page,
+      pageSize: rbac.userPagination.pageSize,
+      search: userSearch.value,
+      status: userStatusFilter.value,
+      sort: userSort.value,
+    })
+  } catch (error) {
+    setMessage(error instanceof Error ? error.message : t('message.operationFailed'), 'error')
+  }
+}
+
+function setUserStatusFilter(status: '' | 'enabled' | 'disabled') {
+  userStatusFilter.value = status
+  void loadUserPage(true)
+}
+
+function scheduleUserSearch() {
+  if (userSearchTimer) {
+    window.clearTimeout(userSearchTimer)
+  }
+  userSearchTimer = window.setTimeout(() => {
+    userSearchTimer = undefined
+    void loadUserPage(true)
+  }, 300)
+}
+
+function onUserSortChange() {
+  void loadUserPage(true)
+}
+
+function changeUserPage(page: number) {
+  rbac.userPagination.page = page
+  void loadUserPage()
+}
+
+function changeUserPageSize(pageSize: number) {
+  rbac.userPagination.pageSize = pageSize
+  rbac.userPagination.page = 1
+  void loadUserPage()
+}
+
 onMounted(() => {
   void rbac.load()
+})
+
+onUnmounted(() => {
+  if (userSearchTimer) {
+    window.clearTimeout(userSearchTimer)
+  }
 })
 </script>
 
@@ -362,12 +399,19 @@ onMounted(() => {
         </button>
       </header>
       <div class="access-toolbar">
-        <label class="access-search"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6" /><path d="m16 16 4 4" /></svg><input v-model="userSearch" type="search" :placeholder="t('rbac.searchUsers')" /></label>
+        <label class="access-search"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6" /><path d="m16 16 4 4" /></svg><input v-model="userSearch" type="search" :placeholder="t('rbac.searchUsers')" @input="scheduleUserSearch" /></label>
         <div class="access-segmented">
-          <button type="button" :class="{ active: userStatusFilter === '' }" @click="userStatusFilter = ''">{{ t('rbac.all') }}</button>
-          <button type="button" :class="{ active: userStatusFilter === 'enabled' }" @click="userStatusFilter = 'enabled'">{{ t('common.enabled') }}</button>
-          <button type="button" :class="{ active: userStatusFilter === 'disabled' }" @click="userStatusFilter = 'disabled'">{{ t('common.disabled') }}</button>
+          <button type="button" :class="{ active: userStatusFilter === '' }" @click="setUserStatusFilter('')">{{ t('rbac.all') }}</button>
+          <button type="button" :class="{ active: userStatusFilter === 'enabled' }" @click="setUserStatusFilter('enabled')">{{ t('common.enabled') }}</button>
+          <button type="button" :class="{ active: userStatusFilter === 'disabled' }" @click="setUserStatusFilter('disabled')">{{ t('common.disabled') }}</button>
         </div>
+        <select v-model="userSort" :aria-label="t('rbac.userSort')" @change="onUserSortChange">
+          <option value="username_asc">{{ t('rbac.sortUsernameAsc') }}</option>
+          <option value="username_desc">{{ t('rbac.sortUsernameDesc') }}</option>
+          <option value="role_asc">{{ t('rbac.sortRole') }}</option>
+          <option value="created_desc">{{ t('rbac.sortCreatedDesc') }}</option>
+          <option value="created_asc">{{ t('rbac.sortCreatedAsc') }}</option>
+        </select>
       </div>
       <div class="access-user-list">
         <article v-for="user in filteredUsers" :key="user.id" class="access-user-row" :class="{ 'is-current': user.id === auth.user?.id, disabled: !user.enabled }">
@@ -393,6 +437,15 @@ onMounted(() => {
         </article>
         <div v-if="!filteredUsers.length" class="access-empty"><span class="empty-gate" aria-hidden="true"></span><strong>{{ t('rbac.noMatchingUsers') }}</strong></div>
       </div>
+      <DataPagination
+        :total="rbac.userPagination.total"
+        :page="rbac.userPagination.page"
+        :page-size="rbac.userPagination.pageSize"
+        :total-pages="rbac.userPagination.totalPages"
+        :disabled="rbac.loading"
+        @page-change="changeUserPage"
+        @page-size-change="changeUserPageSize"
+      />
     </section>
 
     <section v-else class="access-panel">

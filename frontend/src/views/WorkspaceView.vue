@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 
 import { ApiError, apiDelete, apiGet, apiPost, apiTextPut, apiUrl } from '../api/client'
+import DataPagination from '../components/DataPagination.vue'
 import PageTitleRobot from '../components/PageTitleRobot.vue'
 import { useI18n } from '../i18n'
 import { useAuthStore } from '../stores/auth'
@@ -24,8 +25,6 @@ interface WorkspaceListing {
   path: string
   entries: WorkspaceEntry[]
   total: number
-  hasMore: boolean
-  nextOffset: number
 }
 
 interface WorkspaceFileContent {
@@ -56,14 +55,18 @@ const category = ref('workspace')
 const currentPath = ref('')
 const entries = ref<WorkspaceEntry[]>([])
 const total = ref(0)
-const hasMore = ref(false)
-const nextOffset = ref(0)
 const selected = ref<string[]>([])
 const loading = ref(false)
 const error = ref('')
 const search = ref('')
 const sortKey = ref<'name' | 'size' | 'mtime'>('name')
 const sortDirection = ref<'asc' | 'desc'>('asc')
+const pagination = reactive({
+  page: 1,
+  pageSize: 20,
+  totalPages: 1,
+})
+let searchTimer: number | undefined
 const deleting = ref(false)
 const deleteTarget = ref<{ mode: 'single' | 'batch'; entries: WorkspaceEntry[] } | null>(null)
 const editorOpen = ref(false)
@@ -95,25 +98,7 @@ const breadcrumbs = computed(() => {
   return items
 })
 
-const visibleEntries = computed(() => {
-  const keyword = search.value.trim().toLowerCase()
-  const filtered = keyword
-    ? entries.value.filter((entry) => entry.name.toLowerCase().includes(keyword))
-    : [...entries.value]
-  const direction = sortDirection.value === 'asc' ? 1 : -1
-  return filtered.sort((left, right) => {
-    if (left.dir !== right.dir) {
-      return left.dir ? -1 : 1
-    }
-    if (sortKey.value === 'size') {
-      return (left.size - right.size) * direction
-    }
-    if (sortKey.value === 'mtime') {
-      return (left.mtime - right.mtime) * direction
-    }
-    return left.name.localeCompare(right.name, undefined, { numeric: true }) * direction
-  })
-})
+const visibleEntries = computed(() => entries.value)
 
 const allSelected = computed(
   () =>
@@ -175,28 +160,40 @@ async function loadCategories() {
   }
 }
 
-async function loadList(append = false) {
+async function loadList(resetPage = false) {
   if (loading.value) {
     return
+  }
+  if (resetPage) {
+    pagination.page = 1
   }
   loading.value = true
   error.value = ''
   try {
-    const offset = append ? nextOffset.value : 0
+    const query = new URLSearchParams({
+      category: category.value,
+      path: currentPath.value,
+      limit: String(pagination.pageSize),
+      offset: String((pagination.page - 1) * pagination.pageSize),
+      sort: sortKey.value,
+      direction: sortDirection.value,
+    })
+    if (search.value.trim()) {
+      query.set('search', search.value.trim())
+    }
     const response = await apiGet<WorkspaceListing>(
-      `/workspace/list?category=${encodeURIComponent(category.value)}&path=${encodeURIComponent(currentPath.value)}&limit=500&offset=${offset}`,
+      `/workspace/list?${query.toString()}`,
     )
-    entries.value = append ? [...entries.value, ...(response.entries ?? [])] : response.entries ?? []
+    const totalPages = Math.max(1, Math.ceil((response.total || 0) / pagination.pageSize))
+    if (pagination.page > totalPages) {
+      pagination.page = totalPages
+      return await loadList()
+    }
+    entries.value = response.entries ?? []
     currentPath.value = response.path || ''
     total.value = response.total || 0
-    hasMore.value = Boolean(response.hasMore)
-    nextOffset.value = response.nextOffset || entries.value.length
-    if (append) {
-      const available = new Set(entries.value.map((entry) => entry.path))
-      selected.value = selected.value.filter((path) => available.has(path))
-    } else {
-      selected.value = []
-    }
+    pagination.totalPages = totalPages
+    selected.value = []
   } catch (loadError) {
     error.value = loadError instanceof Error ? loadError.message : t('workspace.loadFailed')
   } finally {
@@ -207,7 +204,7 @@ async function loadList(append = false) {
 function switchCategory(name: string) {
   category.value = name
   currentPath.value = ''
-  void loadList()
+  void loadList(true)
 }
 
 function isImageEntry(entry: WorkspaceEntry) {
@@ -249,7 +246,7 @@ function canPreviewEntry(entry: WorkspaceEntry) {
 function openEntry(entry: WorkspaceEntry) {
   if (entry.dir) {
     currentPath.value = entry.path
-    void loadList()
+    void loadList(true)
     return
   }
   if (isImageEntry(entry)) {
@@ -265,14 +262,14 @@ function openEntry(entry: WorkspaceEntry) {
 
 function navigate(path: string) {
   currentPath.value = path
-  void loadList()
+  void loadList(true)
 }
 
 function goParent() {
   const parts = currentPath.value.split('/').filter(Boolean)
   parts.pop()
   currentPath.value = parts.join('/')
-  void loadList()
+  void loadList(true)
 }
 
 function downloadEntry(entry: WorkspaceEntry, sourceCategory = category.value) {
@@ -462,10 +459,32 @@ function toggleSelectAll() {
 function sortBy(key: 'name' | 'size' | 'mtime') {
   if (sortKey.value === key) {
     sortDirection.value = sortDirection.value === 'asc' ? 'desc' : 'asc'
-    return
+  } else {
+    sortKey.value = key
+    sortDirection.value = key === 'name' ? 'asc' : 'desc'
   }
-  sortKey.value = key
-  sortDirection.value = key === 'name' ? 'asc' : 'desc'
+  void loadList(true)
+}
+
+function scheduleWorkspaceSearch() {
+  if (searchTimer) {
+    window.clearTimeout(searchTimer)
+  }
+  searchTimer = window.setTimeout(() => {
+    searchTimer = undefined
+    void loadList(true)
+  }, 300)
+}
+
+function changeWorkspacePage(page: number) {
+  pagination.page = page
+  void loadList()
+}
+
+function changeWorkspacePageSize(pageSize: number) {
+  pagination.pageSize = pageSize
+  pagination.page = 1
+  void loadList()
 }
 
 function requestDelete(entry: WorkspaceEntry) {
@@ -559,6 +578,9 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  if (searchTimer) {
+    window.clearTimeout(searchTimer)
+  }
   window.removeEventListener('beforeunload', handleBeforeUnload)
 })
 </script>
@@ -672,7 +694,12 @@ onBeforeUnmount(() => {
         <div class="depot-toolbar">
           <label class="depot-search-box">
             <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6" /><path d="m16 16 4 4" /></svg>
-            <input v-model="search" type="search" :placeholder="t('workspace.searchPlaceholder')" />
+            <input
+              v-model="search"
+              type="search"
+              :placeholder="t('workspace.searchPlaceholder')"
+              @input="scheduleWorkspaceSearch"
+            />
           </label>
           <div class="depot-sort">
             <button type="button" :class="{ active: sortKey === 'name' }" @click="sortBy('name')">
@@ -755,9 +782,15 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
-        <button v-if="hasMore" class="button depot-load-more" type="button" :disabled="loading" @click="loadList(true)">
-          {{ loading ? t('common.loading') : t('common.loadMore') }}
-        </button>
+        <DataPagination
+          :total="total"
+          :page="pagination.page"
+          :page-size="pagination.pageSize"
+          :total-pages="pagination.totalPages"
+          :disabled="loading"
+          @page-change="changeWorkspacePage"
+          @page-size-change="changeWorkspacePageSize"
+        />
       </section>
     </div>
 
@@ -2316,11 +2349,6 @@ onBeforeUnmount(() => {
   right: 0;
   left: 0;
   height: 1px;
-}
-
-.depot-load-more {
-  display: flex;
-  margin: 10px auto;
 }
 
 .depot-dialog-layer {

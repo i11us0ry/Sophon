@@ -22,9 +22,34 @@ const chat = useChatStore()
 const auth = useAuthStore()
 const route = useRoute()
 const MAX_ATTACHMENT_BYTES = 2 * 1024 * 1024 * 1024
+const CONVERSATION_GROUP_COLLAPSE_STORAGE_KEY = 'sophon.conversationGroupsCollapsed'
+type ConversationGroupKey = 'queued' | 'running' | 'completed'
+function readCollapsedConversationGroups(): Record<ConversationGroupKey, boolean> {
+  const defaults: Record<ConversationGroupKey, boolean> = {
+    queued: false,
+    running: false,
+    completed: false,
+  }
+  if (typeof window === 'undefined') {
+    return defaults
+  }
+  try {
+    const parsed = JSON.parse(
+      window.localStorage.getItem(CONVERSATION_GROUP_COLLAPSE_STORAGE_KEY) || '{}',
+    ) as Partial<Record<ConversationGroupKey, boolean>>
+    return {
+      queued: parsed.queued === true,
+      running: parsed.running === true,
+      completed: parsed.completed === true,
+    }
+  } catch {
+    return defaults
+  }
+}
 const input = ref('')
 const composerComposing = ref(false)
 const selected = ref<string[]>([])
+const collapsedConversationGroups = ref(readCollapsedConversationGroups())
 const notice = ref('')
 const showInternalTools = ref(false)
 const showRunSettings = ref(false)
@@ -105,13 +130,20 @@ const userQuestionRail = computed(() =>
       time: formatTime(message.createdAt),
     })),
 )
-const projectInactive = computed(
-  () => Boolean(chat.selectedProjectId) && selectedProject.value?.status !== 'active',
+const projectUnavailable = computed(
+  () => Boolean(chat.selectedProjectId) && !selectedProject.value,
 )
-const projectBlocked = computed(() => projectRequired.value || projectInactive.value)
+const projectInactive = computed(
+  () => Boolean(selectedProject.value) && selectedProject.value?.status !== 'active',
+)
+const projectBlocked = computed(
+  () => projectRequired.value || projectUnavailable.value || projectInactive.value,
+)
 const composerBlocked = computed(() => projectBlocked.value || batchParentSelected.value)
 const selectedProjectStatus = computed(() =>
-  selectedProject.value ? t(`projectStatus.${selectedProject.value.status}`) : '',
+  selectedProject.value
+    ? t(`projectStatus.${selectedProject.value.status}`)
+    : t('chat.projectUnavailableStatus'),
 )
 const selectableConversations = computed(() =>
   chat.conversations.filter((conversation) => conversation.kind !== 'batch_parent'),
@@ -134,9 +166,9 @@ const conversationGroups = computed(() => {
     }
   }
   return [
-    { key: 'queued', label: t('chat.statusQueued'), items: queued },
-    { key: 'running', label: t('chat.statusRunning'), items: running },
-    { key: 'completed', label: t('chat.statusCompleted'), items: completed },
+    { key: 'queued' as const, label: t('chat.statusQueued'), items: queued },
+    { key: 'running' as const, label: t('chat.statusRunning'), items: running },
+    { key: 'completed' as const, label: t('chat.statusCompleted'), items: completed },
   ]
 })
 const allSelected = computed(
@@ -157,6 +189,25 @@ function isMessageRunning(message: ChatMessage) {
     !currentStreaming.value &&
     message.id === lastAssistantId.value
   )
+}
+
+function isConversationGroupCollapsed(key: ConversationGroupKey) {
+  return collapsedConversationGroups.value[key]
+}
+
+function toggleConversationGroup(key: ConversationGroupKey) {
+  collapsedConversationGroups.value = {
+    ...collapsedConversationGroups.value,
+    [key]: !collapsedConversationGroups.value[key],
+  }
+  try {
+    window.localStorage.setItem(
+      CONVERSATION_GROUP_COLLAPSE_STORAGE_KEY,
+      JSON.stringify(collapsedConversationGroups.value),
+    )
+  } catch {
+    // 本地存储不可用时仍保留当前页面内的折叠状态。
+  }
 }
 
 watch(
@@ -370,7 +421,9 @@ async function send() {
     return
   }
   if (projectBlocked.value) {
-    chat.error = projectInactive.value
+    chat.error = projectUnavailable.value
+      ? t('chat.projectUnavailable')
+      : projectInactive.value
       ? t('chat.projectInactive', { status: selectedProjectStatus.value })
       : t('chat.projectRequired')
     return
@@ -1038,14 +1091,30 @@ onUnmounted(() => {
             v-for="group in conversationGroups"
             :key="group.key"
             class="conversation-group"
-            :class="group.key"
+            :class="[group.key, { collapsed: isConversationGroupCollapsed(group.key) }]"
           >
-            <header class="conversation-group-header">
+            <button
+              class="conversation-group-header"
+              type="button"
+              :aria-expanded="!isConversationGroupCollapsed(group.key)"
+              @click="toggleConversationGroup(group.key)"
+            >
               <span class="conversation-group-dot" aria-hidden="true"></span>
               <strong>{{ group.label }}</strong>
               <em>{{ group.items.length }}</em>
-            </header>
-            <div v-if="group.items.length" class="conversation-group-list">
+              <svg
+                class="conversation-group-chevron"
+                :class="{ collapsed: isConversationGroupCollapsed(group.key) }"
+                viewBox="0 0 24 24"
+                aria-hidden="true"
+              >
+                <path d="m6 9 6 6 6-6" />
+              </svg>
+            </button>
+            <div
+              v-if="group.items.length && !isConversationGroupCollapsed(group.key)"
+              class="conversation-group-list"
+            >
               <div
                 v-for="conversation in group.items"
                 :key="conversation.id"
@@ -1123,7 +1192,12 @@ onUnmounted(() => {
                 </div>
               </div>
             </div>
-            <p v-else class="conversation-group-empty">—</p>
+            <p
+              v-else-if="!isConversationGroupCollapsed(group.key)"
+              class="conversation-group-empty"
+            >
+              —
+            </p>
           </section>
         </template>
         <p v-if="!chat.conversations.length" class="empty-hint">{{ t('chat.empty') }}</p>
@@ -1176,6 +1250,9 @@ onUnmounted(() => {
       <div v-if="notice" class="alert ok">{{ notice }}</div>
       <div v-if="projectInactive" class="alert warn">
         {{ t('chat.projectInactiveHint', { status: selectedProjectStatus }) }}
+      </div>
+      <div v-else-if="projectUnavailable" class="alert warn">
+        {{ t('chat.projectUnavailable') }}
       </div>
 
       <div v-if="currentPendingHITL.length" class="hitl-panel">
@@ -1949,6 +2026,8 @@ onUnmounted(() => {
             :placeholder="
               currentConversationRunning
                 ? t('chat.backgroundRunning')
+                : projectUnavailable
+                ? t('chat.projectUnavailable')
                 : projectInactive
                 ? t('chat.projectInactiveHint', { status: selectedProjectStatus })
                 : projectRequired
@@ -3265,9 +3344,26 @@ onUnmounted(() => {
   display: flex;
   gap: 6px;
   align-items: center;
+  width: 100%;
   min-width: 0;
   padding: 1px 4px;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
   color: var(--conversation-group-tone);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+  transition: background 0.15s ease;
+}
+
+.conversation-group-header:hover {
+  background: color-mix(in srgb, var(--conversation-group-tone) 7%, transparent);
+}
+
+.conversation-group-header:focus-visible {
+  outline: 1px solid color-mix(in srgb, var(--conversation-group-tone) 58%, transparent);
+  outline-offset: 1px;
 }
 
 .conversation-group-header strong {
@@ -3299,6 +3395,22 @@ onUnmounted(() => {
   border-radius: 50%;
   background: currentColor;
   box-shadow: 0 0 6px color-mix(in srgb, currentColor 56%, transparent);
+}
+
+.conversation-group-chevron {
+  width: 12px;
+  height: 12px;
+  flex: 0 0 auto;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2;
+  transition: transform 0.18s ease;
+}
+
+.conversation-group-chevron.collapsed {
+  transform: rotate(-90deg);
 }
 
 .conversation-group.running .conversation-group-dot {

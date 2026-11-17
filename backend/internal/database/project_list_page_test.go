@@ -104,3 +104,69 @@ func TestListProjectsWithCountsPageUsesStableCursor(t *testing.T) {
 		t.Fatalf("最后一页异常: hasMore=%v projects=%+v", hasMore, last)
 	}
 }
+
+func TestListProjectsWithCountsOffsetFiltersAndPaginates(t *testing.T) {
+	db := openGraphSyncTestDB(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	for _, project := range []Project{
+		{ID: "project-alpha", OwnerUserID: "user-1", Name: "Alpha", Status: "active"},
+		{ID: "project-beta", OwnerUserID: "user-1", Name: "Beta", Status: "paused"},
+		{ID: "project-gamma", OwnerUserID: "user-1", Name: "Gamma", Status: "active"},
+		{ID: "project-delta", OwnerUserID: "user-1", Name: "Delta", Status: "archived"},
+	} {
+		project.CreatedAt = now
+		project.UpdatedAt = now
+		if err := db.CreateProject(ctx, project); err != nil {
+			t.Fatalf("创建项目失败: %v", err)
+		}
+	}
+	if err := db.CreateVulnerability(ctx, Vulnerability{
+		ID: "vuln-beta", ProjectID: "project-beta", OwnerUserID: "user-1",
+		Title: "Risk", Severity: "high", Status: "open",
+		CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("创建风险漏洞失败: %v", err)
+	}
+
+	items, total, stats, err := db.ListProjectsWithCountsOffset(ctx, ProjectListFilter{
+		OwnerUserID: "user-1",
+		Limit:       2,
+	})
+	if err != nil {
+		t.Fatalf("读取项目分页失败: %v", err)
+	}
+	if total != 4 || len(items) != 2 {
+		t.Fatalf("项目分页异常: total=%d items=%+v", total, items)
+	}
+	if stats.Total != 4 || stats.Active != 2 || stats.Paused != 1 || stats.Done != 0 || stats.Risk != 1 {
+		t.Fatalf("项目统计异常: %+v", stats)
+	}
+
+	items, total, _, err = db.ListProjectsWithCountsOffset(ctx, ProjectListFilter{
+		OwnerUserID: "user-1",
+		Status:      "active",
+		Limit:       20,
+	})
+	if err != nil || total != 2 || len(items) != 2 {
+		t.Fatalf("项目状态筛选异常: total=%d items=%+v err=%v", total, items, err)
+	}
+
+	items, total, _, err = db.ListProjectsWithCountsOffset(ctx, ProjectListFilter{
+		OwnerUserID: "user-1",
+		Search:      "amm",
+		Limit:       20,
+	})
+	if err != nil || total != 1 || len(items) != 1 || items[0].ID != "project-gamma" {
+		t.Fatalf("项目搜索筛选异常: total=%d items=%+v err=%v", total, items, err)
+	}
+
+	items, total, _, err = db.ListProjectsWithCountsOffset(ctx, ProjectListFilter{
+		OwnerUserID: "user-1",
+		RiskOnly:    true,
+		Limit:       20,
+	})
+	if err != nil || total != 1 || len(items) != 1 || items[0].ID != "project-beta" {
+		t.Fatalf("项目风险筛选异常: total=%d items=%+v err=%v", total, items, err)
+	}
+}

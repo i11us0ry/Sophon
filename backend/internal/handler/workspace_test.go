@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -93,5 +94,48 @@ func TestWorkspaceListDownloadAndDelete(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(workspaceDir, "artifact.txt")); !os.IsNotExist(err) {
 		t.Fatalf("文件应已删除: %v", err)
+	}
+}
+
+func TestWorkspaceListPaginatesSearchesAndSorts(t *testing.T) {
+	handler, workspaceDir := newWorkspaceTestHandler(t)
+	if err := os.Mkdir(filepath.Join(workspaceDir, "alpha-dir"), 0o755); err != nil {
+		t.Fatalf("创建目录失败: %v", err)
+	}
+	for _, name := range []string{"zeta.txt", "beta.txt"} {
+		if err := os.WriteFile(filepath.Join(workspaceDir, name), []byte(name), 0o600); err != nil {
+			t.Fatalf("创建文件失败: %v", err)
+		}
+	}
+	listCtx, listRecorder := workspaceContext(
+		http.MethodGet,
+		"/workspace/list?category=workspace&path=&limit=1&offset=1&sort=name&direction=asc",
+	)
+	handler.List(listCtx)
+	if listRecorder.Code != http.StatusOK {
+		t.Fatalf("分页列表失败: %d %s", listRecorder.Code, listRecorder.Body.String())
+	}
+	var result struct {
+		Entries []struct {
+			Name string `json:"name"`
+		} `json:"entries"`
+		Total int `json:"total"`
+	}
+	if err := json.Unmarshal(listRecorder.Body.Bytes(), &result); err != nil {
+		t.Fatalf("解析列表响应失败: %v", err)
+	}
+	if result.Total != 3 || len(result.Entries) != 1 || result.Entries[0].Name != "beta.txt" {
+		t.Fatalf("工作空间分页排序异常: %+v", result)
+	}
+
+	searchCtx, searchRecorder := workspaceContext(
+		http.MethodGet,
+		"/workspace/list?category=workspace&path=&limit=20&offset=0&search=zeta",
+	)
+	handler.List(searchCtx)
+	if searchRecorder.Code != http.StatusOK ||
+		!strings.Contains(searchRecorder.Body.String(), `"name":"zeta.txt"`) ||
+		!strings.Contains(searchRecorder.Body.String(), `"total":1`) {
+		t.Fatalf("工作空间搜索异常: %d %s", searchRecorder.Code, searchRecorder.Body.String())
 	}
 }

@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue'
 
 import { apiDelete, apiGet, apiPost, apiPut } from '../api/client'
+import DataPagination from '../components/DataPagination.vue'
 import PageTitleRobot from '../components/PageTitleRobot.vue'
 import { useI18n } from '../i18n'
 
@@ -31,31 +32,79 @@ const createDraft = reactive({ name: '', description: '', content: '' })
 const showCreateModal = ref(false)
 const createModalRef = ref<HTMLElement | null>(null)
 const createNameInput = ref<HTMLInputElement | null>(null)
-
-const filtered = computed(() => {
-  const keyword = search.value.trim().toLowerCase()
-  if (!keyword) {
-    return skills.value
-  }
-  return skills.value.filter((skill) =>
-    [skill.name, skill.description, skill.tags.join(' ')]
-      .join(' ')
-      .toLowerCase()
-      .includes(keyword),
-  )
+const sortValue = ref<'name_asc' | 'name_desc'>('name_asc')
+const pagination = reactive({
+  page: 1,
+  pageSize: 20,
+  total: 0,
+  totalPages: 1,
 })
+let searchTimer: number | undefined
 
-async function load() {
+const filtered = computed(() => skills.value)
+
+async function load(resetPage = false) {
+  if (resetPage) {
+    pagination.page = 1
+  }
   loading.value = true
   error.value = ''
   try {
-    const response = await apiGet<{ items: SkillItem[] }>('/skills')
+    const query = new URLSearchParams({
+      limit: String(pagination.pageSize),
+      offset: String((pagination.page - 1) * pagination.pageSize),
+      sort: sortValue.value,
+    })
+    if (search.value.trim()) {
+      query.set('search', search.value.trim())
+    }
+    const response = await apiGet<{
+      items: SkillItem[]
+      total: number
+      totalPages: number
+      page: number
+      pageSize: number
+    }>(`/skills?${query.toString()}`)
+    const totalPages = Math.max(1, response.totalPages ?? 1)
+    if (pagination.page > totalPages) {
+      pagination.page = totalPages
+      return await load()
+    }
     skills.value = response.items ?? []
+    pagination.total = response.total ?? 0
+    pagination.totalPages = totalPages
+    pagination.page = response.page ?? 1
+    pagination.pageSize = response.pageSize ?? pagination.pageSize
   } catch (err) {
     error.value = err instanceof Error ? err.message : '读取技能失败'
   } finally {
     loading.value = false
   }
+}
+
+function scheduleSkillSearch() {
+  if (searchTimer) {
+    window.clearTimeout(searchTimer)
+  }
+  searchTimer = window.setTimeout(() => {
+    searchTimer = undefined
+    void load(true)
+  }, 300)
+}
+
+function onSkillSortChange() {
+  void load(true)
+}
+
+function changeSkillPage(page: number) {
+  pagination.page = page
+  void load()
+}
+
+function changeSkillPageSize(pageSize: number) {
+  pagination.pageSize = pageSize
+  pagination.page = 1
+  void load()
 }
 
 async function run(action: () => Promise<void>, successText = '') {
@@ -133,6 +182,12 @@ function removeSkill(skill: SkillItem) {
 }
 
 onMounted(load)
+
+onUnmounted(() => {
+  if (searchTimer) {
+    window.clearTimeout(searchTimer)
+  }
+})
 </script>
 
 <template>
@@ -158,9 +213,14 @@ onMounted(load)
         type="search"
         :aria-label="t('skill.searchPlaceholder')"
         :placeholder="t('skill.searchPlaceholder')"
+        @input="scheduleSkillSearch"
       />
+      <select v-model="sortValue" :aria-label="t('skill.sort')" @change="onSkillSortChange">
+        <option value="name_asc">{{ t('skill.sortNameAsc') }}</option>
+        <option value="name_desc">{{ t('skill.sortNameDesc') }}</option>
+      </select>
       <button class="button" type="button" @click="openCreateSkill">{{ t('skill.create') }}</button>
-      <span class="skill-filter-count">{{ filtered.length }} / {{ skills.length }}</span>
+      <span class="skill-filter-count">{{ pagination.total }}</span>
     </div>
 
     <div v-if="filtered.length" class="skill-grid">
@@ -199,6 +259,15 @@ onMounted(load)
       </div>
       <p>{{ t('skill.empty') }}</p>
     </div>
+    <DataPagination
+      :total="pagination.total"
+      :page="pagination.page"
+      :page-size="pagination.pageSize"
+      :total-pages="pagination.totalPages"
+      :disabled="loading"
+      @page-change="changeSkillPage"
+      @page-size-change="changeSkillPageSize"
+    />
 
     <div v-if="showCreateModal" class="skill-modal-backdrop" @click.self="closeCreateSkill">
       <section

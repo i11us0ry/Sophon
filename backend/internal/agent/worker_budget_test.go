@@ -70,8 +70,8 @@ func TestWorkerBudgetAccumulatesCPUUsage(t *testing.T) {
 	if _, err := invokable.InvokableRun(ctx, `{"command":"echo two"}`); err != nil {
 		t.Fatalf("第二次调用失败: %v", err)
 	}
-	if ctx.Err() == nil {
-		t.Fatalf("CPU 预算耗尽后应取消 Worker")
+	if ctx.Err() != nil {
+		t.Fatalf("CPU 预算耗尽后不应取消 Worker: %v", ctx.Err())
 	}
 	if _, err := invokable.InvokableRun(ctx, `{"command":"echo three"}`); err == nil ||
 		!strings.Contains(err.Error(), "CPU 预算已耗尽") {
@@ -138,7 +138,7 @@ func TestWorkerBudgetDoesNotRequireSkillLoad(t *testing.T) {
 	}
 }
 
-func TestWorkerBudgetCancelsAfterToolLimit(t *testing.T) {
+func TestWorkerBudgetRejectsAfterToolLimitWithoutCancelling(t *testing.T) {
 	fake := newFakeMCPTool("sophon-tool-runner", "exec", "执行命令", "command")
 	base, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -156,8 +156,8 @@ func TestWorkerBudgetCancelsAfterToolLimit(t *testing.T) {
 		!strings.Contains(err.Error(), "预算已耗尽") {
 		t.Fatalf("第二次调用应触发预算错误，实际 err=%v", err)
 	}
-	if ctx.Err() == nil {
-		t.Fatalf("预算超限后应取消 Worker context")
+	if ctx.Err() != nil {
+		t.Fatalf("预算超限后不应取消 Worker context: %v", ctx.Err())
 	}
 }
 
