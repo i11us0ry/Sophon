@@ -874,6 +874,10 @@ onMounted(async () => {
 
       <article v-show="activeSection === 'llm'" class="business-card">
         <h2>{{ t('settings.llmSection') }}</h2>
+        <label class="checkbox-line">
+          <input v-model="form.mock" type="checkbox" :disabled="locked('agent.mock') || !writable" />
+          <span>{{ t('settings.mockModel') }}</span>
+        </label>
         <label class="field">
           <span>{{ t('settings.llmProvider') }}</span>
           <select v-model="form.provider" :disabled="locked('llm.provider') || !writable">
@@ -1092,10 +1096,6 @@ onMounted(async () => {
 
       <article v-show="activeSection === 'agent'" class="business-card">
         <h2>{{ t('settings.agentSection') }}</h2>
-        <label class="checkbox-line">
-          <input v-model="form.mock" type="checkbox" :disabled="locked('agent.mock') || !writable" />
-          <span>{{ t('settings.mockModel') }}</span>
-        </label>
         <label class="field">
           <span>{{ t('settings.maxConcurrentSessions') }}</span>
           <input
