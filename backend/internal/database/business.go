@@ -342,6 +342,7 @@ func (db *DB) DeleteProject(ctx context.Context, id, ownerUserID string) error {
 		`DELETE FROM vulnerability_report_drafts WHERE project_id = ?`,
 		`DELETE FROM tool_registry WHERE project_id = ?`,
 		`DELETE FROM tool_runtime_paths WHERE project_id = ?`,
+		`DELETE FROM intel_searches WHERE project_id = ?`,
 	} {
 		if _, err := tx.ExecContext(ctx, statement, id); err != nil {
 			return err

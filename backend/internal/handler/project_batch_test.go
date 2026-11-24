@@ -58,6 +58,18 @@ func TestCreateProjectsBatch(t *testing.T) {
 		if assets[0].Value != project.Scope {
 			t.Fatalf("项目授权资产不一致: scope=%q asset=%q", project.Scope, assets[0].Value)
 		}
+		if project.Goals != defaultProjectGoals {
+			t.Fatalf("批量项目应使用默认目标，实际 %q", project.Goals)
+		}
+	}
+}
+
+func TestProjectGoalsOrDefault(t *testing.T) {
+	if got := projectGoalsOrDefault(" \r\n "); got != defaultProjectGoals {
+		t.Fatalf("空目标应使用默认值，实际 %q", got)
+	}
+	if got := projectGoalsOrDefault(" 自定义目标 "); got != "自定义目标" {
+		t.Fatalf("自定义目标不应被覆盖，实际 %q", got)
 	}
 }
 

@@ -258,7 +258,8 @@ func New(cfg config.Config) (*App, error) {
 		agentService,
 		chatHandler,
 	)
-	settingsHandler := handler.NewSettingsHandler(cfg, knowledgeService, agentService, taskManager)
+	settingsHandler := handler.NewSettingsHandler(cfg, db, knowledgeService, agentService, taskManager)
+	intelCollectionHandler := handler.NewIntelCollectionHandler(db, agentService)
 	interceptHandler := handler.NewInterceptHandler(db)
 	rbacHandler := handler.NewRBACHandler(rbacService)
 	dashboardHandler := handler.NewDashboardHandler(db)
@@ -473,6 +474,15 @@ func New(cfg config.Config) (*App, error) {
 	protected.GET("/mcp/tool-registry", mcpHandler.ToolRegistry)
 	protected.DELETE("/mcp/tool-registry/:id", mcpHandler.DeleteToolRegistry)
 	protected.GET("/settings/ai", settingsHandler.AIStatus)
+	protected.GET("/settings/intel", settingsHandler.IntelSettings)
+	protected.PUT("/settings/intel", settingsHandler.UpdateIntelSettings)
+	protected.POST("/settings/intel/test", settingsHandler.TestIntelSettings)
+	protected.GET("/intel/capabilities", intelCollectionHandler.Capabilities)
+	protected.GET("/intel/searches", intelCollectionHandler.List)
+	protected.POST("/intel/searches", intelCollectionHandler.Create)
+	protected.GET("/intel/searches/:id", intelCollectionHandler.Get)
+	protected.DELETE("/intel/searches/:id", intelCollectionHandler.Delete)
+	protected.POST("/intel/searches/:id/import", intelCollectionHandler.Import)
 	protected.GET("/settings/llm/keys", settingsHandler.ListLLMKeys)
 	protected.POST("/settings/llm/keys", settingsHandler.AddLLMKeys)
 	protected.DELETE("/settings/llm/keys/:id", settingsHandler.DeleteLLMKey)
@@ -655,6 +665,7 @@ func (a *App) Run(ctx context.Context) error {
 	}
 	if a.agent != nil {
 		a.agent.StartVulnerabilityDraftWorker(runCtx)
+		a.agent.StartBackgroundUpdateWorker(runCtx)
 	}
 
 	server := &http.Server{
@@ -691,6 +702,9 @@ func (a *App) Run(ctx context.Context) error {
 		waitCtx, cancelWait := context.WithTimeout(context.Background(), 10*time.Second)
 		if err := a.agent.WaitForVulnerabilityDraftWorker(waitCtx); err != nil {
 			log.Printf("shutdown: 漏洞草稿 Worker 等待超时: %v", err)
+		}
+		if err := a.agent.WaitForBackgroundUpdateWorker(waitCtx); err != nil {
+			log.Printf("shutdown: 后台进展 Worker 等待超时: %v", err)
 		}
 		cancelWait()
 	}

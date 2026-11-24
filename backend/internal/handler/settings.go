@@ -11,6 +11,7 @@ import (
 
 	agentpkg "sophon/internal/agent"
 	"sophon/internal/config"
+	"sophon/internal/database"
 	knowledgepkg "sophon/internal/knowledge"
 	"sophon/internal/task"
 
@@ -20,6 +21,7 @@ import (
 type SettingsHandler struct {
 	mu             sync.RWMutex
 	cfg            config.Config
+	db             *database.DB
 	knowledge      *knowledgepkg.Service
 	agent          *agentpkg.Service
 	tasks          *task.Manager
@@ -30,16 +32,21 @@ type SettingsHandler struct {
 	llmKeyProbeMu      sync.Mutex
 	llmKeyProbeLast    map[string]time.Time
 	llmKeyProbeRunning map[string]bool
+
+	intelStatusMu sync.Mutex
+	intelStatuses map[string]intelProbeStatus
 }
 
 func NewSettingsHandler(
 	cfg config.Config,
+	db *database.DB,
 	knowledgeService *knowledgepkg.Service,
 	agentService *agentpkg.Service,
 	taskManager *task.Manager,
 ) *SettingsHandler {
 	return &SettingsHandler{
 		cfg:                cfg,
+		db:                 db,
 		knowledge:          knowledgeService,
 		agent:              agentService,
 		tasks:              taskManager,
@@ -47,6 +54,7 @@ func NewSettingsHandler(
 		llmKeyStatuses:     map[string]llmKeyStatus{},
 		llmKeyProbeLast:    map[string]time.Time{},
 		llmKeyProbeRunning: map[string]bool{},
+		intelStatuses:      map[string]intelProbeStatus{},
 	}
 }
 

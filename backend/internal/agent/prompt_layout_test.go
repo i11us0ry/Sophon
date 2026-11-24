@@ -25,6 +25,15 @@ func lastStateMessage(t *testing.T, messages []*schema.Message) string {
 	return tail.Content
 }
 
+func assertNoSystemRoleMessages(t *testing.T, messages []*schema.Message) {
+	t.Helper()
+	for _, message := range messages {
+		if message != nil && message.Role == schema.System {
+			t.Fatalf("身份 Prompt 应只通过 Agent Instruction 注入，消息列表不应包含 System Message: %q", message.Content)
+		}
+	}
+}
+
 // TestAppendContextStateByProvider 验证 provider 自适应布局：
 // openai 兼容端点用独立尾消息保前缀稳定；anthropic 分支并入最后一条用户消息避免连续 user。
 func TestAppendContextStateByProvider(t *testing.T) {
@@ -117,14 +126,16 @@ func TestBuildModelMessagesKeepsStablePrefix(t *testing.T) {
 	if err != nil {
 		t.Fatalf("二次组装失败: %v", err)
 	}
+	assertNoSystemRoleMessages(t, first)
+	assertNoSystemRoleMessages(t, second)
 	if first[0].Content != second[0].Content {
-		t.Fatalf("system 前缀应保持字节稳定")
+		t.Fatalf("历史前缀应保持字节稳定")
 	}
 	if strings.Contains(second[0].Content, "当前项目任务态势包") {
-		t.Fatalf("动态态势不应出现在 system 前缀: %q", second[0].Content)
+		t.Fatalf("动态态势不应出现在历史前缀: %q", second[0].Content)
 	}
-	// first = [system, 历史..., 状态包]，second 的前缀应包含 first 除状态包外的全部内容。
-	for index := 1; index < len(first)-1; index++ {
+	// first = [历史..., 状态包]，second 的前缀应包含 first 除状态包外的全部内容。
+	for index := 0; index < len(first)-1; index++ {
 		if first[index].Content != second[index].Content {
 			t.Fatalf("历史前缀第 %d 条发生变化", index)
 		}

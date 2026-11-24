@@ -19,6 +19,7 @@ const (
 
 type projectBatchCreateRequest struct {
 	Assets string `json:"assets"`
+	Goals  string `json:"goals"`
 }
 
 type projectBatchFailure struct {
@@ -68,6 +69,11 @@ func (h *BusinessHandler) CreateProjectsBatch(c *gin.Context) {
 		badRequest(c, "assets_limit", "单次最多创建 500 个项目")
 		return
 	}
+	goals := projectGoalsOrDefault(request.Goals)
+	if err := validateProjectBrief(goals, ""); err != nil {
+		badRequest(c, "invalid_project", err.Error())
+		return
+	}
 
 	result := projectBatchCreateResponse{
 		Duplicate: duplicate,
@@ -81,6 +87,7 @@ func (h *BusinessHandler) CreateProjectsBatch(c *gin.Context) {
 			ID:          randomID(),
 			OwnerUserID: user.ID,
 			Name:        truncateRunes(scope, 100),
+			Goals:       goals,
 			Scope:       scope,
 			Status:      "active",
 			CreatedAt:   now,

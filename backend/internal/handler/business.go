@@ -103,6 +103,12 @@ func NewBusinessHandler(
 const (
 	projectGoalsMaxRunes = 2000
 	projectScopeMaxRunes = 4000
+	defaultProjectGoals  = `资产扩展：可以扫描端口、可以扫描域名
+漏洞目标：任意有效的、可利用的漏洞。优先sql注入、未授权访问、信息泄露、文件上传、命令执行、反序列化
+权限目标：sql权限、web管理员权限、webshell、shell等。上传webshell、上传payload 不属于高危操作
+安全红线：
+- 禁止删除操作，如果需要清理痕迹让用户自己清理，给出清理清单即可；
+- 禁止修改密码，需要修改密码则让用户自己修改，或者请示用户后用户明确表示可以修改；`
 )
 
 var projectStatuses = map[string]bool{
@@ -134,6 +140,14 @@ func validateProjectBrief(goals, scope string) error {
 		return fmt.Errorf("资产范围不能超过 %d 个字符", projectScopeMaxRunes)
 	}
 	return nil
+}
+
+func projectGoalsOrDefault(value string) string {
+	goals := strings.TrimSpace(value)
+	if goals == "" {
+		return defaultProjectGoals
+	}
+	return goals
 }
 
 func (h *BusinessHandler) validateProjectReference(
@@ -189,7 +203,8 @@ func (h *BusinessHandler) CreateProject(c *gin.Context) {
 		badRequest(c, "invalid_project", "项目名称不能为空")
 		return
 	}
-	if err := validateProjectBrief(request.Goals, request.Scope); err != nil {
+	goals := projectGoalsOrDefault(request.Goals)
+	if err := validateProjectBrief(goals, request.Scope); err != nil {
 		badRequest(c, "invalid_project", err.Error())
 		return
 	}
@@ -204,7 +219,7 @@ func (h *BusinessHandler) CreateProject(c *gin.Context) {
 		OwnerUserID: user.ID,
 		Name:        truncateRunes(request.Name, 100),
 		Description: strings.TrimSpace(request.Description),
-		Goals:       strings.TrimSpace(request.Goals),
+		Goals:       goals,
 		Scope:       strings.TrimSpace(request.Scope),
 		Status:      status,
 		CreatedAt:   now,

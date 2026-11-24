@@ -126,6 +126,18 @@ async function logout() {
           </svg>
           <span>{{ t('nav.assets') }}</span>
         </RouterLink>
+        <RouterLink
+          v-if="auth.hasPermission('asset:read')"
+          class="nav-intel"
+          to="/intel-collection"
+        >
+          <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="11" cy="11" r="6" />
+            <path d="m16 16 4 4" />
+            <path d="M11 8v6M8 11h6" />
+          </svg>
+          <span>{{ t('nav.intelCollection') }}</span>
+        </RouterLink>
         <RouterLink v-if="auth.hasPermission('agentRole:read')" class="nav-roles" to="/roles">
           <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true">
             <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />

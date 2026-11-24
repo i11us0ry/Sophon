@@ -379,8 +379,16 @@ func (s *Service) startBackgroundOrchestrationWithFeedback(
 			_ = batcher.Close(closeCtx)
 		}()
 		_, runErr := s.runCoordinatedMissionLoop(ctx, execution, projectID, false, handle)
+		status, _ := handle.snapshot()["status"].(string)
+		if status != database.AgentOrchestrationPaused &&
+			status != database.AgentOrchestrationStopped {
+			terminalStatus := database.AgentOrchestrationCompleted
+			if runErr != nil {
+				terminalStatus = database.AgentOrchestrationFailed
+			}
+			s.enqueueOrchestrationUpdate(ctx, terminalStatus, runErr)
+		}
 		if runErr != nil {
-			status, _ := handle.snapshot()["status"].(string)
 			if status == database.AgentOrchestrationPaused ||
 				status == database.AgentOrchestrationStopped {
 				return
@@ -814,6 +822,51 @@ func (s *Service) controlOrchestration(
 	default:
 		return nil, fmt.Errorf(
 			"action 必须是 status/steer/steer_worker/stop_worker/pause/resume/resume_project/stop",
+		)
+	}
+}
+
+func fastModeOrchestratorActionAllowed(action string) bool {
+	switch strings.ToLower(strings.TrimSpace(action)) {
+	case "status", "worker_output", "worker_trace", "stop_worker", "stop":
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Service) pauseOrchestrationForSingleAgent(ctx context.Context, conversationID string) {
+	if s == nil {
+		return
+	}
+	if handle := s.orchestrationFor(conversationID); handle != nil {
+		status, _ := handle.snapshot()["status"].(string)
+		if status == database.AgentOrchestrationRunning {
+			_, _ = s.controlOrchestration(
+				ctx,
+				"pause",
+				"用户明确要求单 Agent 模式，后台编排已暂停",
+			)
+		}
+		return
+	}
+	if s.db == nil {
+		return
+	}
+	paused, err := s.db.PauseRunningAgentOrchestration(
+		ctx,
+		conversationID,
+		"用户明确要求单 Agent 模式，后台编排已暂停",
+	)
+	if err != nil || !paused {
+		return
+	}
+	if projectID := strings.TrimSpace(execctx.ProjectID(ctx)); projectID != "" {
+		_, _ = s.db.PauseRunningProjectHypothesesForConversation(
+			ctx,
+			projectID,
+			conversationID,
+			"用户明确要求单 Agent 模式，Worker 已释放为可恢复状态",
 		)
 	}
 }

@@ -6,6 +6,7 @@ import ChatView from '../views/ChatView.vue'
 import DashboardView from '../views/DashboardView.vue'
 import GovernanceView from '../views/GovernanceView.vue'
 import HomeView from '../views/HomeView.vue'
+import IntelCollectionView from '../views/IntelCollectionView.vue'
 import LoginView from '../views/LoginView.vue'
 import McpView from '../views/McpView.vue'
 import ProjectDetailView from '../views/ProjectDetailView.vue'
@@ -68,6 +69,12 @@ const router = createRouter({
       path: '/asset-management',
       name: 'asset-management',
       component: AssetView,
+      meta: { requiresAuth: true, permission: 'asset:read' },
+    },
+    {
+      path: '/intel-collection',
+      name: 'intel-collection',
+      component: IntelCollectionView,
       meta: { requiresAuth: true, permission: 'asset:read' },
     },
     {

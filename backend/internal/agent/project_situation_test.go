@@ -248,7 +248,8 @@ func TestMainAgentInstructionIncludesSituation(t *testing.T) {
 	if len(messages) == 0 {
 		t.Fatalf("模型消息为空")
 	}
-	system := messages[0].Content
+	assertNoSystemRoleMessages(t, messages)
+	system := service.mainAgentInstruction(ctx)
 	if !strings.Contains(system, "项目工具能力") {
 		t.Fatalf("稳定前缀应包含项目工具能力说明：\n%s", system)
 	}

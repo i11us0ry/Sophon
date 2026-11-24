@@ -1033,7 +1033,11 @@ func (s *Service) hypothesisWorkerPrompt(
 
 func (s *Service) prepareCoordinatedMission(ctx context.Context) (bool, error) {
 	execution, ok := missionExecutionFromContext(ctx)
-	if !ok || !execution.Plan.Coordinated || s == nil || s.db == nil {
+	if !ok ||
+		normalizeAgentMode(execution.AgentMode) == agentModeFast ||
+		!execution.Plan.Coordinated ||
+		s == nil ||
+		s.db == nil {
 		return false, nil
 	}
 	projectID := strings.TrimSpace(execctx.ProjectID(ctx))
@@ -1535,6 +1539,7 @@ func (s *Service) runCoordinatedWorkerLoop(
 					updated.StateReason,
 				)
 				if !requeued {
+					s.enqueueWorkerProactiveUpdate(ctx, *updated, state, reason)
 					s.emitWorkerTerminalTrigger(ctx, *updated, state, reason)
 				}
 			}

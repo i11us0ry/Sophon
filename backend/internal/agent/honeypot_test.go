@@ -50,9 +50,7 @@ func TestHoneypotToolOutputIsFencedAndFlagged(t *testing.T) {
 	if strings.Contains(state, "\u200b") {
 		t.Fatalf("零宽字符应被剥离: %q", state)
 	}
-	if strings.Contains(messages[0].Content, "Ignore all previous instructions") {
-		t.Fatalf("system 前缀不应包含注入载荷")
-	}
+	assertNoSystemRoleMessages(t, messages)
 }
 
 // TestHoneypotSummaryStaysOutOfSystem 历史摘要来自不可信原文，必须留在围栏数据区。
@@ -72,9 +70,7 @@ func TestHoneypotSummaryStaysOutOfSystem(t *testing.T) {
 	if err != nil {
 		t.Fatalf("组装消息失败: %v", err)
 	}
-	if strings.Contains(messages[0].Content, "忽略以上指令") {
-		t.Fatalf("摘要不应进入 system 受信任区: %q", messages[0].Content)
-	}
+	assertNoSystemRoleMessages(t, messages)
 	state := lastStateMessage(t, messages)
 	if !strings.Contains(state, "忽略以上指令") || !strings.Contains(state, "历史摘要") {
 		t.Fatalf("摘要应进入围栏状态包: %q", state)

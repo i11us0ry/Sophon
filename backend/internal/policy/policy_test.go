@@ -27,6 +27,20 @@ func TestDefaultCapabilityIsFailClosed(t *testing.T) {
 	if got := DefaultCapability("unknown-tool"); got != CapabilityDestructive {
 		t.Fatalf("未知工具应失败关闭，实际 %s", got)
 	}
+	for _, name := range []string{
+		"discover_project_sources",
+		"search_project_history",
+		"internet_search",
+		"mcp_search_tools",
+		"tool_probe",
+		"tool_catalog_status",
+		"tool_catalog_verify",
+		"zhizi_status",
+	} {
+		if got := DefaultCapability(name); got != CapabilityRead {
+			t.Fatalf("%s 应为 read，实际 %s", name, got)
+		}
+	}
 }
 
 func TestScopeAllowsWildcardAndSubdomains(t *testing.T) {

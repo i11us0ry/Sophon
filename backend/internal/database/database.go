@@ -157,6 +157,32 @@ func (db *DB) migrate(ctx context.Context) error {
 				updated_at INTEGER NOT NULL,
 				FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
 			)`,
+		`CREATE TABLE IF NOT EXISTS intel_settings (
+					id TEXT PRIMARY KEY,
+					enabled INTEGER NOT NULL DEFAULT 0,
+					fofa_email TEXT NOT NULL DEFAULT '',
+					fofa_key_cipher TEXT NOT NULL DEFAULT '',
+					hunter_key_cipher TEXT NOT NULL DEFAULT '',
+					updated_at INTEGER NOT NULL
+				)`,
+		`CREATE TABLE IF NOT EXISTS intel_searches (
+					id TEXT PRIMARY KEY,
+					owner_user_id TEXT NOT NULL,
+					project_id TEXT NOT NULL DEFAULT '',
+					provider TEXT NOT NULL,
+					query TEXT NOT NULL,
+					page INTEGER NOT NULL DEFAULT 1,
+					page_size INTEGER NOT NULL DEFAULT 20,
+					start_time TEXT NOT NULL DEFAULT '',
+					result_count INTEGER NOT NULL DEFAULT 0,
+					results_json TEXT NOT NULL,
+					provider_errors_json TEXT NOT NULL DEFAULT '[]',
+					created_at INTEGER NOT NULL
+				)`,
+		`CREATE INDEX IF NOT EXISTS idx_intel_searches_owner
+				 ON intel_searches(owner_user_id, created_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_intel_searches_project
+				 ON intel_searches(project_id, created_at DESC)`,
 		`CREATE TABLE IF NOT EXISTS zhizi_leases (
 				id TEXT PRIMARY KEY,
 				node_id TEXT NOT NULL,
@@ -508,6 +534,27 @@ func (db *DB) migrate(ctx context.Context) error {
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_triggers_dedupe
 		 ON agent_triggers(dedupe_key)
 		 WHERE dedupe_key <> ''`,
+		`CREATE TABLE IF NOT EXISTS background_update_events (
+				id TEXT PRIMARY KEY,
+				conversation_id TEXT NOT NULL,
+				project_id TEXT NOT NULL DEFAULT '',
+				owner_user_id TEXT NOT NULL,
+				kind TEXT NOT NULL,
+				priority INTEGER NOT NULL DEFAULT 50,
+				dedupe_key TEXT NOT NULL DEFAULT '',
+				payload_json TEXT NOT NULL DEFAULT '{}',
+				status TEXT NOT NULL DEFAULT 'pending',
+				attempts INTEGER NOT NULL DEFAULT 0,
+				not_before INTEGER NOT NULL,
+				created_at INTEGER NOT NULL,
+				processed_at INTEGER NOT NULL DEFAULT 0,
+				FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+			)`,
+		`CREATE INDEX IF NOT EXISTS idx_background_update_events_pending
+			 ON background_update_events(conversation_id, status, not_before, priority DESC, created_at ASC)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_background_update_events_dedupe
+			 ON background_update_events(conversation_id, dedupe_key)
+			 WHERE dedupe_key <> ''`,
 		`CREATE TABLE IF NOT EXISTS agent_planner_todos (
 			id TEXT PRIMARY KEY,
 			conversation_id TEXT NOT NULL,

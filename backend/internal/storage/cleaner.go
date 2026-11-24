@@ -48,6 +48,7 @@ var Categories = []Category{
 	{Name: "process_details", Label: "工具过程明细", Kind: CategoryKindDatabase, Table: "process_details", TimeColumn: "created_at"},
 	{Name: "context_compactions", Label: "上下文压缩记录", Kind: CategoryKindDatabase, Table: "context_compactions", TimeColumn: "created_at"},
 	{Name: "memory_writes", Label: "记忆写入审计", Kind: CategoryKindDatabase, Table: "memory_writes", TimeColumn: "created_at"},
+	{Name: "intel_searches", Label: "信息收集历史", Kind: CategoryKindDatabase, Table: "intel_searches", TimeColumn: "created_at"},
 	{
 		Name:       "reasoning_content",
 		Label:      "推理内容",

@@ -86,7 +86,8 @@ func TestDefaultSystemPromptKeepsExecutionBoundariesConcise(t *testing.T) {
 		"project_next_targets",
 		"pent_agent_execute",
 		"read_skill",
-		"只有用户明确表示“不需要 Worker”或等价指令时，主 Agent 才自行执行",
+		"单 Agent 模式由主 Agent 直接执行",
+		"单 Agent 模式禁止调用这些入口",
 		"工具失败时先判断错误类型和可修复性",
 		"不得用等价方式绕过授权、拦截或人工审批",
 	} {

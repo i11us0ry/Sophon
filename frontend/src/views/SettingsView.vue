@@ -78,6 +78,26 @@ interface LLMKeyItem {
   checkedAt?: string
 }
 
+interface IntelStatus {
+  status: string
+  message?: string
+  checkedAt?: string
+}
+
+interface IntelSettingsResponse {
+  enabled: boolean
+  fofaEmail: string
+  fofaKeyMasked: string
+  hunterKeyMasked: string
+  fofaConfigured: boolean
+  hunterConfigured: boolean
+  updatedAt?: string
+  statuses: {
+    fofa: IntelStatus
+    hunter: IntelStatus
+  }
+}
+
 interface StorageCategory {
   name: string
   label: string
@@ -107,7 +127,7 @@ const deletingLLMKeyId = ref('')
 const newLLMKeysInput = ref('')
 const llmKeyAddOpen = ref(false)
 const activeSection = ref<
-  'basic' | 'llm' | 'proxy' | 'agent' | 'tools' | 'security' | 'storage' | 'intercept'
+  'basic' | 'llm' | 'proxy' | 'intel' | 'agent' | 'tools' | 'security' | 'storage' | 'intercept'
 >('basic')
 const profileSaving = ref(false)
 const profile = reactive({
@@ -192,6 +212,22 @@ const form = reactive({
   proxyNoProxy: 'localhost,127.0.0.1,::1',
 })
 const proxyPasswordInput = ref('')
+const intelSaving = ref(false)
+const intelTesting = ref('')
+const intel = reactive({
+  enabled: false,
+  fofaEmail: '',
+  fofaKeyMasked: '',
+  hunterKeyMasked: '',
+  fofaConfigured: false,
+  hunterConfigured: false,
+  fofaKeyInput: '',
+  hunterKeyInput: '',
+  statuses: {
+    fofa: { status: 'unknown' } as IntelStatus,
+    hunter: { status: 'unknown' } as IntelStatus,
+  },
+})
 
 const modelOptions = ref<Array<{ id: string; name?: string }>>([])
 const modelFetching = ref(false)
@@ -231,6 +267,12 @@ const navGroups = computed(() => [
         key: 'tools' as const,
         label: t('settings.toolsSection'),
         code: 'TOOL',
+        visible: canReadSettings.value,
+      },
+      {
+        key: 'intel' as const,
+        label: t('settings.intelSection'),
+        code: 'INTEL',
         visible: canReadSettings.value,
       },
     ],
@@ -341,7 +383,7 @@ async function load() {
     form.proxyUsername = values.proxy.username
     form.proxyNoProxy = values.proxy.noProxy
     proxyPasswordInput.value = ''
-    await loadLLMKeys()
+    await Promise.all([loadLLMKeys(), loadIntelSettings()])
   } catch (err) {
     error.value = err instanceof Error ? err.message : t('message.readSettingsFailed')
   } finally {
@@ -555,6 +597,106 @@ function llmKeyStatusLabel(item: LLMKeyItem) {
 
 function llmKeyStatusClass(item: LLMKeyItem) {
   return item.status === 'healthy' ? 'ok' : item.status === 'error' ? 'error' : 'muted'
+}
+
+async function loadIntelSettings() {
+  if (!canReadSettings.value) {
+    return
+  }
+  try {
+    const response = await apiGet<IntelSettingsResponse>('/settings/intel')
+    intel.enabled = response.enabled
+    intel.fofaEmail = response.fofaEmail ?? ''
+    intel.fofaKeyMasked = response.fofaKeyMasked ?? ''
+    intel.hunterKeyMasked = response.hunterKeyMasked ?? ''
+    intel.fofaConfigured = response.fofaConfigured
+    intel.hunterConfigured = response.hunterConfigured
+    intel.statuses = response.statuses ?? {
+      fofa: { status: 'unknown' },
+      hunter: { status: 'unknown' },
+    }
+    intel.fofaKeyInput = ''
+    intel.hunterKeyInput = ''
+  } catch (err) {
+    throw err
+  }
+}
+
+async function saveIntelSettings(extra: Record<string, unknown> = {}) {
+  if (!canWriteSettings.value || intelSaving.value) {
+    return
+  }
+  intelSaving.value = true
+  error.value = ''
+  notice.value = ''
+  try {
+    await apiPut('/settings/intel', {
+      enabled: intel.enabled,
+      fofaEmail: intel.fofaEmail.trim(),
+      fofaKey: intel.fofaKeyInput.trim(),
+      hunterKey: intel.hunterKeyInput.trim(),
+      ...extra,
+    })
+    await loadIntelSettings()
+    notice.value = t('settings.intelSaved')
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : t('settings.intelSaveFailed')
+  } finally {
+    intelSaving.value = false
+  }
+}
+
+async function clearIntelKey(provider: 'fofa' | 'hunter') {
+  const masked = provider === 'fofa' ? intel.fofaKeyMasked : intel.hunterKeyMasked
+  if (!window.confirm(t('settings.intelClearConfirm', { key: masked || provider }))) {
+    return
+  }
+  await saveIntelSettings(
+    provider === 'fofa' ? { clearFofaKey: true } : { clearHunterKey: true },
+  )
+}
+
+async function testIntelProvider(provider: 'fofa' | 'hunter') {
+  if (!canWriteSettings.value || intelTesting.value) {
+    return
+  }
+  intelTesting.value = provider
+  error.value = ''
+  notice.value = ''
+  try {
+    const response = await apiPost<{ status: string; message?: string }>(
+      '/settings/intel/test',
+      { provider },
+    )
+    intel.statuses[provider] = {
+      status: response.status,
+      message: response.message,
+      checkedAt: new Date().toISOString(),
+    }
+    notice.value =
+      response.status === 'healthy'
+        ? t('settings.intelTestHealthy')
+        : response.message || t('settings.intelTestFailed')
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : t('settings.intelTestFailed')
+  } finally {
+    intelTesting.value = ''
+  }
+}
+
+function intelStatusLabel(status: IntelStatus) {
+  switch (status.status) {
+    case 'healthy':
+      return t('settings.llmKeyStatusHealthy')
+    case 'error':
+      return t('settings.llmKeyStatusError')
+    default:
+      return t('settings.llmKeyStatusUnknown')
+  }
+}
+
+function intelStatusClass(status: IntelStatus) {
+  return status.status === 'healthy' ? 'ok' : status.status === 'error' ? 'error' : 'muted'
 }
 
 async function changePassword() {
@@ -1254,6 +1396,100 @@ onMounted(async () => {
             :disabled="locked('hitl.timeoutSeconds') || !writable"
           />
         </label>
+      </article>
+
+      <article v-show="activeSection === 'intel'" class="business-card">
+        <h2>{{ t('settings.intelSection') }}</h2>
+        <label class="checkbox-line">
+          <input v-model="intel.enabled" type="checkbox" :disabled="!canWriteSettings" />
+          <span>{{ t('settings.intelEnabled') }}</span>
+        </label>
+        <label class="field">
+          <span>{{ t('settings.intelFOFAEmail') }}</span>
+          <input v-model="intel.fofaEmail" type="email" maxlength="254" :disabled="!canWriteSettings" />
+        </label>
+        <div class="field">
+          <span>{{ t('settings.intelFOFAKey') }}</span>
+          <input
+            v-model="intel.fofaKeyInput"
+            type="password"
+            autocomplete="new-password"
+            maxlength="4096"
+            :disabled="!canWriteSettings"
+            :placeholder="intel.fofaKeyMasked || t('settings.intelKeyPlaceholder')"
+          />
+          <div class="settings-inline-actions">
+            <code v-if="intel.fofaKeyMasked" class="llm-key-mask">{{ intel.fofaKeyMasked }}</code>
+            <span class="llm-key-status" :class="intelStatusClass(intel.statuses.fofa)">
+              {{ intelStatusLabel(intel.statuses.fofa) }}
+            </span>
+            <button
+              class="button compact"
+              type="button"
+              :disabled="!canWriteSettings || !!intelTesting || !intel.fofaConfigured"
+              @click="testIntelProvider('fofa')"
+            >
+              {{ intelTesting === 'fofa' ? t('settings.intelTesting') : t('settings.intelTest') }}
+            </button>
+            <button
+              class="button compact danger"
+              type="button"
+              :disabled="!canWriteSettings || intelSaving || !intel.fofaConfigured"
+              @click="clearIntelKey('fofa')"
+            >
+              {{ t('settings.intelClear') }}
+            </button>
+          </div>
+          <small v-if="intel.statuses.fofa.message" class="field-hint">
+            {{ intel.statuses.fofa.message }}
+          </small>
+        </div>
+        <div class="field">
+          <span>{{ t('settings.intelHunterKey') }}</span>
+          <input
+            v-model="intel.hunterKeyInput"
+            type="password"
+            autocomplete="new-password"
+            maxlength="4096"
+            :disabled="!canWriteSettings"
+            :placeholder="intel.hunterKeyMasked || t('settings.intelKeyPlaceholder')"
+          />
+          <div class="settings-inline-actions">
+            <code v-if="intel.hunterKeyMasked" class="llm-key-mask">{{ intel.hunterKeyMasked }}</code>
+            <span class="llm-key-status" :class="intelStatusClass(intel.statuses.hunter)">
+              {{ intelStatusLabel(intel.statuses.hunter) }}
+            </span>
+            <button
+              class="button compact"
+              type="button"
+              :disabled="!canWriteSettings || !!intelTesting || !intel.hunterConfigured"
+              @click="testIntelProvider('hunter')"
+            >
+              {{ intelTesting === 'hunter' ? t('settings.intelTesting') : t('settings.intelTest') }}
+            </button>
+            <button
+              class="button compact danger"
+              type="button"
+              :disabled="!canWriteSettings || intelSaving || !intel.hunterConfigured"
+              @click="clearIntelKey('hunter')"
+            >
+              {{ t('settings.intelClear') }}
+            </button>
+          </div>
+          <small v-if="intel.statuses.hunter.message" class="field-hint">
+            {{ intel.statuses.hunter.message }}
+          </small>
+        </div>
+        <div class="settings-save-row">
+          <button
+            class="button"
+            type="button"
+            :disabled="!canWriteSettings || intelSaving"
+            @click="saveIntelSettings()"
+          >
+            {{ intelSaving ? t('common.saving') : t('common.save') }}
+          </button>
+        </div>
       </article>
 
           <div

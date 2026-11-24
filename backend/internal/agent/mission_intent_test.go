@@ -2430,3 +2430,58 @@ func missionToolNames(t *testing.T, items []tool.BaseTool) map[string]bool {
 	}
 	return names
 }
+
+func TestFastModeMissionToolDecisionBlocksDelegation(t *testing.T) {
+	service := newSubAgentTestService(t)
+	ctx := context.Background()
+	ctx = execctx.WithRunMode(ctx, agentModeFast)
+	ctx = withMissionExecution(ctx, missionExecution{
+		Plan:      missionPlan{Mode: missionModeAgent, ProjectScope: true},
+		AgentMode: agentModeFast,
+	})
+
+	if allowed, reason := service.missionToolDecision(ctx, pentToolExecute, nil); allowed {
+		t.Fatalf("单 Agent 模式不应允许子 Agent 入口: %s", reason)
+	}
+	if allowed, reason := service.missionToolDecision(
+		ctx,
+		orchestratorControlToolName,
+		map[string]interface{}{"action": "resume_project"},
+	); allowed {
+		t.Fatalf("单 Agent 模式不应允许恢复协调任务: %s", reason)
+	}
+	if allowed, reason := service.missionToolDecision(
+		ctx,
+		orchestratorControlToolName,
+		map[string]interface{}{"action": "status"},
+	); !allowed {
+		t.Fatalf("单 Agent 模式应允许查看历史 Worker 状态: %s", reason)
+	}
+}
+
+func TestMainAgentInstructionUsesSingleRolePrompt(t *testing.T) {
+	service := &Service{}
+	fastCtx := withMissionExecution(context.Background(), missionExecution{
+		Plan:      missionPlan{Mode: missionModeAgent},
+		AgentMode: agentModeFast,
+	})
+	fastInstruction := service.mainAgentInstruction(fastCtx)
+	if !strings.Contains(fastInstruction, "【单 Agent 模式约束】") {
+		t.Fatalf("单 Agent 指令缺少模式约束")
+	}
+	if strings.Contains(fastInstruction, "人类操作员与 Planner/Worker 之间的接口") {
+		t.Fatalf("单 Agent 指令不应同时包含协调者角色")
+	}
+
+	coordinatedCtx := withMissionExecution(context.Background(), missionExecution{
+		Plan:      missionPlan{Mode: missionModeAgent, Coordinated: true},
+		AgentMode: agentModeDeep,
+	})
+	coordinatedInstruction := service.mainAgentInstruction(coordinatedCtx)
+	if !strings.Contains(coordinatedInstruction, "人类操作员与 Planner/Worker 之间的接口") {
+		t.Fatalf("协调模式指令缺少协调者角色")
+	}
+	if strings.Contains(coordinatedInstruction, "【单 Agent 模式约束】") {
+		t.Fatalf("协调模式指令不应同时包含单 Agent 角色")
+	}
+}

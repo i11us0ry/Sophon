@@ -2,13 +2,9 @@ package database
 
 import (
 	"context"
-	"crypto/aes"
-	"crypto/cipher"
 	"crypto/rand"
-	"encoding/base64"
 	"fmt"
 	"os"
-	"strings"
 )
 
 const (
@@ -56,55 +52,17 @@ func loadOrCreateJobKey(path string) ([]byte, error) {
 }
 
 func (db *DB) encryptJobSteps(raw string) (string, error) {
-	if db == nil || len(db.jobKey) != jobKeyBytes {
+	if db == nil {
 		return "", fmt.Errorf("Job 加密密钥不可用")
 	}
-	block, err := aes.NewCipher(db.jobKey)
-	if err != nil {
-		return "", err
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return "", err
-	}
-	nonce := make([]byte, gcm.NonceSize())
-	if _, err := rand.Read(nonce); err != nil {
-		return "", err
-	}
-	sealed := gcm.Seal(nonce, nonce, []byte(raw), nil)
-	return jobCipherPrefix + base64.RawStdEncoding.EncodeToString(sealed), nil
+	return sealSecret(db.jobKey, raw, jobCipherPrefix)
 }
 
 func (db *DB) decryptJobSteps(value string) (string, error) {
-	value = strings.TrimSpace(value)
-	if !strings.HasPrefix(value, jobCipherPrefix) {
-		// 兼容升级前已经落库的明文 Job。
-		return value, nil
-	}
-	if db == nil || len(db.jobKey) != jobKeyBytes {
+	if db == nil {
 		return "", fmt.Errorf("Job 加密密钥不可用")
 	}
-	payload, err := base64.RawStdEncoding.DecodeString(strings.TrimPrefix(value, jobCipherPrefix))
-	if err != nil {
-		return "", fmt.Errorf("Job 步骤密文损坏: %w", err)
-	}
-	block, err := aes.NewCipher(db.jobKey)
-	if err != nil {
-		return "", err
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return "", err
-	}
-	if len(payload) < gcm.NonceSize() {
-		return "", fmt.Errorf("Job 步骤密文长度不足")
-	}
-	nonce, ciphertext := payload[:gcm.NonceSize()], payload[gcm.NonceSize():]
-	plain, err := gcm.Open(nil, nonce, ciphertext, nil)
-	if err != nil {
-		return "", fmt.Errorf("Job 步骤解密失败: %w", err)
-	}
-	return string(plain), nil
+	return openSecret(db.jobKey, value, jobCipherPrefix, "Job 步骤")
 }
 
 func (db *DB) encryptLegacyToolJobSteps(ctx context.Context) error {

@@ -77,15 +77,9 @@ func TestTaskProfileInstructionIncludesPromptAndSkills(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build model messages: %v", err)
 	}
-	systemPrompt := messages[0].Content
-	if !strings.Contains(systemPrompt, defaultSystemPrompt) {
-		t.Fatalf("绑定角色后不应丢失平台默认 Prompt")
-	}
-	if strings.Contains(systemPrompt, "你是测试角色。") {
-		t.Fatalf("Task Profile 不应作为 system 身份注入: %q", systemPrompt)
-	}
+	assertNoSystemRoleMessages(t, messages)
 	stateFound := false
-	for _, message := range messages[1:] {
+	for _, message := range messages {
 		if strings.Contains(message.Content, "你是测试角色。") {
 			stateFound = true
 			break

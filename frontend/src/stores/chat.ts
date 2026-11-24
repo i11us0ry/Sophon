@@ -553,7 +553,7 @@ export const useChatStore = defineStore('chat', {
       return this.rolesLoaded ? { roleId: this.selectedRoleId } : {}
     },
     agentModeRequestPayload() {
-      return { agentMode: 'deep' as AgentMode }
+      return { agentMode: this.agentMode }
     },
     selectTaskProfile(roleId: string) {
       this.selectedRoleId = roleId
@@ -1160,6 +1160,13 @@ export const useChatStore = defineStore('chat', {
       this.agentEventsConnected = false
     },
     mergeAgentEventDetails(items: ProcessDetail[]) {
+      if (
+        items.some((item) => item.eventType === 'main_agent.proactive') &&
+        !this.streaming
+      ) {
+        void this.loadLatestMessages()
+        void this.loadConversations()
+      }
       const bySession = new Map<string, ProcessDetail[]>()
       for (const item of items) {
         const sessionId = String(item.sessionId || '').trim()
@@ -1464,7 +1471,9 @@ export const useChatStore = defineStore('chat', {
         if (this.currentConversationId === conversationId) {
           this.autoContinue = response.autoContinue
           this.assetRestrictionEnabled = response.assetRestrictionEnabled
-          this.agentMode = 'deep'
+          this.agentMode = response.agentMode === 'fast' || response.agentMode === 'auto'
+            ? response.agentMode
+            : 'deep'
         }
       } catch {
         // 读取失败时保持默认自动继续，不影响对话主流程

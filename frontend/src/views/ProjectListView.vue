@@ -326,7 +326,7 @@ async function run(action: () => Promise<void>, successText = '') {
 function resetCreateDraft() {
   createDraft.name = ''
   createDraft.description = ''
-  createDraft.goals = ''
+  createDraft.goals = t('project.defaultGoals')
   createDraft.scope = ''
   createDraft.status = 'active'
 }
@@ -453,6 +453,7 @@ async function createProjectsBatch() {
   try {
     const result = await apiPost<ProjectBatchResult>('/projects/batch', {
       assets: batchDraft.assets,
+      goals: t('project.defaultGoals'),
     })
     showBatchCreate.value = false
     batchDraft.assets = ''

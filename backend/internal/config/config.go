@@ -208,6 +208,7 @@ func defaultStorageConfig() StorageConfig {
 			"reasoning_content":      {Enabled: true, RetentionDays: 30},
 			"context_compactions":    {Enabled: true, RetentionDays: 180},
 			"memory_writes":          {Enabled: true, RetentionDays: 180},
+			"intel_searches":         {Enabled: true, RetentionDays: 90},
 			"workspace":              {Enabled: true, RetentionDays: 30, Path: "tmp/workspace"},
 			"reduction":              {Enabled: true, RetentionDays: 7, Path: "tmp/reduction"},
 			"conversation_artifacts": {Enabled: true, RetentionDays: 30, Path: "data/conversation_artifacts"},

@@ -208,9 +208,7 @@ func TestBuildModelMessagesInjectsToolDigest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("组装模型消息失败: %v", err)
 	}
-	if len(messages) == 0 || messages[0].Role != schema.System {
-		t.Fatalf("首条消息应为系统提示: %+v", messages)
-	}
+	assertNoSystemRoleMessages(t, messages)
 	state := lastStateMessage(t, messages)
 	if !strings.Contains(state, "最近工具执行记录") || !strings.Contains(state, "calculator") {
 		t.Fatalf("状态包未注入工具摘要: %q", state)

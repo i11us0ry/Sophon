@@ -83,6 +83,7 @@ func (t *observedTool) InvokableRun(
 			}
 			t.service.storeTurnToolCache(ctx, t.name, cacheKind, result)
 			result = t.withEvidenceFooter(ctx, argumentsInJSON, result, startedAt)
+			t.service.maybeEnqueueProactiveToolUpdate(ctx, t.name, result)
 		}
 		return result, err
 	}
@@ -98,6 +99,7 @@ func (t *observedTool) InvokableRun(
 		}
 		t.service.storeTurnToolCache(ctx, t.name, cacheKind, result)
 		result = t.withEvidenceFooter(ctx, argumentsInJSON, result, startedAt)
+		t.service.maybeEnqueueProactiveToolUpdate(ctx, t.name, result)
 	}
 	duration := time.Since(startedAt).Milliseconds()
 	event := agentEvent(ctx, observability.TypeToolCompleted)

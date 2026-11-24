@@ -211,7 +211,7 @@ func summarizeAgentRoleBody(body []byte) string {
 
 func sensitiveAuditBodyRoute(route string) bool {
 	switch route {
-	case "/api/settings/llm/keys":
+	case "/api/settings/llm/keys", "/api/settings/intel":
 		return true
 	default:
 		return false

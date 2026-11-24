@@ -794,7 +794,7 @@ func TestResumeProjectRestoresAllPausedOrchestrationsAndHonorsConcurrency(t *tes
 	}
 }
 
-func TestAgentModeDoesNotHideSubAgentTools(t *testing.T) {
+func TestSingleAgentModeHidesDelegationButKeepsDirectTools(t *testing.T) {
 	service := newSubAgentTestService(t)
 	ctx := context.Background()
 
@@ -806,8 +806,13 @@ func TestAgentModeDoesNotHideSubAgentTools(t *testing.T) {
 		}
 	}
 	for _, name := range subAgentToolNames {
+		if fastNames[name] {
+			t.Fatalf("单 Agent 模式不应暴露子 Agent 工具 %s", name)
+		}
+	}
+	for _, name := range []string{readSkillToolName, orchestratorControlToolName} {
 		if !fastNames[name] {
-			t.Fatalf("主 Agent 应始终可选择子 Agent 工具 %s", name)
+			t.Fatalf("单 Agent 模式应保留直接工具 %s", name)
 		}
 	}
 
@@ -822,6 +827,130 @@ func TestAgentModeDoesNotHideSubAgentTools(t *testing.T) {
 		if !deepNames[name] {
 			t.Fatalf("Deep Path 缺少子 Agent 工具 %s", name)
 		}
+	}
+}
+
+func TestFastModeDisablesCoordinatedPlanAndOrchestration(t *testing.T) {
+	plan := missionPlan{Mode: missionModeAgent, Coordinated: true}
+	if got := applyAgentModePolicy(agentModeFast, plan); got.Coordinated {
+		t.Fatal("单 Agent 模式应关闭协调计划")
+	}
+	if got := applyAgentModePolicy(agentModeDeep, plan); !got.Coordinated {
+		t.Fatal("Deep 模式不应修改协调计划")
+	}
+
+	service := newSubAgentTestService(t)
+	ctx := context.Background()
+	ctx = execctx.WithConversationID(ctx, "conv-fast")
+	ctx = execctx.WithUserID(ctx, "user-1")
+	ctx = execctx.WithProjectID(ctx, "project-fast")
+	ctx = execctx.WithRunID(ctx, "run-fast")
+	ctx = execctx.WithRunMode(ctx, agentModeFast)
+	ctx = withMissionExecution(ctx, missionExecution{
+		Plan:      plan,
+		AgentMode: agentModeFast,
+	})
+	started, err := service.prepareCoordinatedMission(ctx)
+	if err != nil {
+		t.Fatalf("单 Agent 模式准备协调任务不应报错: %v", err)
+	}
+	if started {
+		t.Fatal("单 Agent 模式不应启动后台协调任务")
+	}
+	if handle := service.orchestrationFor("conv-fast"); handle != nil {
+		t.Fatal("单 Agent 模式不应创建 orchestration handle")
+	}
+}
+
+func TestFastModeOrchestratorActions(t *testing.T) {
+	for _, action := range []string{"status", "worker_output", "worker_trace", "stop_worker", "stop"} {
+		if !fastModeOrchestratorActionAllowed(action) {
+			t.Fatalf("单 Agent 模式应允许 orchestration 动作 %s", action)
+		}
+	}
+	for _, action := range []string{"resume", "resume_project", "steer", "steer_worker"} {
+		if fastModeOrchestratorActionAllowed(action) {
+			t.Fatalf("单 Agent 模式不应允许 orchestration 动作 %s", action)
+		}
+	}
+}
+
+func TestExplicitSingleAgentRequestOverridesDeepMode(t *testing.T) {
+	for _, message := range []string{
+		"单agent模式，验证漏洞",
+		"请使用单 Agent 模式处理",
+		"仅使用主 Agent",
+		"不要 Worker",
+		"use single agent mode",
+		"no planner",
+	} {
+		if !isExplicitSingleAgentRequest(message) {
+			t.Fatalf("应识别为单 Agent 请求: %q", message)
+		}
+		if got := applyExplicitSingleAgentMode(message, agentModeDeep); got != agentModeFast {
+			t.Fatalf("单 Agent 请求应覆盖 Deep 模式: message=%q mode=%s", message, got)
+		}
+	}
+	if got := applyExplicitSingleAgentMode("验证漏洞是否存在", agentModeDeep); got != agentModeDeep {
+		t.Fatalf("普通请求不应修改 Deep 模式: %s", got)
+	}
+}
+
+func TestPauseOrchestrationForExplicitSingleAgent(t *testing.T) {
+	service := newSubAgentTestService(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	if err := service.db.CreateConversation(ctx, database.Conversation{
+		ID:          "conv-single-intent",
+		OwnerUserID: "user-1",
+		Title:       "single intent",
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}); err != nil {
+		t.Fatalf("创建测试会话失败: %v", err)
+	}
+	if err := service.db.UpsertAgentOrchestration(ctx, database.AgentOrchestration{
+		ConversationID: "conv-single-intent",
+		ProjectID:      "project-single-intent",
+		OwnerUserID:    "user-1",
+		Status:         database.AgentOrchestrationRunning,
+		AgentMode:      agentModeDeep,
+	}); err != nil {
+		t.Fatalf("创建测试编排失败: %v", err)
+	}
+	ctx = execctx.WithConversationID(ctx, "conv-single-intent")
+	ctx = execctx.WithProjectID(ctx, "project-single-intent")
+	ctx = execctx.WithUserID(ctx, "user-1")
+	service.pauseOrchestrationForSingleAgent(ctx, "conv-single-intent")
+	var status string
+	if err := service.db.QueryRowContext(
+		ctx,
+		`SELECT status FROM agent_orchestrations WHERE conversation_id = ?`,
+		"conv-single-intent",
+	).Scan(&status); err != nil {
+		t.Fatalf("读取编排状态失败: %v", err)
+	}
+	if status != database.AgentOrchestrationPaused {
+		t.Fatalf("单 Agent 请求应暂停旧编排，实际状态 %s", status)
+	}
+	if _, err := service.db.ExecContext(
+		ctx,
+		`UPDATE agent_orchestrations SET status = ? WHERE conversation_id = ?`,
+		database.AgentOrchestrationStopped,
+		"conv-single-intent",
+	); err != nil {
+		t.Fatalf("设置停止状态失败: %v", err)
+	}
+	service.pauseOrchestrationForSingleAgent(ctx, "conv-single-intent")
+	if err := service.db.QueryRowContext(
+		ctx,
+		`SELECT status FROM agent_orchestrations WHERE conversation_id = ?`,
+		"conv-single-intent",
+	).Scan(&status); err != nil {
+		t.Fatalf("再次读取编排状态失败: %v", err)
+	}
+	if status != database.AgentOrchestrationStopped {
+		t.Fatalf("已停止的编排不应被改成可恢复状态，实际 %s", status)
 	}
 }
 
@@ -1509,8 +1638,8 @@ func TestAutomaticAndResolvedAgentModes(t *testing.T) {
 	if mode := resolveAgentMode(agentModeDeep, agentModeFast, single); mode != agentModeDeep {
 		t.Fatalf("用户显式选择应覆盖角色默认值，实际 %s", mode)
 	}
-	if mode := resolveAgentMode(agentModeFast, agentModeFast, single); mode != agentModeDeep {
-		t.Fatalf("历史单 Agent 配置也应固定为多 Agent，实际 %s", mode)
+	if mode := resolveAgentMode(agentModeFast, agentModeFast, single); mode != agentModeFast {
+		t.Fatalf("用户显式选择单 Agent 应被尊重，实际 %s", mode)
 	}
 	codeAudit := missionPlan{
 		Mode:        missionModeCodeAudit,

@@ -347,6 +347,8 @@ Sophon 仅允许用于本公司、本组织拥有或明确控制的系统，以�
 - 20261113: 新增智子分身功能、修复一些小bug
 - 20261122: 解耦系统 Agent 与业务角色，新增可选 Task Profile/方法包机制
 - 20261124:
+  - 新增顶级“信息收集”菜单，支持 FOFA/Hunter 手动查询、历史记录、删除和导入项目资产
+  - 新增信息设置与 Agent 内置 `intel_search`，情报 Key 加密保存；查询历史默认保留 90 天
   - 新增 Agent 工具自主补齐、Tool Catalog 快速安装、工具注册表和动态 PATH
   - 新增会话/项目/用户全局工具作用域，以及已注册工具的 `tool_run`
   - 新增 Planner/Worker 扩散与变换思维准则
@@ -697,6 +699,8 @@ This statement is not legal advice and does not replace a formal authorization d
 - 20261113: Added the Zhizi Clone feature and fixed minor bugs.
 - 20261122: Decoupled system Agents from business roles and added optional Task Profiles/method packs.
 - 20261124:
+  - Added a top-level Intel Collection page with manual FOFA/Hunter searches, history, deletion, and project asset import.
+  - Added encrypted Intel settings and the built-in `intel_search` Agent tool; query history is retained for 90 days by default.
   - Added Agent-managed tool provisioning, Tool Catalog fast install, tool registration, and dynamic PATH.
   - Added session/project/user-global tool scopes and registered-tool execution through `tool_run`.
   - Added divergent and adaptive reasoning guidance for Planner and Worker.

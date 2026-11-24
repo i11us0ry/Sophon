@@ -101,6 +101,14 @@ func RoutePermission(method, path string) string {
 			return "settings:read"
 		}
 		return "settings:write"
+	case strings.HasPrefix(path, "/api/intel"):
+		if method == http.MethodDelete {
+			return "asset:delete"
+		}
+		if method == http.MethodGet || method == http.MethodHead {
+			return "asset:read"
+		}
+		return "asset:write"
 	case strings.HasPrefix(path, "/api/workspace"):
 		if method == http.MethodGet || method == http.MethodHead {
 			return "settings:read"

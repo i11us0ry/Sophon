@@ -155,6 +155,36 @@ func (db *DB) UpdateAgentOrchestrationState(
 	return nil
 }
 
+func (db *DB) PauseRunningAgentOrchestration(
+	ctx context.Context,
+	conversationID string,
+	reason string,
+) (bool, error) {
+	conversationID = strings.TrimSpace(conversationID)
+	if conversationID == "" {
+		return false, fmt.Errorf("编排会话不能为空")
+	}
+	result, err := db.ExecContext(
+		ctx,
+		`UPDATE agent_orchestrations
+		 SET status = ?, last_error = ?, updated_at = ?
+		 WHERE conversation_id = ? AND status = ?`,
+		AgentOrchestrationPaused,
+		strings.TrimSpace(reason),
+		time.Now().UTC().Unix(),
+		conversationID,
+		AgentOrchestrationRunning,
+	)
+	if err != nil {
+		return false, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return affected > 0, nil
+}
+
 func (db *DB) ListRecoverableAgentOrchestrations(
 	ctx context.Context,
 ) ([]AgentOrchestration, error) {

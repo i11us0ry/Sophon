@@ -1897,7 +1897,7 @@ func missionPlanGuidance(plan missionPlan, phase string) string {
 	}
 	return "\n\n【执行上下文】\n" +
 		"当前用户、项目、目标、附件、finding 和项目状态仅作为上下文。" +
-		"你可以直接执行，也可以按需调用 Planner、Worker 或其他子 Agent；执行流程由你决定。"
+		"执行方式必须服从当前 Agent 模式约束；完成当前任务后停止。"
 }
 
 func formatMissionTargets(plan missionPlan) string {
@@ -1924,7 +1924,12 @@ func agentInstructionForMission(
 ) string {
 	_ = ctx
 	if !plan.Coordinated {
-		return agentInstructionForMode(mode) + missionPlanGuidance(plan, phase)
+		instruction := agentInstructionForMode(mode) + missionPlanGuidance(plan, phase)
+		if normalizeAgentMode(mode) == agentModeFast {
+			instruction += "\n\n【单 Agent 模式强制约束】\n" +
+				"禁止调用 Planner、Worker、pent_agent_*，禁止启动或恢复后台 Planner/Worker 编排。"
+		}
+		return instruction
 	}
 	var builder strings.Builder
 	builder.WriteString(coordinatedMainAgentPrompt)
@@ -1961,10 +1966,17 @@ func (s *Service) mainAgentInstruction(ctx context.Context) string {
 	); strings.TrimSpace(policyPrompt) != "" {
 		instruction += "\n\n" + policyPrompt
 	}
+	conversationID := strings.TrimSpace(execctx.ConversationID(ctx))
+	userID := strings.TrimSpace(execctx.UserID(ctx))
+	if s != nil && s.db != nil && conversationID != "" && userID != "" {
+		if conversation, err := s.db.GetConversation(ctx, conversationID, userID); err == nil &&
+			strings.TrimSpace(conversation.ProjectID) != "" {
+			instruction += projectWritebackGuidance
+		}
+	}
+	instruction += untrustedContextGuidance
 	execution, coordinated := missionExecutionFromContext(ctx)
 	if s != nil && s.db != nil && (!coordinated || !execution.Plan.Coordinated) {
-		conversationID := strings.TrimSpace(execctx.ConversationID(ctx))
-		userID := strings.TrimSpace(execctx.UserID(ctx))
 		if conversationID != "" && userID != "" {
 			if state, err := s.db.GetZhiziConversationState(ctx, conversationID, userID); err == nil &&
 				state.Enabled && state.Lease != nil {
@@ -2278,6 +2290,7 @@ func missionStageIsLocalAnalysis(plan missionPlan, phase string) bool {
 func assetInventoryToolAllowed(name string) bool {
 	switch name {
 	case "project_list", "project_get", "project_list_assets", "project_insert_assets", "project_asset_card",
+		intelSearchToolName,
 		"project_list_facts", "project_query_memory", "project_list_findings", "project_get_finding",
 		"project_next_targets", "project_list_hypotheses", "project_list_entities",
 		"project_memory_graph", "project_conversation_entities", "project_fact_audit",
@@ -2291,7 +2304,7 @@ func assetInventoryToolAllowed(name string) bool {
 
 func generalMissionToolAllowed(name string) bool {
 	switch name {
-	case readSkillToolName, "read_artifact", internetSearchToolName,
+	case readSkillToolName, "read_artifact", internetSearchToolName, intelSearchToolName,
 		"project_list", "project_get", "project_list_assets", "project_asset_card", "project_list_facts",
 		"project_list_findings", "project_get_finding", "project_next_targets", "project_list_hypotheses",
 		"project_list_entities", "project_memory_graph", "project_conversation_entities",
@@ -2323,7 +2336,7 @@ func (s *Service) activeToolsForMission(
 	_ string,
 ) []tool.BaseTool {
 	items := s.activeToolsForMode(ctx, mode)
-	if !plan.Coordinated {
+	if !plan.Coordinated || normalizeAgentMode(mode) == agentModeFast {
 		return items
 	}
 	filtered := make([]tool.BaseTool, 0, len(items))
@@ -2362,6 +2375,15 @@ func (s *Service) missionToolDecision(
 		return true, ""
 	}
 	plainName := s.plainToolName(toolName)
+	if normalizeAgentMode(execctx.RunMode(ctx)) == agentModeFast {
+		if isSubAgentEntryToolName(plainName) {
+			return false, "当前为单 Agent 模式，禁止调用 Planner/Worker"
+		}
+		if plainName == orchestratorControlToolName &&
+			!fastModeOrchestratorActionAllowed(modeStringArg(args, "action")) {
+			return false, "单 Agent 模式只允许查看或停止历史 Worker，不能启动、恢复或纠偏编排"
+		}
+	}
 	if s.isLocalExecutionTool(plainName) {
 		if blocked, reason := s.localExecutionBlockedByZhizi(ctx); blocked {
 			return false, reason
@@ -2436,7 +2458,7 @@ func missionToolIsNetworkCapable(toolName string, args map[string]interface{}) b
 	if isSubAgentEntryToolName(name) {
 		return true
 	}
-	if name == internetSearchToolName {
+	if name == internetSearchToolName || name == intelSearchToolName {
 		return true
 	}
 	if name == "mcp_use_tool" {
