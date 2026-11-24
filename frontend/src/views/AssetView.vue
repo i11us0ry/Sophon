@@ -57,7 +57,7 @@ const CRITICALITY_OPTIONS = [
   { value: 'info', label: t('assetCriticality.info') },
 ]
 
-const KNOWN_KINDS = ['domain', 'ip', 'url', 'port', 'host']
+const KNOWN_KINDS = ['domain', 'ip', 'url', 'port', 'host', 'source']
 
 const assets = ref<Asset[]>([])
 const projects = ref<Project[]>([])
@@ -138,6 +138,8 @@ function kindTone(kind: string) {
       return 'coral'
     case 'host':
       return 'blue'
+    case 'source':
+      return 'amber'
     default:
       return 'muted'
   }
@@ -560,6 +562,7 @@ onUnmounted(() => {
             <svg v-else-if="kind === 'url'" viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.5.5l2-2a5 5 0 0 0-7-7l-1.2 1.2M14 11a5 5 0 0 0-7.5-.5l-2 2a5 5 0 0 0 7 7l1.2-1.2" /></svg>
             <svg v-else-if="kind === 'port'" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8" /><path d="M12 4v8l5 3" /></svg>
             <svg v-else-if="kind === 'host'" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2" /><path d="M8 8h8M8 12h8M8 16h5" /></svg>
+            <svg v-else-if="kind === 'source'" viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6zM14 3v5h5M9 12h6M9 16h6" /></svg>
             <svg v-else viewBox="0 0 24 24"><circle cx="12" cy="12" r="8" /><path d="M9 12h6" /></svg>
           </span>
           <b>{{ kindLabel(kind) }}</b>

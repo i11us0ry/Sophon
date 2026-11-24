@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"sophon/internal/toolerror"
 	"sophon/internal/toolrunner"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -62,10 +63,12 @@ func main() {
 				}
 			}
 			result, runErr := executor.Run(ctx, item, args)
-			text := renderResult(result, runErr)
+			noMatch := isNoMatchResult(item.Name, args, result, runErr)
+			text := renderResult(result, runErr, noMatch)
 			return &mcp.CallToolResult{
-				Content: []mcp.Content{&mcp.TextContent{Text: text}},
-				IsError: runErr != nil,
+				Content:           []mcp.Content{&mcp.TextContent{Text: text}},
+				StructuredContent: commandResultPayload(item.Name, args, result, runErr, noMatch),
+				IsError:           runErr != nil && !noMatch,
 			}, nil
 		})
 		registered++
@@ -82,14 +85,18 @@ func main() {
 	}
 }
 
-func renderResult(result *toolrunner.Result, runErr error) string {
+func renderResult(result *toolrunner.Result, runErr error, noMatch bool) string {
 	var builder strings.Builder
 	if result != nil && result.Command != "" {
 		// 命令可能内嵌整段脚本（http-framework-test 约 16KB），限长避免淹没真正的输出与错误。
 		builder.WriteString("$ " + truncateCommand(result.Command, 500) + "\n")
 	}
 	if runErr != nil {
-		builder.WriteString("错误: " + runErr.Error() + "\n")
+		if noMatch {
+			builder.WriteString("状态: 命令无匹配结果（退出码 1）\n")
+		} else {
+			builder.WriteString("错误: " + runErr.Error() + "\n")
+		}
 	}
 	if result != nil && strings.TrimSpace(result.Output) != "" {
 		builder.WriteString(result.Output)
@@ -113,6 +120,88 @@ func renderResult(result *toolrunner.Result, runErr error) string {
 		return "(无输出)"
 	}
 	return builder.String()
+}
+
+type commandResultStructuredContent struct {
+	Kind       string `json:"kind"`
+	Status     string `json:"status"`
+	Command    string `json:"command,omitempty"`
+	ExitCode   *int   `json:"exit_code,omitempty"`
+	TimedOut   bool   `json:"timed_out"`
+	Truncated  bool   `json:"truncated"`
+	NoMatch    bool   `json:"no_match,omitempty"`
+	ErrorClass string `json:"error_class,omitempty"`
+}
+
+func commandResultPayload(
+	_ string,
+	args map[string]any,
+	result *toolrunner.Result,
+	runErr error,
+	noMatch bool,
+) commandResultStructuredContent {
+	payload := commandResultStructuredContent{Kind: "command_result"}
+	if raw, ok := args["command"].(string); ok {
+		payload.Command = truncateCommand(strings.TrimSpace(raw), 500)
+	}
+	if result != nil {
+		if result.Command != "" {
+			payload.Command = truncateCommand(result.Command, 500)
+		}
+		exitCode := result.ExitCode
+		payload.ExitCode = &exitCode
+		payload.TimedOut = result.TimedOut
+		payload.Truncated = result.Truncated
+	}
+	switch {
+	case noMatch:
+		payload.Status = "no_match"
+		payload.NoMatch = true
+		payload.ErrorClass = string(toolerror.NoMatch)
+	case runErr != nil:
+		payload.Status = "error"
+		message := runErr.Error()
+		if result != nil {
+			message += "\n" + result.Output
+		}
+		payload.ErrorClass = string(toolerror.Classify(message))
+		if payload.ErrorClass == string(toolerror.Tool) && result != nil && result.ExitCode != 0 {
+			payload.ErrorClass = string(toolerror.CommandExit)
+		}
+	default:
+		payload.Status = "success"
+	}
+	return payload
+}
+
+var noMatchCommandPattern = regexp.MustCompile(`(?i)(^|[\s;&|()])(grep|rg)([\s;&|()]|$)`)
+
+func isNoMatchResult(
+	toolName string,
+	args map[string]any,
+	result *toolrunner.Result,
+	runErr error,
+) bool {
+	if toolName != "exec" || runErr == nil || result == nil || result.ExitCode != 1 || result.TimedOut {
+		return false
+	}
+	command, _ := args["command"].(string)
+	if !noMatchCommandPattern.MatchString(command) {
+		return false
+	}
+	lowerOutput := strings.ToLower(result.Output)
+	for _, failure := range []string{
+		"permission denied",
+		"no such file",
+		"command not found",
+		"syntax error",
+		"traceback",
+	} {
+		if strings.Contains(lowerOutput, failure) {
+			return false
+		}
+	}
+	return true
 }
 
 var missingRuntimeCommandPattern = regexp.MustCompile(`(?mi)(?:^|[:\s])(file|time): (?:command )?not found`)

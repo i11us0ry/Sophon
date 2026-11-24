@@ -8,7 +8,7 @@ import (
 	"sophon/internal/database"
 )
 
-func TestMissionObjectiveCompletionStopsFollowUpsAndSubagents(t *testing.T) {
+func TestMissionObjectiveCompletionOnlySuppressesAutomaticFollowUps(t *testing.T) {
 	service, ctx := openProjectToolService(t, true)
 	plan := missionPlan{
 		Mode:               missionModePentest,
@@ -51,10 +51,10 @@ func TestMissionObjectiveCompletionStopsFollowUpsAndSubagents(t *testing.T) {
 	if !missionSuppressesAutomaticFollowUps(ctx) {
 		t.Fatal("目标完成后必须停止自动派生后续漏洞意图")
 	}
-	if allowed, _ := service.missionToolDecision(ctx, "pent_agent_execute", map[string]interface{}{
+	if allowed, reason := service.missionToolDecision(ctx, "pent_agent_execute", map[string]interface{}{
 		"task": "继续测试其他入口",
-	}); allowed {
-		t.Fatal("目标完成后不应允许启动新的子 Agent")
+	}); !allowed {
+		t.Fatalf("目标完成状态不应剥夺主 Agent 的执行选择: %s", reason)
 	}
 	decision := service.checkFinalization(
 		ctx,
@@ -65,8 +65,8 @@ func TestMissionObjectiveCompletionStopsFollowUpsAndSubagents(t *testing.T) {
 		&runCapture{},
 		"已获取服务器权限。",
 	)
-	if !decision.Allowed || !decision.ObjectiveCompleted {
-		t.Fatalf("目标完成后最终化应直接通过: %+v", decision)
+	if !decision.Allowed || decision.ObjectiveCompleted {
+		t.Fatalf("普通收尾不应被目标完成状态改写: %+v", decision)
 	}
 
 	before, err := service.db.ListProjectGraphNodes(ctx, "project-tools")
@@ -110,7 +110,7 @@ func TestMissionObjectiveCompletionRequiresExploitEvidence(t *testing.T) {
 	}
 }
 
-func TestMissionObjectiveCompletedSubagentDecisionUsesParentContext(t *testing.T) {
+func TestMissionObjectiveCompletedSubagentDecisionDoesNotOverrideParent(t *testing.T) {
 	service := &Service{}
 	ctx := context.Background()
 	ctx = withMissionObjectiveState(ctx)
@@ -119,8 +119,7 @@ func TestMissionObjectiveCompletedSubagentDecisionUsesParentContext(t *testing.T
 		Phase: missionPhasePentest,
 	})
 	markMissionObjectiveComplete(ctx, "finding-1", "已完成")
-	if allowed, reason := service.missionToolDecision(ctx, "pent_agent_execute_hypothesis", nil); allowed ||
-		reason == "" {
-		t.Fatalf("完成后子 Agent 工具必须被明确拒绝: allowed=%v reason=%q", allowed, reason)
+	if allowed, reason := service.missionToolDecision(ctx, "pent_agent_execute_hypothesis", nil); !allowed {
+		t.Fatalf("目标完成状态不应强制拒绝子 Agent 工具: %s", reason)
 	}
 }

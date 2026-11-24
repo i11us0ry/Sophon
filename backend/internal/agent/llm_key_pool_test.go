@@ -53,13 +53,13 @@ func TestLLMKeyPoolFailsOverAfterUnauthorized(t *testing.T) {
 	}
 }
 
-func TestLLMKeyPoolFailsOverOnInsufficientQuota(t *testing.T) {
+func TestLLMKeyPoolFailsOverOnNotEnoughBalance(t *testing.T) {
 	var attempts atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		attempts.Add(1)
 		if request.Header.Get("Authorization") == "Bearer key-a" {
 			writer.WriteHeader(http.StatusBadRequest)
-			_, _ = writer.Write([]byte(`{"error":{"code":"insufficient_quota","message":"余额不足"}}`))
+			_, _ = writer.Write([]byte(`{"error":{"code":"NOT_ENOUGH_BALANCE","message":"余额不足"}}`))
 			return
 		}
 		writer.Header().Set("Content-Type", "application/json")
@@ -81,6 +81,78 @@ func TestLLMKeyPoolFailsOverOnInsufficientQuota(t *testing.T) {
 	}
 	if attempts.Load() != 2 {
 		t.Fatalf("应尝试 2 个 Key，实际 %d", attempts.Load())
+	}
+}
+
+func TestLLMKeyPoolDoesNotFailOverOnContentPolicy(t *testing.T) {
+	var attempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		attempts.Add(1)
+		if request.Header.Get("Authorization") != "Bearer key-a" {
+			t.Errorf("内容审核拒绝不应切换 Key，实际 Authorization=%q", request.Header.Get("Authorization"))
+		}
+		var payload struct {
+			Messages []map[string]interface{} `json:"messages"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+			t.Errorf("解析请求失败: %v", err)
+		}
+		if attempts.Load() == 1 {
+			writer.WriteHeader(http.StatusBadRequest)
+			_, _ = writer.Write([]byte(`{"error":{"message":"请求内容未通过安全策略检查"}}`))
+			return
+		}
+		content, _ := payload.Messages[0]["content"].(string)
+		if !strings.Contains(content, llmContentPolicyRetryMarker) {
+			t.Errorf("重试请求未压缩工具结果")
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"ok":true}`))
+	}))
+	defer server.Close()
+
+	pool := newLLMKeyPool([]string{"key-a", "key-b"}, "openai_compatible")
+	client := &http.Client{Transport: newLLMRetryTransport(http.DefaultTransport, pool)}
+	payload, _ := json.Marshal(map[string]interface{}{
+		"messages": []map[string]interface{}{
+			{"role": "tool", "content": strings.Repeat("工具结果", 3000)},
+		},
+	})
+	response, err := client.Post(server.URL, "application/json", bytes.NewReader(payload))
+	if err != nil {
+		t.Fatalf("请求失败: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK || attempts.Load() != 2 {
+		t.Fatalf("同 Key 压缩重试应成功，status=%d attempts=%d", response.StatusCode, attempts.Load())
+	}
+	snapshot := pool.snapshot()
+	if snapshot.Cooling != 0 || len(snapshot.Failures) != 0 || snapshot.Successes != 1 {
+		t.Fatalf("内容拒绝不应计为 Key 故障: %+v", snapshot)
+	}
+}
+
+func TestLLMKeyPoolReportsBalanceWhenAllKeysExhausted(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.WriteHeader(http.StatusBadRequest)
+		_, _ = writer.Write([]byte(`{"error":{"code":"NOT_ENOUGH_BALANCE","request_id":"req-balance-pool"}}`))
+	}))
+	defer server.Close()
+
+	client := &http.Client{Transport: newLLMRetryTransport(
+		http.DefaultTransport,
+		newLLMKeyPool([]string{"key-a", "key-b"}, "openai_compatible"),
+	)}
+	response, err := client.Get(server.URL)
+	if err != nil {
+		t.Fatalf("请求失败: %v", err)
+	}
+	defer response.Body.Close()
+	body, _ := io.ReadAll(response.Body)
+	if response.StatusCode != http.StatusPaymentRequired ||
+		!strings.Contains(string(body), "llm_balance_insufficient") ||
+		!strings.Contains(string(body), "req-balance-pool") {
+		t.Fatalf("全部 Key 余额不足时应返回专用错误，status=%d body=%s", response.StatusCode, body)
 	}
 }
 

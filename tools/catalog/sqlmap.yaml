@@ -1,0 +1,16 @@
+name: sqlmap
+version: 1.10.11
+description: SQL injection scanner copied from the pinned upstream source
+tool_definition: sqlmap.yaml
+build:
+  url: https://codeload.github.com/sqlmapproject/sqlmap/tar.gz/6faa9bb929347189a62c046d7d02349140e9933d
+  sha256: 13583e7774c237c3ea552cb2ed0da65c04edc37deb29fc8c38f99bdf9e222897
+  archive: tar.gz
+  strip_components: 1
+  recipe: copy
+  destination: sqlmap
+  directory: true
+  entry: sqlmap.py
+  command: sqlmap
+  command_mode: python
+  command_target: sqlmap.py

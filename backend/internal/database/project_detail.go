@@ -25,6 +25,8 @@ type AttackStep struct {
 
 type ProjectCounts struct {
 	Facts               int  `json:"facts"`
+	PendingIntents      int  `json:"pendingIntents"`
+	EvidenceGaps        int  `json:"evidenceGaps"`
 	AttackSteps         int  `json:"attackSteps"`
 	Assets              int  `json:"assets"`
 	Conversations       int  `json:"conversations"`
@@ -69,6 +71,8 @@ func (db *DB) ProjectSummary(
 		target    *int
 	}{
 		{`SELECT COUNT(*) FROM project_facts WHERE project_id = ?`, &counts.Facts},
+		{`SELECT COUNT(*) FROM project_graph_nodes
+		  WHERE project_id = ? AND kind = 'intent' AND status IN ('open', 'running')`, &counts.PendingIntents},
 		{`SELECT COUNT(*) FROM project_graph_nodes WHERE project_id = ?`, &counts.AttackSteps},
 		{`SELECT COUNT(*) FROM assets WHERE project_id = ?`, &counts.Assets},
 		{`SELECT COUNT(*) FROM conversations WHERE project_id = ?`, &counts.Conversations},
@@ -78,6 +82,24 @@ func (db *DB) ProjectSummary(
 		if err := db.QueryRowContext(ctx, query.statement, projectID).Scan(query.target); err != nil {
 			return nil, err
 		}
+	}
+	if err := db.QueryRowContext(
+		ctx,
+		`SELECT
+			(SELECT COUNT(*) FROM project_facts f
+			 WHERE f.project_id = ?
+			   AND TRIM(f.evidence) = ''
+			   AND COALESCE(f.subject_type, '') NOT IN ('audit_scope', 'audit_checkpoint')
+			   AND NOT (f.subject_type = 'audit_cell' AND f.predicate = 'coverage'))
+			+
+			(SELECT COUNT(*) FROM vulnerabilities v
+			 WHERE v.project_id = ?
+			   AND TRIM(v.evidence) = ''
+			   AND (TRIM(v.evidence_refs) = '' OR TRIM(v.evidence_refs) = '[]'))`,
+		projectID,
+		projectID,
+	).Scan(&counts.EvidenceGaps); err != nil {
+		return nil, err
 	}
 	var estimated int
 	if err := db.QueryRowContext(
@@ -152,6 +174,18 @@ func (db *DB) ListProjectsWithCountsPage(
 		SELECT
 			p.id, p.owner_user_id, p.name, p.description, p.goals, p.scope, p.status,
 			p.created_at, p.updated_at,
+			(SELECT COUNT(*) FROM project_graph_nodes g
+			 WHERE g.project_id = p.id AND g.kind = 'intent' AND g.status IN ('open', 'running')),
+			(SELECT COUNT(*) FROM project_facts f
+			 WHERE f.project_id = p.id
+			   AND TRIM(f.evidence) = ''
+			   AND COALESCE(f.subject_type, '') NOT IN ('audit_scope', 'audit_checkpoint')
+			   AND NOT (f.subject_type = 'audit_cell' AND f.predicate = 'coverage'))
+			+
+			(SELECT COUNT(*) FROM vulnerabilities v
+			 WHERE v.project_id = p.id
+			   AND TRIM(v.evidence) = ''
+			   AND (TRIM(v.evidence_refs) = '' OR TRIM(v.evidence_refs) = '[]')),
 			(SELECT COUNT(*) FROM project_facts f WHERE f.project_id = p.id),
 			(SELECT COUNT(*) FROM project_graph_nodes g WHERE g.project_id = p.id),
 			(SELECT COUNT(*) FROM assets a WHERE a.project_id = p.id),
@@ -195,6 +229,8 @@ func (db *DB) ListProjectsWithCountsPage(
 			&item.Status,
 			&createdAt,
 			&updatedAt,
+			&item.Counts.PendingIntents,
+			&item.Counts.EvidenceGaps,
 			&item.Counts.Facts,
 			&item.Counts.AttackSteps,
 			&item.Counts.Assets,
@@ -279,6 +315,18 @@ func (db *DB) ListProjectsWithCountsOffset(
 		SELECT
 			p.id, p.owner_user_id, p.name, p.description, p.goals, p.scope, p.status,
 			p.created_at, p.updated_at,
+			(SELECT COUNT(*) FROM project_graph_nodes g
+			 WHERE g.project_id = p.id AND g.kind = 'intent' AND g.status IN ('open', 'running')),
+			(SELECT COUNT(*) FROM project_facts f
+			 WHERE f.project_id = p.id
+			   AND TRIM(f.evidence) = ''
+			   AND COALESCE(f.subject_type, '') NOT IN ('audit_scope', 'audit_checkpoint')
+			   AND NOT (f.subject_type = 'audit_cell' AND f.predicate = 'coverage'))
+			+
+			(SELECT COUNT(*) FROM vulnerabilities v
+			 WHERE v.project_id = p.id
+			   AND TRIM(v.evidence) = ''
+			   AND (TRIM(v.evidence_refs) = '' OR TRIM(v.evidence_refs) = '[]')),
 			(SELECT COUNT(*) FROM project_facts f WHERE f.project_id = p.id),
 			(SELECT COUNT(*) FROM project_graph_nodes g WHERE g.project_id = p.id),
 			(SELECT COUNT(*) FROM assets a WHERE a.project_id = p.id),
@@ -317,6 +365,8 @@ func (db *DB) ListProjectsWithCountsOffset(
 			&item.Status,
 			&createdAt,
 			&updatedAt,
+			&item.Counts.PendingIntents,
+			&item.Counts.EvidenceGaps,
 			&item.Counts.Facts,
 			&item.Counts.AttackSteps,
 			&item.Counts.Assets,

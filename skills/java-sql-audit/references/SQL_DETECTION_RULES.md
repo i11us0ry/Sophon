@@ -207,7 +207,7 @@ if (!allowedOrders.contains(order.toLowerCase())) {
 ## 5. 完整检测流程
 
 ```
-1. 行为检测（必须执行）
+1. 行为检测（可选）
    ├─ 搜索 "order by" + 变量拼接
    ├─ 搜索 "group by" + 变量拼接
    ├─ 搜索各数据库分页语法拼接

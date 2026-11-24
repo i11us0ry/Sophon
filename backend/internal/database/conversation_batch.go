@@ -394,6 +394,36 @@ func (db *DB) ListCampaignsForAutoResume(ctx context.Context) ([]CampaignResumeI
 	return items, rows.Err()
 }
 
+func (db *DB) ListRunningCampaignsByProject(
+	ctx context.Context,
+	projectID string,
+	ownerUserID string,
+) ([]CampaignResumeItem, error) {
+	rows, err := db.QueryContext(
+		ctx,
+		`SELECT id, owner_user_id
+		 FROM conversation_batches
+		 WHERE project_id = ? AND owner_user_id = ? AND status = ? AND stopped_at = 0
+		 ORDER BY updated_at ASC`,
+		strings.TrimSpace(projectID),
+		strings.TrimSpace(ownerUserID),
+		CampaignStatusRunning,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]CampaignResumeItem, 0)
+	for rows.Next() {
+		var item CampaignResumeItem
+		if err := rows.Scan(&item.ID, &item.OwnerUserID); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
 func insertConversationTx(ctx context.Context, tx *sql.Tx, conversation Conversation) error {
 	conversation.Kind = strings.TrimSpace(conversation.Kind)
 	if conversation.Kind == "" {

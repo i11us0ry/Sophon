@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 )
 
 var findingStatuses = map[string]bool{
+	"pending_review": true,
 	"open":           true,
 	"confirmed":      true,
 	"fixed":          true,
@@ -22,15 +24,143 @@ var findingStatuses = map[string]bool{
 	"false_positive": true,
 }
 
+type goalProofContextKey struct{}
+
+func isGoalProofContext(ctx context.Context) bool {
+	allowed, _ := ctx.Value(goalProofContextKey{}).(bool)
+	return allowed
+}
+
 // newProjectUpdateTools 提供攻击路径意图与漏洞记录的状态流转工具。
 func newProjectUpdateTools(service *Service) []tool.BaseTool {
 	return []tool.BaseTool{
 		service.updateGoalTool(),
+		service.proveGoalTool(),
 		service.updateIntentTool(),
 		service.updateFindingTool(),
 		service.getRetestContextTool(),
 		service.retestFindingTool(),
 	}
+}
+
+func (s *Service) proveGoalTool() tool.BaseTool {
+	return &jsonTool{
+		name: "project_prove_goal",
+		desc: "使用当前项目中已确认的事实或漏洞证据将 Goal 标记为 met；目标完成只能通过该工具逐项证明。",
+		params: map[string]*schema.ParameterInfo{
+			"goal_id":     stringParam("Goal 节点 id", true),
+			"evidence_id": stringParam("已确认的 fact 或 finding 节点 id", true),
+			"reason":      stringParam("该证据如何证明目标达成", true),
+		},
+		run: func(ctx context.Context, raw string) (string, error) {
+			var request struct {
+				GoalID     string `json:"goal_id"`
+				EvidenceID string `json:"evidence_id"`
+				Reason     string `json:"reason"`
+			}
+			if err := decodeToolArgs(raw, &request); err != nil {
+				return "", err
+			}
+			if strings.TrimSpace(request.GoalID) == "" ||
+				strings.TrimSpace(request.EvidenceID) == "" ||
+				strings.TrimSpace(request.Reason) == "" {
+				return "", fmt.Errorf("goal_id、evidence_id 和 reason 均不能为空")
+			}
+			_, _, projectID, err := s.currentProject(ctx)
+			if err != nil {
+				return "", err
+			}
+			goal, err := s.db.GetProjectGraphNode(ctx, request.GoalID, projectID)
+			if err != nil || goal == nil {
+				return "", fmt.Errorf("目标节点不存在或不属于当前项目")
+			}
+			if goal.Kind != "goal" {
+				return "", fmt.Errorf("节点 %s 不是 Goal", goal.ID)
+			}
+			if !graphNodeInCurrentAssetScope(ctx, goal) {
+				return "", fmt.Errorf("目标不属于当前对话绑定的资产")
+			}
+			activeRequired, err := s.db.CountActiveRequiredProjectHypothesesForConversation(
+				ctx,
+				projectID,
+				execctx.ConversationID(ctx),
+			)
+			if err != nil {
+				return "", fmt.Errorf("读取必需假设状态失败: %w", err)
+			}
+			if activeRequired > 0 {
+				return "", fmt.Errorf(
+					"仍有 %d 个必需任务处于 open/running/paused，不能提前证明 Goal；请先完成或明确收敛这些任务",
+					activeRequired,
+				)
+			}
+			evidence, err := s.projectGoalEvidence(ctx, projectID, request.EvidenceID)
+			if err != nil {
+				return "", err
+			}
+			if !graphAssetScopeCompatible(goal.AssetID, evidence.AssetID) {
+				return "", fmt.Errorf("证据与 Goal 不属于同一资产范围")
+			}
+			if err := s.linkGraphEdge(ctx, projectID, evidence.ID, goal.ID, "proves"); err != nil {
+				return "", fmt.Errorf("关联 Goal 证据失败: %w", err)
+			}
+			payload, err := json.Marshal(map[string]interface{}{
+				"goal_id": goal.ID,
+				"status":  "met",
+				"detail": fmt.Sprintf(
+					"证据 %s（%s）：%s",
+					evidence.ID,
+					evidence.Title,
+					truncateProjectText(request.Reason, projectToolLongText),
+				),
+			})
+			if err != nil {
+				return "", err
+			}
+			updater, ok := s.updateGoalTool().(tool.InvokableTool)
+			if !ok {
+				return "", fmt.Errorf("更新 Goal 工具不可调用")
+			}
+			proofCtx := context.WithValue(ctx, goalProofContextKey{}, true)
+			result, err := updater.InvokableRun(proofCtx, string(payload))
+			if err != nil {
+				return "", err
+			}
+			return fmt.Sprintf("%s\n已关联证据 %s -> Goal %s（proves）。", result, evidence.ID, goal.ID), nil
+		},
+	}
+}
+
+func (s *Service) projectGoalEvidence(
+	ctx context.Context,
+	projectID string,
+	evidenceID string,
+) (*database.GraphNode, error) {
+	evidenceID = strings.TrimSpace(evidenceID)
+	if node, err := s.db.GetProjectGraphNode(ctx, evidenceID, projectID); err == nil &&
+		node != nil {
+		if node.Kind != "fact" && node.Kind != "finding" {
+			return nil, fmt.Errorf("证据节点 %s 必须是 fact 或 finding", evidenceID)
+		}
+		if strings.ToLower(strings.TrimSpace(node.Status)) != "confirmed" {
+			return nil, fmt.Errorf("证据节点 %s 尚未确认", evidenceID)
+		}
+		return node, nil
+	}
+	nodes, err := s.db.ListProjectGraphNodes(ctx, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("读取项目证据失败: %w", err)
+	}
+	for index := range nodes {
+		node := nodes[index]
+		if node.SourceRefID != evidenceID ||
+			(node.Kind != "fact" && node.Kind != "finding") ||
+			strings.ToLower(strings.TrimSpace(node.Status)) != "confirmed" {
+			continue
+		}
+		return &node, nil
+	}
+	return nil, fmt.Errorf("未找到已确认的 fact/finding 证据 %s", evidenceID)
 }
 
 func (s *Service) updateGoalTool() tool.BaseTool {
@@ -77,6 +207,9 @@ func (s *Service) updateGoalTool() tool.BaseTool {
 				if !graphNodeStatuses["goal"][status] {
 					return "", fmt.Errorf("goal 状态必须是 open/met/abandoned")
 				}
+				if status == "met" && !isGoalProofContext(ctx) {
+					return "", fmt.Errorf("Goal 完成必须调用 project_prove_goal 并提供已确认证据")
+				}
 				node.Status = status
 			}
 			if detail := truncateProjectText(request.Detail, projectToolLongText); detail != "" {
@@ -85,6 +218,23 @@ func (s *Service) updateGoalTool() tool.BaseTool {
 			node.UpdatedAt = time.Now().UTC()
 			if err := s.db.UpdateProjectGraphNode(ctx, *node); err != nil {
 				return "", fmt.Errorf("更新目标失败: %w", err)
+			}
+			if info, ok := execctx.Subagent(ctx); !ok ||
+				!strings.EqualFold(strings.TrimSpace(info.Kind), "planner") {
+				s.emitAgentTrigger(
+					ctx,
+					database.AgentTriggerGoalEdit,
+					"",
+					map[string]interface{}{
+						"goalId": node.ID,
+						"status": node.Status,
+						"detail": node.Detail,
+					},
+					"goal:"+node.ID+":"+node.Status+":"+strconv.FormatInt(node.UpdatedAt.Unix(), 10),
+				)
+				if err := s.reviveCoordinatedRuntime(ctx); err != nil {
+					return "", fmt.Errorf("启动 Coordinator 失败: %w", err)
+				}
 			}
 			return fmt.Sprintf("目标 %s 已更新（status %s）。", node.ID, node.Status), nil
 		},

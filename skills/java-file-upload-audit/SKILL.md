@@ -9,97 +9,45 @@ description: Java Web 源码文件上传漏洞审计工具。用于从源码中�
 
 检查 Java Web 项目源码，识别文件上传实现并检测上传相关漏洞（任意文件上传、路径穿越、文件覆盖、Web 根目录可执行等）。
 
-## 核心要求
+## 适用场景
 
-**此技能必须完整分析所有上传相关代码，不允许省略。**
+适合 Servlet/Commons FileUpload、Spring `MultipartFile`、存储服务或自定义上传封装，需要判断文件名、保存路径、类型校验和写后访问执行条件。
 
-- ✅ 识别所有上传入口点（ServletFileUpload / MultipartFile / transferTo / FileItem）
-- ✅ 标注每个上传点的保存路径、文件名来源与校验策略
-- ✅ 检测所有潜在的上传漏洞模式（类型校验缺失、路径穿越、Web 根目录写入、文件覆盖）
-- ✅ 当源码不可用时必须反编译，并输出反编译文件清单（文件名 + 位置）
-- ❌ 禁止省略任何上传入口
-- ❌ 禁止跳过反编译步骤
+## 不适用场景
 
----
+只看到上传接口或 `getOriginalFilename()` 不能直接确认 RCE。必须证明危险文件能够写入有效落点，并且可被访问或解释；仅能上传无效内容到隔离目录时，不应按代码执行处理。
 
-## 漏洞分级标准
+## 核心判断
 
-**详见 [SEVERITY_RATING.md](../java-shared/SEVERITY_RATING.md)**
+文件上传影响由保存路径、服务器生成文件名、内容/扩展名校验、目录执行策略和访问控制共同决定。原始文件名可控、路径穿越和任意文件写入是三个不同层次的证据。
 
-- 漏洞编号格式: `{C/H/M/L}-UPLOAD-{序号}`
-- 严重等级 = f(可达性 R, 影响范围 I, 利用复杂度 C)
-- Score = R × 0.40 + I × 0.35 + C × 0.25，映射 CVSS 3.1
+## 证据标准
 
-| 前缀 | CVSS 3.1 | 含义 |
-|------|----------|------|
-| 🔴 **C** | 9.0-10.0 | 可直接导致系统沦陷 |
-| 🟠 **H** | 7.0-8.9 | 可造成重大损害 |
-| 🟡 **M** | 4.0-6.9 | 可造成一定损害 |
-| 🔵 **L** | 0.1-3.9 | 安全加固项 |
+- 可确认：真实上传入口、可控文件内容/名称、最终落点、校验缺口和写后触达/执行效果证据闭合。
+- 待验证：存在弱校验或路径拼接，但落点、文件权限、服务器命名或访问策略尚未确认。
+- 判为否：文件被重命名到隔离目录、类型和内容受可靠约束、扩展名不执行，或上传结果不可触达。
 
----
+## 决策树
 
-## 技能协作流程（CRITICAL）
+- 找到上传入口：确认鉴权、multipart 字段和文件内容来源。
+- 检查最终文件名：区分原始名称、basename、随机名和扩展名策略。
+- 检查最终路径：验证 normalize/resolve 后是否受上传根目录约束。
+- 检查类型：同时评估扩展名、Content-Type、魔数、解析器和二次处理。
+- 检查写后效果：确认 Web 映射、包含链、权限和解释配置。
 
-**java-file-upload-audit 必须在 java-route-mapper 之后执行，基于已梳理的路由信息进行审计。**
+## 常见误判
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    完整审计流程                                  │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  [步骤1] java-route-mapper                                      │
-│     │                                                           │
-│     │ 输出：                                                    │
-│     │ ├─ 所有 HTTP 路由列表                                     │
-│     │ ├─ 每个路由的参数定义                                     │
-│     │ │   ├─ 参数名、类型                                       │
-│     │ │   └─ JSON 内部字段                                      │
-│     │ └─ Burp Suite 请求模板                                    │
-│     │                                                           │
-│     ↓                                                           │
-│  [步骤2] java-file-upload-audit（本技能）                       │
-│     │                                                           │
-│     │ 输入：java-route-mapper 的输出                            │
-│     │                                                           │
-│     │ 执行：                                                    │
-│     │ ├─ 快速扫描上传实现                                       │
-│     │ ├─ 参数-上传映射分析                                      │
-│     │ ├─ 校验逻辑与保存路径分析                                 │
-│     │ └─ 执行条件分析                                           │
-│     │                                                           │
-│     ├─── 需要深入追踪 ───→ java-route-tracer                    │
-│     │                           │                               │
-│     │    ←── 返回调用链信息 ────┘                               │
-│     │                                                           │
-│     ↓                                                           │
-│  [步骤3] 输出综合审计报告                                       │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
-```
+- `getOriginalFilename()` 可控就认定可以任意写入。
+- 校验 Content-Type 就认为安全，或只看扩展名不看内容和解析配置。
+- 文件写入 Web 目录就直接确认代码执行。
+- 忽略服务器随机命名、对象存储隔离和下载响应的 Content-Disposition。
+- 为验证上传向生产目录写入脚本、覆盖配置或触发解析器。
 
-### 输入依赖（来自 java-route-mapper）
+## 与路由分析协作（可选）
 
-**在开始审计前，必须先检查是否已有 java-route-mapper 的输出文件：**
+已有路由映射结果时，可用于定位入口和参数；没有时直接从源码、字节码和当前审计目标开始，不要求检查或生成任何上游文件。
 
-```
-{project_name}_audit/
-├── route_mapper/
-│   ├── {project_name}_route_mapper_{timestamp}.md    ← 主索引（先读此文件定位模块详情）
-│   ├── {module_name}/
-│   │   └── {project_name}_module_{module_name}_{timestamp}.md  ← 模块详情
-│   └── webservice/
-│       └── {project_name}_ws_{service_name}_{timestamp}.md
-└── file_upload_audit/
-    └── {project_name}_file_upload_audit_{timestamp}.md  ← 本技能输出
-```
-
-**如果 route_mapper 输出不存在，建议先运行：**
-```python
-Skill(skill="java-route-mapper", args="--project {project_path}")
-```
-
-### 从 route_mapper 获取的关键信息
+### 已有路由结果时可利用的信息
 
 | 信息 | 用途 |
 |:-----|:-----|
@@ -227,20 +175,11 @@ file.transferTo(filePath)   ← 上传写入点
 
 ## 反编译阶段（CRITICAL）
 
-**当源码不可用时，必须使用 CFR 反编译器反编译上传相关类（详见 `java-shared/DECOMPILE_STRATEGY.md`）。**
+**当源码不可用时，按运行环境中可用的反编译能力处理上传相关类（详见 `java-shared/DECOMPILE_STRATEGY.md`）。**
 
 ### 反编译工具调用
 
-```bash
-# 反编译单个上传相关类
-java -jar {CFR_JAR} /path/to/UploadController.class --outputdir {output_path}/decompiled
-
-# 反编译上传相关目录
-find /path/to/WEB-INF/classes/com/example/upload -name "*.class" | xargs java -jar {CFR_JAR} --outputdir {output_path}/decompiled
-
-# 反编译多个指定文件
-java -jar {CFR_JAR} /path/to/UploadController.class /path/to/FileStorageService.class /path/to/UploadUtil.class --outputdir {output_path}/decompiled
-```
+可使用运行环境中可用的反编译工具。内置 `java_decompile`、CFR、`javap` 等均可作为候选，按实际能力和结果选择。
 
 ### 必须反编译的类
 
@@ -272,50 +211,3 @@ java -jar {CFR_JAR} /path/to/UploadController.class /path/to/FileStorageService.
 
 ---
 
-## 报告生成
-
-**输出单个综合审计报告文件：**
-
-```
-{project_name}_audit/file_upload_audit/
-└── {route_name}/
-    └── {project_name}_file_upload_audit_{timestamp}.md
-```
-
-**路由名说明：**
-- 路由名从路由路径提取，去掉前缀斜杠和特殊字符
-- 例如：`/api/file/upload` → `api_file_upload`
-
----
-
-## 输出格式
-
-**严格按照 [references/OUTPUT_TEMPLATE.md](references/OUTPUT_TEMPLATE.md) 中的填充式模板生成输出文件。**
-
-- 文件名格式: `{project_name}_file_upload_audit_{YYYYMMDD_HHMMSS}.md`
-- 不得修改模板结构、不得增删章节、不得调整顺序
-- 所有【填写】占位符必须替换为实际内容
-- 通用规范参考: [java-shared/OUTPUT_STANDARD.md](../java-shared/OUTPUT_STANDARD.md)
-
----
-
-## 审计检查清单（防遗漏）
-
-### 代码分析检查
-- [ ] 所有上传入口已分析（Servlet/MultipartFile）
-- [ ] 每个上传点均标注文件名来源与保存路径
-- [ ] 目录与访问控制已分析
-
-### 反编译检查
-- [ ] 源码不可用时已反编译
-- [ ] 反编译文件清单已输出（文件名 + 位置）
-
-### 报告完整性检查
-- [ ] **综合审计报告已生成，且通过 OUTPUT_TEMPLATE.md 末尾的自检清单**
-
----
-
-## 参考资料
-
-- [OUTPUT_TEMPLATE.md](references/OUTPUT_TEMPLATE.md) - 输出报告填充式模板
-- [UPLOAD_RULES.md](references/UPLOAD_RULES.md) - 上传实现识别与风险规则

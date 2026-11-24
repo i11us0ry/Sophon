@@ -1,0 +1,22 @@
+name: nuclei
+version: 3.11.1
+description: Nuclei template-based vulnerability scanner
+license: MIT
+tool_definition: nuclei.yaml
+verify_args:
+  - "-version"
+artifacts:
+  linux-amd64:
+    url: https://github.com/projectdiscovery/nuclei/releases/download/v3.11.1/nuclei_3.11.1_linux_amd64.zip
+    sha256: ea63d4ae232808cd7c6bc00d0142428e231fab59dae01042246097d195835ab6
+    destination: nuclei
+    mode: "0755"
+    archive: zip
+    member: nuclei
+  linux-arm64:
+    url: https://github.com/projectdiscovery/nuclei/releases/download/v3.11.1/nuclei_3.11.1_linux_arm64.zip
+    sha256: 8044e3d9768ba0a744b2872c1a87e813006f013da97ca9f50f7661a4203bec07
+    destination: nuclei
+    mode: "0755"
+    archive: zip
+    member: nuclei

@@ -9,15 +9,39 @@ description: Java Web 源码反序列化漏洞审计工具。覆盖 Java 原生�
 
 扫描 Java Web 项目源码，识别所有反序列化入口，检测可用的 gadget 链，评估利用可行性。
 
----
+## 适用场景
 
-## 漏洞分级标准
+适合不可信字节、JSON、XML、YAML、Hessian、JNDI 或 RPC 数据进入反序列化/多态加载入口，需要判断类型控制、过滤器和 classpath 利用链。
 
-详见 [SEVERITY_RATING.md](../java-shared/SEVERITY_RATING.md)
+## 不适用场景
 
-- 漏洞编号格式: `{C/H/M/L}-DESERIALIZE-{序号}`
-- 反序列化入口 + 无鉴权 + classpath 含已知 gadget → 直接标记 Critical
-- Score = R × 0.40 + I × 0.35 + C × 0.25
+只发现 `readObject`、Fastjson API 或存在 gadget 依赖不能直接确认 RCE。必须证明攻击者能影响危险输入、类型解析未被限制，并存在适配当前版本和 JDK 的执行链。
+
+## 核心判断
+
+反序列化风险需要同时回答入口可达性、数据与类型可控性、过滤/白名单质量、运行版本、classpath gadget 和最终可观测效果。组件用法与已知 CVE 条件不能由版本号单独替代。
+
+## 证据标准
+
+- 可确认：反序列化入口、可控数据、绕过或缺失的类型限制、运行时链条件和执行效果证据闭合。
+- 待验证：发现危险入口或 gadget 库，但输入格式、鉴权、补丁、JDK 或调用链尚未确认。
+- 判为否：输入不可控、类型白名单可靠、危险入口未执行、版本不受影响，或没有可形成影响的利用链。
+
+## 决策树
+
+- 找到反序列化入口：确认输入来源、格式和认证状态。
+- 检查类型控制：核对 autoType、默认类型、允许类、过滤器和方法限制。
+- 检查运行条件：关联库版本、JDK、应用服务器和实际 classpath。
+- 检查 gadget：只把依赖存在作为候选，继续验证链依赖和执行触发。
+- 只有格式错误或类加载错误：先补齐可观测影响，不直接确认 RCE。
+
+## 常见误判
+
+- 调用 `readObject()` 就认定存在反序列化漏洞。
+- classpath 中存在 CommonsCollections 就认定当前版本可执行 gadget。
+- 只检查 Fastjson 版本，忽略调用方法、autoType 配置和 expectClass。
+- 把 JNDI 请求外联直接等同于远程代码执行。
+- 在验证时向外部系统加载真实恶意类或读取生产密钥。
 
 ---
 
@@ -292,43 +316,13 @@ Content-Type: application/json
 
 ---
 
-## 核心要求
-
-- ✅ 识别所有反序列化入口点（7 种类型全覆盖）
-- ✅ 检测 classpath 中已知 gadget 库
-- ✅ 结合 JDK 版本评估利用链可行性
-- ✅ 结合鉴权状态评估实际可利用性
-- ✅ 每个可利用漏洞提供 PoC
-- ❌ 禁止跳过反编译步骤
-- ❌ 禁止省略 gadget 链分析
-
----
-
 ## 反编译阶段（CRITICAL）
 
-**当源码不可用时，必须使用 CFR 反编译器反编译反序列化相关类。**
+**当源码不可用时，按运行环境中可用的反编译能力处理反序列化相关类。**
 
 详细策略参见 [DECOMPILE_STRATEGY.md](references/DECOMPILE_STRATEGY.md)
 
-```bash
-# 反编译序列化工具类
-java -jar {CFR_JAR} /path/to/SerializeUtils.class --outputdir {output_path}/decompiled
-
-# 批量反编译反序列化入口类和配置类
-find /path/to/WEB-INF/classes -name "*Serial*.class" -o -name "*Deserial*.class" -o -name "*Config*.class" | \
-  xargs java -jar {CFR_JAR} --outputdir {output_path}/decompiled
-```
-
----
-
-## 输出格式
-
-**严格按照 [references/OUTPUT_TEMPLATE.md](references/OUTPUT_TEMPLATE.md) 中的填充式模板生成输出文件。**
-
-- 文件名格式: `{project_name}_deserialize_audit_{YYYYMMDD_HHMMSS}.md`
-- 不得修改模板结构、不得增删章节、不得调整顺序
-- 所有【填写】占位符必须替换为实际内容
-- 通用规范参考: [java-shared/OUTPUT_STANDARD.md](../java-shared/OUTPUT_STANDARD.md)
+可使用运行环境中可用的反编译工具。内置 `java_decompile`、CFR、`javap` 等均可作为候选，按实际能力和结果选择。
 
 ---
 

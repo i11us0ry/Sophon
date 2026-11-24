@@ -1,0 +1,21 @@
+name: urlfinder
+version: 2026.6.16
+description: URL and endpoint discovery tool
+tool_definition: urlfinder.yaml
+verify_args:
+  - "-h"
+artifacts:
+  linux-amd64:
+    url: https://github.com/pingc0y/URLFinder/releases/download/2026.6.16/URLFinder_Linux_x86_64.tar.gz
+    sha256: 264499716f723eda8da6491ef48da63dfe0d017457f79081a0dbb6d54f62a88d
+    destination: urlfinder
+    mode: "0755"
+    archive: tar.gz
+    member: URLFinder
+  linux-arm64:
+    url: https://github.com/pingc0y/URLFinder/releases/download/2026.6.16/URLFinder_Linux_arm64.tar.gz
+    sha256: 4ed9d493b95047fcc4d5897780cbf948900689e42e7415cc96faeee85d6bf1ea
+    destination: urlfinder
+    mode: "0755"
+    archive: tar.gz
+    member: URLFinder

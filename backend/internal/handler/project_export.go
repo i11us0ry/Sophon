@@ -783,7 +783,7 @@ func docxEscape(value string) string {
 
 var docxSeverityOrder = []string{"critical", "high", "medium", "low", "info", "unknown"}
 
-var docxStatusOrder = []string{"open", "confirmed", "fixed", "ignored", "false_positive", "unknown"}
+var docxStatusOrder = []string{"pending_review", "open", "confirmed", "fixed", "ignored", "false_positive", "unknown"}
 
 type docxEvidenceItem struct {
 	Code     string
@@ -2644,7 +2644,7 @@ func normalizeDocxSeverity(value string) string {
 func normalizeDocxStatus(value string) string {
 	value = strings.ToLower(strings.TrimSpace(value))
 	switch value {
-	case "open", "confirmed", "fixed", "ignored", "false_positive":
+	case "pending_review", "open", "confirmed", "fixed", "ignored", "false_positive":
 		return value
 	default:
 		return "unknown"
@@ -2704,6 +2704,8 @@ func docxSeverityTagStyle(value string) (string, string) {
 
 func docxStatusTagStyle(value string) (string, string) {
 	switch normalizeDocxStatus(value) {
+	case "pending_review":
+		return "FFF4E5", "B54708"
 	case "open":
 		return "EAECF0", "344054"
 	case "confirmed":
@@ -2738,6 +2740,8 @@ func docxSeverityRecommendation(value string) string {
 
 func docxRetestAction(value string) string {
 	switch normalizeDocxStatus(value) {
+	case "pending_review":
+		return "完成漏洞审核后，再决定复测与处置安排"
 	case "open":
 		return "完成修复后安排复测并补充验证证据"
 	case "confirmed":
@@ -2755,6 +2759,8 @@ func docxRetestAction(value string) string {
 
 func docxStatusLabel(value string) string {
 	switch normalizeDocxStatus(value) {
+	case "pending_review":
+		return "待审核"
 	case "open":
 		return "待处理"
 	case "confirmed":

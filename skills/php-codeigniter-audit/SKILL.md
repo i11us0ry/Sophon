@@ -14,34 +14,57 @@ description: CodeIgniter 框架特效安全审计工具。针对 CodeIgniter 的
 - 表单验证器是否被覆盖或绕过
 - 会话 Cookie flags 安全性（CI 会话设置）
 
-## 输入
-用户提供：
-- `source_path`：CodeIgniter 项目根目录
-可选：
-- `output_path`：输出目录路径（默认 `{source_path}_audit`）
+## 适用场景
 
-## 输出目录
-输出到：
-```
-{output_path}/framework_audit/
-  codeigniter_{timestamp}.md
-```
+适合确认目标使用 CodeIgniter，需要审计 CSRF、XSS、查询构造、鉴权和会话配置。
 
-## 框架识别（必做）
-必须给出识别证据（不允许空口断言）：
+## 不适用场景
+
+没有框架识别证据时，不应按 CodeIgniter 规则推断漏洞。框架默认配置与实际运行时覆盖需要分开判断。
+
+## 核心判断
+
+先确认 CI 版本、配置加载和路由保护，再判断框架机制是否真正生效。默认配置、配置文件和环境覆盖可能不同。
+
+## 证据标准
+
+- 框架识别需要目录、配置或版本证据。
+- CSRF/XSS/SQL/AUTH/SESS 结论需要实际入口和配置证据。
+- 框架过滤器或 helper 存在不等于所有路由生效。
+- 实际影响不足时标记待验证。
+
+## 决策树
+
+- 框架版本明确：读取对应配置和安全机制。
+- 发现状态变更路由：检查 CSRF 是否覆盖。
+- 发现用户输入输出：检查视图转义。
+- 发现原生查询：检查 SQL 拼接和绑定。
+- 配置存在但运行时不确定：标记环境依赖。
+
+## 常见误判
+
+- 把 CI 默认安全配置当成项目实际配置。
+- 看到 XSS filter 就认定所有输出安全。
+- 看到 Query Builder 就忽略原生查询。
+- 忽略过滤器和路由分组。
+- 把 Cookie 标志缺失直接当成会话劫持。
+
+## 框架识别
+先确认项目确实是 CodeIgniter，再应用本技能的框架规则：
 - 典型目录：`application/`、`system/`
 - 配置文件：`application/config/config.php` 或会话/安全配置文件
 - 版本线索：`composer.json` 或 `system/core/` 结构
 
-## 风险类型映射（必做）
-每条发现都必须写明：
+## 风险归类
+只有形成 finding 时再写明：
 - 通用类型码：`CSRF` / `XSS` / `SQL` / `AUTH` / `CFG` / `SESS` / `LOGIC` 等
 - 映射原因
 
-## 必审清单（必做：逐项检查并输出结果）
+## 条件化审计路径
+按实际路由、filters 和配置选择检查点，不要求逐项填表。
 
 ### 1) CSRF 保护（CSRF）
-必须定位并输出：
+按需检查：
 - CSRF 是否启用（CI 3：`config.php` 的 csrf 配置，CI 4：Security 类配置）
 - token 名称、校验入口与跳过规则（是否某些控制器/方法未启用校验）
 
@@ -49,7 +72,7 @@ description: CodeIgniter 框架特效安全审计工具。针对 CodeIgniter 的
 - 存在状态变更路由但未启用 CSRF，则输出 CSRF 风险
 
 ### 2) XSS 输出防护（XSS/CFG）
-必须定位并输出：
+按需检查：
 - CI 的 XSS 过滤器是否启用（如 `global_xss_filtering`、`Security::xss_clean` 等）
 - 视图层是否对用户输入做了正确 `html_escape` 或等价转义
 
@@ -57,7 +80,7 @@ description: CodeIgniter 框架特效安全审计工具。针对 CodeIgniter 的
 - 如果禁用过滤或未转义输出，且用户输入能进入视图输出，则输出 XSS
 
 ### 3) 数据库查询拼接（SQL）
-必须定位并输出：
+按需检查：
 - 原生查询：`$this->db->query($sql)` 或 `->query($userInput)` 的拼接证据
 - 正确路径：Query Builder 与绑定参数使用
 
@@ -65,24 +88,21 @@ description: CodeIgniter 框架特效安全审计工具。针对 CodeIgniter 的
 - 若存在用户输入进入 SQL 字符串拼接，输出 SQL 风险
 
 ### 4) 会话与 Cookie（SESS/CFG）
-必须定位并输出：
+按需检查：
 - cookie flags：HttpOnly/Secure/SameSite（如在项目中配置）
 - session 配置：会话超时、固定防护（如存在）
 
 ### 5) 鉴权与访问控制（AUTH）
-必须定位并输出：
+按需检查：
 - 控制器中访问保护模式：自定义 `auth` helper、基类 controller 的校验、过滤器
 - 路由层过滤器或中间件（CI 4 filters）
 
 判定规则：
 - 若敏感控制器或方法缺少统一鉴权，输出 AUTH 风险
 
-## 可观测 PoC（必做：框架特效可观测验证框架）
-至少给出以下两类其一并写清观察点：
-- CSRF：缺失 CSRF token 调用状态变更路由，观察是否成功与副作用
-- SQL：使用注入 payload 调用疑似拼接 SQL 路径，观察返回差异或错误回显
-
-## 输出完整性检查（强制）
-- [ ] 输出包含：CSRF/XSS/SQL/Session/Auth 的检查结果
-- [ ] 每条风险都有：映射类型码 + 位置证据 + 可观测验证框架 + 修复建议
+## 项目写回
+- 已检查并排除的 controller、filter 或配置写 `project_record_audit(action=cell)`。
+- 需要运行时请求或配置条件的假设写 `project_plan_hypotheses`。
+- 只有证据闭合后才调用 `project_report_finding`。
+- 没有证据的检查项不生成空报告。
 

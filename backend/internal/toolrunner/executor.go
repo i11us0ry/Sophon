@@ -35,6 +35,7 @@ type Result struct {
 	ExitCode    int
 	Output      string
 	TimedOut    bool
+	Truncated   bool
 	CPUSeconds  float64
 	BudgetToken string
 }
@@ -57,7 +58,9 @@ func (e *Executor) Run(ctx context.Context, item Tool, args map[string]any) (*Re
 	cpuSeconds := intMapValue(args, "_sophon_max_cpu_seconds")
 	maxProcesses := intMapValue(args, "_sophon_max_processes")
 	budgetToken := strings.TrimSpace(stringMapValue(args, "_sophon_budget_token"))
-	preparedArgs, workspace, conversationWorkspace, err := e.prepareWorkspace(args)
+	projectID := strings.TrimSpace(stringMapValue(args, "_sophon_project_id"))
+	toolPaths := strings.TrimSpace(stringMapValue(args, "_sophon_tool_paths"))
+	preparedArgs, workspace, conversationWorkspace, projectWorkspace, conversationID, err := e.prepareWorkspace(args)
 	if err != nil {
 		return nil, err
 	}
@@ -91,7 +94,19 @@ func (e *Executor) Run(ctx context.Context, item Tool, args map[string]any) (*Re
 	cmd.WaitDelay = 2 * time.Second
 	if workspace != "" {
 		cmd.Dir = workspace
-		cmd.Env = workspaceEnvironment(workspace, conversationWorkspace)
+		cmd.Env = workspaceEnvironment(
+			workspace,
+			conversationWorkspace,
+			projectWorkspace,
+			projectID,
+			conversationID,
+		)
+	} else {
+		cmd.Env = os.Environ()
+	}
+	cmd.Env = prependToolPaths(cmd.Env, toolPaths)
+	for key, value := range item.Environment {
+		cmd.Env = setEnvironmentValue(cmd.Env, key, value)
 	}
 	output := newBoundedOutputBuffer(e.maxOutputBytes())
 	cmd.Stdout = output
@@ -119,6 +134,7 @@ func (e *Executor) Run(ctx context.Context, item Tool, args map[string]any) (*Re
 	result := &Result{
 		Command:     commandLine(command, full),
 		Output:      output.String(),
+		Truncated:   output.Truncated(),
 		CPUSeconds:  cpuSecondsUsed,
 		BudgetToken: budgetToken,
 	}
@@ -165,7 +181,7 @@ func (e *Executor) resolveTimeout(item Tool) time.Duration {
 
 func (e *Executor) prepareWorkspace(
 	args map[string]any,
-) (map[string]any, string, string, error) {
+) (map[string]any, string, string, string, string, error) {
 	prepared := make(map[string]any, len(args))
 	for key, value := range args {
 		prepared[key] = value
@@ -178,11 +194,11 @@ func (e *Executor) prepareWorkspace(
 		workspace = filepath.Join(filepath.Clean(e.WorkspaceRoot), "default")
 	}
 	if workspace == "" {
-		return prepared, "", "", nil
+		return prepared, "", "", "", "", nil
 	}
 	absolute, err := e.resolveWorkspace(workspace)
 	if err != nil {
-		return nil, "", "", err
+		return nil, "", "", "", "", err
 	}
 	conversationWorkspace := strings.TrimSpace(stringMapValue(prepared, "_sophon_conversation_workspace"))
 	if conversationWorkspace == "" {
@@ -190,21 +206,29 @@ func (e *Executor) prepareWorkspace(
 	}
 	conversationAbsolute, err := e.resolveWorkspace(conversationWorkspace)
 	if err != nil {
-		return nil, "", "", err
+		return nil, "", "", "", "", err
 	}
+	projectWorkspace := strings.TrimSpace(stringMapValue(prepared, "_sophon_project_workspace"))
+	if projectWorkspace == "" {
+		projectWorkspace = conversationAbsolute
+	}
+	projectAbsolute, err := e.resolveWorkspace(projectWorkspace)
+	if err != nil {
+		return nil, "", "", "", "", err
+	}
+	conversationID := strings.TrimSpace(stringMapValue(prepared, "_sophon_conversation_id"))
 	for key, value := range prepared {
 		if strings.HasPrefix(key, "_sophon_") {
 			continue
 		}
 		prepared[key] = rewriteWorkspaceValue(value, absolute)
 	}
-	delete(prepared, "_sophon_workspace")
-	delete(prepared, "_sophon_conversation_workspace")
-	delete(prepared, "_sophon_conversation_id")
-	delete(prepared, "_sophon_max_cpu_seconds")
-	delete(prepared, "_sophon_max_processes")
-	delete(prepared, "_sophon_budget_token")
-	return prepared, absolute, conversationAbsolute, nil
+	for key := range prepared {
+		if strings.HasPrefix(key, "_sophon_") {
+			delete(prepared, key)
+		}
+	}
+	return prepared, absolute, conversationAbsolute, projectAbsolute, conversationID, nil
 }
 
 func (e *Executor) resolveWorkspace(workspace string) (string, error) {
@@ -309,11 +333,20 @@ func (w *processBudgetWatch) Stop() string {
 	return w.reason
 }
 
-func workspaceEnvironment(workspace string, conversationWorkspace string) []string {
+func workspaceEnvironment(
+	workspace string,
+	conversationWorkspace string,
+	projectWorkspace string,
+	projectID string,
+	conversationID string,
+) []string {
 	values := map[string]string{
 		"HOME":                          workspace,
 		"SOPHON_WORKSPACE":              workspace,
 		"SOPHON_CONVERSATION_WORKSPACE": conversationWorkspace,
+		"SOPHON_PROJECT_WORKSPACE":      projectWorkspace,
+		"SOPHON_PROJECT_ID":             projectID,
+		"SOPHON_CONVERSATION_ID":        conversationID,
 		"TMP":                           workspace,
 		"TEMP":                          workspace,
 		"TMPDIR":                        workspace,
@@ -326,6 +359,38 @@ func workspaceEnvironment(workspace string, conversationWorkspace string) []stri
 		env = setEnvironmentValue(env, key, value)
 	}
 	return env
+}
+
+func prependToolPaths(env []string, encoded string) []string {
+	paths := make([]string, 0)
+	for _, value := range strings.Split(encoded, string(os.PathListSeparator)) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		paths = append(paths, value)
+	}
+	if len(paths) == 0 {
+		return env
+	}
+	toolOnly := strings.Join(paths, string(os.PathListSeparator))
+	current := getEnvironmentValue(env, "PATH")
+	if current != "" {
+		paths = append(paths, current)
+	}
+	env = setEnvironmentValue(env, "PATH", strings.Join(paths, string(os.PathListSeparator)))
+	env = setEnvironmentValue(env, "SOPHON_TOOL_PATHS", toolOnly)
+	return env
+}
+
+func getEnvironmentValue(env []string, key string) string {
+	prefix := key + "="
+	for _, item := range env {
+		if strings.HasPrefix(item, prefix) {
+			return strings.TrimPrefix(item, prefix)
+		}
+	}
+	return ""
 }
 
 func setEnvironmentValue(env []string, key string, value string) []string {
@@ -454,6 +519,12 @@ func (b *boundedOutputBuffer) String() string {
 		"\n...(输出超过 %d 字节，已截断)",
 		b.limit,
 	)
+}
+
+func (b *boundedOutputBuffer) Truncated() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.total > int64(b.limit)
 }
 
 // BuildArgs 按 YAML 定义把模型参数转为命令行参数。

@@ -25,14 +25,15 @@ type Parameter struct {
 }
 
 type Tool struct {
-	Name             string      `yaml:"name"`
-	Command          string      `yaml:"command"`
-	Enabled          bool        `yaml:"enabled"`
-	ShortDescription string      `yaml:"short_description"`
-	Description      string      `yaml:"description"`
-	Args             []string    `yaml:"args"`
-	AllowedExitCodes []int       `yaml:"allowed_exit_codes"`
-	Parameters       []Parameter `yaml:"parameters"`
+	Name             string            `yaml:"name"`
+	Command          string            `yaml:"command"`
+	Enabled          bool              `yaml:"enabled"`
+	ShortDescription string            `yaml:"short_description"`
+	Description      string            `yaml:"description"`
+	Args             []string          `yaml:"args"`
+	AllowedExitCodes []int             `yaml:"allowed_exit_codes"`
+	Parameters       []Parameter       `yaml:"parameters"`
+	Environment      map[string]string `yaml:"environment"`
 	// TimeoutSeconds 是工具级超时上限（0 表示继承 runner 全局超时）。
 	TimeoutSeconds int `yaml:"timeout_seconds"`
 	// RequiresBinaries / RequiresPython 显式声明运行依赖，供工具自检使用：
@@ -73,10 +74,40 @@ func LoadDir(dir string) ([]Tool, error) {
 		item.RequiresBinaries = normalizeRequirementList(item.RequiresBinaries)
 		item.RequiresPython = normalizeRequirementList(item.RequiresPython)
 		item.RequiresCapabilities = normalizeRequirementList(item.RequiresCapabilities)
+		item.Environment = normalizeEnvironment(item.Environment)
 		tools = append(tools, item)
 	}
 	sort.Slice(tools, func(i, j int) bool { return tools[i].Name < tools[j].Name })
 	return tools, nil
+}
+
+func normalizeEnvironment(values map[string]string) map[string]string {
+	if len(values) == 0 {
+		return nil
+	}
+	normalized := make(map[string]string, len(values))
+	for key, value := range values {
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if key == "" || value == "" || strings.ContainsRune(value, '\x00') {
+			continue
+		}
+		for index, char := range key {
+			if (char >= 'A' && char <= 'Z') || char == '_' ||
+				(index > 0 && char >= '0' && char <= '9') {
+				continue
+			}
+			key = ""
+			break
+		}
+		if key != "" {
+			normalized[key] = value
+		}
+	}
+	if len(normalized) == 0 {
+		return nil
+	}
+	return normalized
 }
 
 func normalizeTimeoutSeconds(value int) int {

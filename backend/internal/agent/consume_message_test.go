@@ -80,7 +80,7 @@ func TestConsumeMessageCapturesReasoningAndThinking(t *testing.T) {
 		t.Fatalf("消费助手流失败: %v", err)
 	}
 
-	toolMessage := schema.ToolMessage("22/tcp open ssh", "call-1")
+	toolMessage := schema.ToolMessage(renderToolSuccess("exec", "22/tcp open ssh"), "call-1")
 	toolMessage.ToolName = "exec"
 	toolVariant := &adk.MessageVariant{Role: schema.Tool, Message: toolMessage}
 	if err := service.consumeMessage(ctx, usage, toolVariant, capture, progress); err != nil {
@@ -117,6 +117,23 @@ func TestConsumeMessageCapturesReasoningAndThinking(t *testing.T) {
 	}
 	if kinds["tool_call"] != "exec" || kinds["tool_result"] != "exec" {
 		t.Fatalf("工具事件异常: %+v", kinds)
+	}
+	var resultData map[string]interface{}
+	for _, event := range events {
+		if event.Type != "tool_result" {
+			continue
+		}
+		resultData, _ = event.Data["data"].(map[string]interface{})
+		if resultData == nil {
+			resultData = event.Data
+		}
+		break
+	}
+	if resultData == nil ||
+		resultData["result"] != "22/tcp open ssh" ||
+		resultData["toolStatus"] != "success" ||
+		resultData["retryable"] != false {
+		t.Fatalf("工具结果事件未拆出协议字段: %+v", resultData)
 	}
 
 	details, err := service.db.ListProcessDetails(ctx, "conv-consume", 50)

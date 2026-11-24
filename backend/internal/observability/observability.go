@@ -48,30 +48,33 @@ type Config struct {
 
 // Event 是一条可外部导出的运行事件，不包含敏感载荷。
 type Event struct {
-	EventID        string    `json:"event_id"`
-	EventType      string    `json:"event_type"`
-	Timestamp      time.Time `json:"timestamp"`
-	UserID         string    `json:"user_id,omitempty"`
-	ProjectID      string    `json:"project_id,omitempty"`
-	ConversationID string    `json:"conversation_id,omitempty"`
-	RunID          string    `json:"run_id,omitempty"`
-	AgentMode      string    `json:"agent_mode,omitempty"`
-	SubagentID     string    `json:"subagent_id,omitempty"`
-	SubagentMode   string    `json:"subagent_mode,omitempty"`
-	AgentName      string    `json:"agent_name,omitempty"`
-	AgentKind      string    `json:"agent_kind,omitempty"`
-	ParentAgentID  string    `json:"parent_agent_id,omitempty"`
-	IntentID       string    `json:"intent_id,omitempty"`
-	HypothesisID   string    `json:"hypothesis_id,omitempty"`
-	CapabilityMode string    `json:"capability_mode,omitempty"`
-	ToolName       string    `json:"tool_name,omitempty"`
-	ServerName     string    `json:"server_name,omitempty"`
-	PolicyDecision string    `json:"policy_decision,omitempty"`
-	Capability     string    `json:"capability,omitempty"`
-	DurationMS     int64     `json:"duration_ms,omitempty"`
-	Success        *bool     `json:"success,omitempty"`
-	ErrorCategory  string    `json:"error_category,omitempty"`
-	Detail         string    `json:"detail,omitempty"`
+	EventID         string    `json:"event_id"`
+	EventType       string    `json:"event_type"`
+	Timestamp       time.Time `json:"timestamp"`
+	UserID          string    `json:"user_id,omitempty"`
+	ProjectID       string    `json:"project_id,omitempty"`
+	ConversationID  string    `json:"conversation_id,omitempty"`
+	RunID           string    `json:"run_id,omitempty"`
+	AgentMode       string    `json:"agent_mode,omitempty"`
+	TaskProfileID   string    `json:"task_profile_id,omitempty"`
+	TaskProfileName string    `json:"task_profile_name,omitempty"`
+	TaskProfileHash string    `json:"task_profile_hash,omitempty"`
+	SubagentID      string    `json:"subagent_id,omitempty"`
+	SubagentMode    string    `json:"subagent_mode,omitempty"`
+	AgentName       string    `json:"agent_name,omitempty"`
+	AgentKind       string    `json:"agent_kind,omitempty"`
+	ParentAgentID   string    `json:"parent_agent_id,omitempty"`
+	IntentID        string    `json:"intent_id,omitempty"`
+	HypothesisID    string    `json:"hypothesis_id,omitempty"`
+	CapabilityMode  string    `json:"capability_mode,omitempty"`
+	ToolName        string    `json:"tool_name,omitempty"`
+	ServerName      string    `json:"server_name,omitempty"`
+	PolicyDecision  string    `json:"policy_decision,omitempty"`
+	Capability      string    `json:"capability,omitempty"`
+	DurationMS      int64     `json:"duration_ms,omitempty"`
+	Success         *bool     `json:"success,omitempty"`
+	ErrorCategory   string    `json:"error_category,omitempty"`
+	Detail          string    `json:"detail,omitempty"`
 }
 
 // Metrics 是进程内的聚合指标快照。

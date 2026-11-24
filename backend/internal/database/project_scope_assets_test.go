@@ -95,6 +95,18 @@ func TestSyncProjectScopeAssetsIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestInferAssetKindSkipsAmbiguousBareArtifactName(t *testing.T) {
+	if kind := inferAssetKind("seeyon20250422"); kind != "" {
+		t.Fatalf("裸源码包名称不应自动推断为网络资产: %s", kind)
+	}
+	if kind := inferAssetKind("internal-host"); kind != "" {
+		t.Fatalf("无点号且无端口的主机名应要求显式指定类型: %s", kind)
+	}
+	if kind := inferAssetKind("app.internal"); kind != "host" {
+		t.Fatalf("带点号的内部主机名应推断为 host: %s", kind)
+	}
+}
+
 func TestBackfillProjectScopeAssets(t *testing.T) {
 	db, err := Open(filepath.Join(t.TempDir(), "project-scope-backfill.db"))
 	if err != nil {

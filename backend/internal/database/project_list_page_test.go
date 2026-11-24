@@ -105,6 +105,89 @@ func TestListProjectsWithCountsPageUsesStableCursor(t *testing.T) {
 	}
 }
 
+func TestProjectListCountsPendingIntentsAndEvidenceGaps(t *testing.T) {
+	db := openGraphSyncTestDB(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	if err := db.CreateProject(ctx, Project{
+		ID: "project-signals", OwnerUserID: "user-1", Name: "信号统计",
+		Status: "active", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("创建项目失败: %v", err)
+	}
+	for _, node := range []GraphNode{
+		{ID: "intent-open", ProjectID: "project-signals", Kind: "intent", Title: "待办", Status: "open"},
+		{ID: "intent-running", ProjectID: "project-signals", Kind: "intent", Title: "运行中", Status: "running"},
+		{ID: "intent-done", ProjectID: "project-signals", Kind: "intent", Title: "已完成", Status: "done"},
+	} {
+		node.CreatedAt = now
+		node.UpdatedAt = now
+		if err := db.CreateProjectGraphNode(ctx, node); err != nil {
+			t.Fatalf("创建意图节点失败: %v", err)
+		}
+	}
+	for _, fact := range []ProjectFact{
+		{
+			ID: "fact-gap", ProjectID: "project-signals", FactType: "observation",
+			Key: "gap", Summary: "缺证据事实", Evidence: "", CreatedAt: now,
+		},
+		{
+			ID: "fact-evidence", ProjectID: "project-signals", FactType: "observation",
+			Key: "evidence", Summary: "有证据事实", Evidence: "tool:1", CreatedAt: now,
+		},
+		{
+			ID: "fact-audit", ProjectID: "project-signals", FactType: "audit",
+			Key: "checkpoint", Summary: "审计控制事实", Evidence: "",
+			SubjectType: "audit_checkpoint", CreatedAt: now,
+		},
+	} {
+		if _, err := db.UpsertProjectFact(ctx, fact); err != nil {
+			t.Fatalf("创建事实失败: %v", err)
+		}
+	}
+	if err := db.CreateVulnerability(ctx, Vulnerability{
+		ID: "vuln-gap", ProjectID: "project-signals", OwnerUserID: "user-1",
+		Title: "缺证据漏洞", Severity: "high", Status: "open",
+		CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("创建缺证据漏洞失败: %v", err)
+	}
+	if err := db.CreateVulnerability(ctx, Vulnerability{
+		ID: "vuln-evidence", ProjectID: "project-signals", OwnerUserID: "user-1",
+		Title: "有证据漏洞", Severity: "high", Status: "open",
+		Evidence: "HTTP 500", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("创建有证据漏洞失败: %v", err)
+	}
+	items, _, _, err := db.ListProjectsWithCountsOffset(ctx, ProjectListFilter{
+		OwnerUserID: "user-1",
+		Limit:       10,
+	})
+	if err != nil {
+		t.Fatalf("读取项目统计失败: %v", err)
+	}
+	var target *ProjectWithCounts
+	for index := range items {
+		if items[index].ID == "project-signals" {
+			target = &items[index]
+			break
+		}
+	}
+	if target == nil {
+		t.Fatalf("未找到目标项目: %+v", items)
+	}
+	if target.Counts.PendingIntents != 2 {
+		t.Fatalf("待办意图统计错误: %+v", target.Counts)
+	}
+	if target.Counts.EvidenceGaps != 2 {
+		t.Fatalf("证据缺口统计错误: %+v", target.Counts)
+	}
+	summary, err := db.ProjectSummary(ctx, "project-signals", "user-1")
+	if err != nil || summary.PendingIntents != 2 || summary.EvidenceGaps != 2 {
+		t.Fatalf("项目详情统计错误: summary=%+v err=%v", summary, err)
+	}
+}
+
 func TestListProjectsWithCountsOffsetFiltersAndPaginates(t *testing.T) {
 	db := openGraphSyncTestDB(t)
 	ctx := context.Background()

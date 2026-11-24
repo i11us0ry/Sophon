@@ -1,0 +1,91 @@
+name: "payload_factory"
+command: "python3"
+args: ["/opt/sophon/tools/payload_factory.py"]
+enabled: true
+timeout_seconds: 90
+requires_binaries:
+  - "java"
+  - "javac"
+short_description: "生成 Godzilla WebShell 和 suo5 隧道服务端脚本及完整交付物"
+description: |
+  平台内置 Payload Factory。Agent 只需提供 family、language、container、password 和
+  secret_key，工具会使用固定版本的 Godzilla gsl5.jar 生成官方兼容 Shell，或复制固定版本的
+  suo5 v2.2.0 服务端脚本。
+
+  输出目录包含 Shell 文件、client-config.json、验证/启动 Python 脚本、HTTP 上传模板、
+  metadata.json 和 report.md。报告、漏洞编写和后续 Worker 应直接使用这些 artifact，
+  不需要反编译 gsl5.jar，也不需要在项目内重新实现协议。
+
+  family=godzilla 支持 java/jsp、java/jspx、csharp/aspx、csharp/ashx、php/php、asp/asp。
+  family=suo5 支持 java/jsp、csharp/aspx、php/php、javascript/js。
+parameters:
+  - name: "operation"
+    type: "string"
+    description: "操作类型：help 查看参数，generate 生成交付物"
+    required: true
+    position: 0
+    format: "positional"
+    options: ["help", "generate"]
+  - name: "family"
+    type: "string"
+    description: "generate 时必填：godzilla 或 suo5"
+    required: false
+    flag: "--family"
+    format: "flag"
+    options: ["godzilla", "suo5"]
+  - name: "language"
+    type: "string"
+    description: "目标语言：java、csharp/dotnet、php、asp、javascript/nodejs"
+    required: false
+    flag: "--language"
+    format: "flag"
+  - name: "container"
+    type: "string"
+    description: "文件类型：jsp、jspx、aspx、ashx、php、asp、js"
+    required: false
+    flag: "--container"
+    format: "flag"
+  - name: "password"
+    type: "string"
+    description: "Godzilla 请求参数名；Godzilla 必填，suo5 不需要"
+    required: false
+    flag: "--password"
+    format: "flag"
+  - name: "secret_key"
+    type: "string"
+    description: "Godzilla 通信密钥；留空自动生成，suo5 不使用"
+    required: false
+    flag: "--secret-key"
+    format: "flag"
+  - name: "cryptor"
+    type: "string"
+    description: "Godzilla 加密器，默认按语言选择；例如 JavaAesBase64、CSharpEvalAesBase64、PhpXor"
+    required: false
+    flag: "--cryptor"
+    format: "flag"
+  - name: "output_name"
+    type: "string"
+    description: "自定义 Shell 文件名；省略时自动命名"
+    required: false
+    flag: "--output-name"
+    format: "flag"
+  - name: "target_url"
+    type: "string"
+    description: "可选，上传后的完整 Shell URL，用于预填验证和隧道脚本"
+    required: false
+    flag: "--target-url"
+    format: "flag"
+  - name: "port"
+    type: "int"
+    description: "suo5 本地 SOCKS5 端口，默认 1111"
+    required: false
+    flag: "--port"
+    format: "flag"
+    default: 1111
+  - name: "proxy_auth"
+    type: "string"
+    description: "suo5 本地 SOCKS5 认证，默认 auto；也可传 username:password"
+    required: false
+    flag: "--proxy-auth"
+    format: "flag"
+    default: "auto"

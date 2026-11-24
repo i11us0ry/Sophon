@@ -155,21 +155,9 @@ func TestAgentRoleListIncludesMandatoryInternalAgentsOnDemand(t *testing.T) {
 	}
 
 	normalItems := readItems("/api/agent-roles")
-	if len(normalItems) != 2 {
-		t.Fatalf("对话角色列表应返回复测 Agent 和普通角色: %+v", normalItems)
-	}
-	retestFound := false
-	normalRoleFound := false
-	for _, item := range normalItems {
-		switch item.ID {
-		case agentpkg.SystemRetestAgentID:
-			retestFound = item.Internal
-		default:
-			normalRoleFound = !item.Internal
-		}
-	}
-	if !retestFound || !normalRoleFound {
-		t.Fatalf("对话角色列表应仅额外包含复测系统 Agent: %+v", normalItems)
+	if len(normalItems) != 1 || normalItems[0].ID != "role-normal" ||
+		normalItems[0].Kind != "task_profile" || normalItems[0].System {
+		t.Fatalf("普通列表应只返回 Task Profile: %+v", normalItems)
 	}
 	items := readItems("/api/agent-roles?includeInternal=true")
 	if len(items) != 9 {
@@ -182,7 +170,13 @@ func TestAgentRoleListIncludesMandatoryInternalAgentsOnDemand(t *testing.T) {
 	editable := 0
 	for _, item := range items {
 		if !item.Internal {
+			if item.Kind != "task_profile" || item.System {
+				t.Fatalf("Task Profile 分类错误: %+v", item)
+			}
 			continue
+		}
+		if item.Kind != "system_agent" || !item.System {
+			t.Fatalf("系统 Agent 分类错误: %+v", item)
 		}
 		internal++
 		if !item.Enabled || !item.Builtin {
@@ -192,6 +186,10 @@ func TestAgentRoleListIncludesMandatoryInternalAgentsOnDemand(t *testing.T) {
 			if item.Mandatory || !item.Editable {
 				t.Fatalf("漏洞审核应为可编辑、可停用系统 Agent: %+v", item)
 			}
+		} else if item.ID == agentpkg.SystemVulnerabilityWriterID {
+			if !item.Mandatory || !item.Editable {
+				t.Fatalf("漏洞编写应为强制启用、可编辑系统 Agent: %+v", item)
+			}
 		} else if !item.Mandatory || item.Editable {
 			t.Fatalf("其他系统 Agent 必须强制启用且只读: %+v", item)
 		}
@@ -200,16 +198,17 @@ func TestAgentRoleListIncludesMandatoryInternalAgentsOnDemand(t *testing.T) {
 		}
 		if item.Editable {
 			editable++
-			if item.ID != agentpkg.SystemVulnerabilityReviewerID {
-				t.Fatalf("仅漏洞审核角色应可编辑: %+v", item)
+			if item.ID != agentpkg.SystemVulnerabilityReviewerID &&
+				item.ID != agentpkg.SystemVulnerabilityWriterID {
+				t.Fatalf("仅漏洞审核和漏洞编写角色应可编辑: %+v", item)
 			}
 		}
 	}
 	if internal != 8 {
 		t.Fatalf("应返回八个系统 Agent，实际 %d", internal)
 	}
-	if editable != 1 {
-		t.Fatalf("应仅返回一个可编辑系统 Agent，实际 %d", editable)
+	if editable != 2 {
+		t.Fatalf("应返回两个可编辑系统 Agent，实际 %d", editable)
 	}
 }
 
@@ -231,7 +230,6 @@ func TestReadOnlySystemAgentsCannotBeEditedDisabledOrDeleted(t *testing.T) {
 		agentpkg.SystemMissionPolicyAgentID,
 		agentpkg.SystemDeepPathPlannerID,
 		agentpkg.SystemDeepPathWorkerID,
-		agentpkg.SystemDeepPathSubAgentID,
 	} {
 		role, err := db.GetAgentRole(t.Context(), id)
 		if err != nil {

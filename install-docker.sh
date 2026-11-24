@@ -428,10 +428,12 @@ install_system_dependencies() {
   local required=(
     ca-certificates curl wget unzip tar xz-utils git build-essential pkg-config
     libsqlite3-dev libpcap-dev sqlite3 nginx python3 python3-venv python3-pip
-    default-jre-headless libcap2-bin openssl util-linux procps iproute2
-    nmap masscan sqlmap
+    python3-dev ruby ruby-dev ruby-addressable autoconf automake libtool bison flex
+    libssl-dev libssh-dev libidn11-dev libpcre2-dev libgtk-3-dev
+    zlib1g-dev libbz2-dev libgmp-dev libgomp1 default-jdk-headless libcap2-bin
+    openssl util-linux procps iproute2 nmap masscan
   )
-  local optional=(whatweb dirsearch hydra john nbtscan wafw00f nuclei responder)
+  local optional=(nbtscan)
   exec_sh 'command -v apt-get >/dev/null 2>&1' || die "基础镜像缺少 apt-get，请使用 Kali/Debian 系镜像"
   apt_update_with_retries bootstrap
   info "安装 APT HTTPS 证书依赖..."
@@ -592,21 +594,22 @@ build_backend_in_container() {
 
 copy_resources() {
   exec_sh "mkdir -p '${APP_ROOT}/backend' '${APP_ROOT}/frontend/dist' '${APP_ROOT}/data' \
-    '${APP_ROOT}/deploy' '${APP_ROOT}/roles' '${APP_ROOT}/skills' '${APP_ROOT}/tools' \
+    '${APP_ROOT}/deploy' '${APP_ROOT}/roles' '${APP_ROOT}/skills' '${APP_ROOT}/tools' '${APP_ROOT}/customTools' \
     '${APP_ROOT}/thirdTools' '${APP_ROOT}/licenses'"
   exec_sh "install -m 0755 '${BUILD_ROOT}/sophon-server' '${APP_ROOT}/backend/sophon-server' && \
     install -m 0755 '${BUILD_ROOT}/sophon-mcp-tools' '${APP_ROOT}/backend/sophon-mcp-tools' && \
     install -m 0755 '${BUILD_ROOT}/sophon-tool-runner' '${APP_ROOT}/backend/sophon-tool-runner'"
   "${DOCKER[@]}" cp "${FRONTEND_BUILDER}:/work/dist/." "$CONTAINER:${APP_ROOT}/frontend/dist/"
-  for name in deploy roles skills tools licenses; do
+  for name in deploy roles skills tools customTools licenses; do
     "${DOCKER[@]}" cp "$ROOT_DIR/${name}/." "$CONTAINER:${APP_ROOT}/${name}/"
   done
+  exec_sh "cp '${APP_ROOT}'/customTools/definitions/*.yaml '${APP_ROOT}/tools/'"
   if [[ -d "$ROOT_DIR/thirdTools" ]] && [[ -n "$(find "$ROOT_DIR/thirdTools" -type f -print -quit)" ]]; then
     "${DOCKER[@]}" cp "$ROOT_DIR/thirdTools/." "$CONTAINER:${APP_ROOT}/thirdTools/"
   else
     warn "未提供 thirdTools；平台将使用系统命令环境，用户可稍后上传工具"
   fi
-  exec_sh "find '${APP_ROOT}/deploy' '${APP_ROOT}/tools' -type f -exec sed -i 's|/opt/sophon|${APP_ROOT}|g' {} +"
+  exec_sh "find '${APP_ROOT}/deploy' '${APP_ROOT}/tools' '${APP_ROOT}/customTools' -type f -exec sed -i 's|/opt/sophon|${APP_ROOT}|g' {} +"
 
   if ! exec_sh "test -f '${APP_ROOT}/config.yml'"; then
     "${DOCKER[@]}" cp "$ROOT_DIR/config.example.yml" "$CONTAINER:${APP_ROOT}/config.yml"
@@ -652,11 +655,11 @@ install_python_container() {
   }
   local index
   info "创建 Python 虚拟环境..."
-  exec_sh "python3 -m venv '${APP_ROOT}/venv'"
+  exec_sh "python3 -m venv --system-site-packages '${APP_ROOT}/venv'"
   while IFS= read -r index; do
     [[ -n "$index" ]] || continue
     info "安装 Python 依赖，index ${index}"
-    if exec_sh "'${APP_ROOT}/venv/bin/python' -m pip install --disable-pip-version-check --no-cache-dir --retries 2 --timeout 30 --index-url '${index}' requests httpx h2 impacket"; then
+    if exec_sh "'${APP_ROOT}/venv/bin/python' -m pip install --disable-pip-version-check --no-cache-dir --retries 2 --timeout 30 --index-url '${index}' requests PySocks httpx h2 impacket ddddocr==1.6.1"; then
       exec_sh "umask 077 && printf '[global]\\nindex-url = ${index}\\n' > '${APP_ROOT}/venv/pip.conf'"
       ok "Python 包源: $index"
       return
@@ -681,7 +684,7 @@ install_tools_container() {
     if [ -f \"\$T/httpx_1.12.0_linux_${ARCH}.zip\" ]; then unzip -p \"\$T/httpx_1.12.0_linux_${ARCH}.zip\" httpx > \"\$T/httpx\"; fi
     if [ -f \"\$T/katana_1.8.0_linux_${ARCH}.zip\" ]; then unzip -p \"\$T/katana_1.8.0_linux_${ARCH}.zip\" katana > \"\$T/katana\"; fi
     if [ -f \"\$T/ksubdomain_linux.zip\" ]; then unzip -p \"\$T/ksubdomain_linux.zip\" ksubdomain > \"\$T/ksubdomain\"; fi
-    for f in naabu httpx katana ksubdomain decompile.py host_collision.py bypass403.py; do
+    for f in naabu httpx katana ksubdomain decompile.py; do
       [ -f \"\$T/\$f\" ] && chmod 0755 \"\$T/\$f\" || true
     done"
   if exec_sh "test -x '${APP_ROOT}/thirdTools/ksubdomain'" && \

@@ -21,12 +21,14 @@
 
 ## 项目简介
 
-Sophon 是一个面向授权安全测试、代码审计和攻防演练的智能 Agent 工作台。平台将角色、技能、项目上下文、工具执行、证据、漏洞审核、复测和报告输出整合到同一工作流中。
+Sophon 是一个面向授权安全测试、代码审计和攻防演练的智能 Agent 工作台。平台将系统 Agent、可选任务模板、技能、项目上下文、工具执行、证据、漏洞审核、复测和报告输出整合到同一工作流中。
 
-它支持两种运行模式：
+运行时会根据任务复杂度组织 Agent 协作：
 
-- **单 Agent 模式**：当前角色直接使用其提示词、技能和项目上下文执行任务。
-- **多 Agent 模式**：主 Agent 负责协调，Planner 生成可验证假设，Worker 在受限范围内执行并写回证据。
+- **主 Agent**：面向用户理解目标、汇总态势、下发意图和审核结果。
+- **Planner**：读取项目图谱、事实、漏洞和运行状态，将未覆盖方向转化为可验证假设。
+- **Worker**：领取单一假设，在授权范围内执行测试、收集证据并写回结果。
+- **系统 Agent**：负责安全策略、漏洞审核、漏洞编写、复测和报告等独立职责。
 
 Sophon 的目标不是让模型无限调用扫描器，而是让每次测试具备明确范围、真实证据、审核记录和可复现结论。
 
@@ -45,10 +47,10 @@ Sophon 的目标不是让模型无限调用扫描器，而是让每次测试具�
 | [![项目详情](./screenshots/thumbs/project-detail.png)](./screenshots/project-detail.png) | [![资产管理](./screenshots/thumbs/assets.png)](./screenshots/assets.png) | [![漏洞管理](./screenshots/thumbs/vulnerabilities.png)](./screenshots/vulnerabilities.png) |
 | **项目详情** | **资产管理** | **漏洞管理** |
 
-| 角色管理 | 技能管理 | MCP 管理 |
+| Agent 管理 | 技能管理 | MCP 管理 |
 |:---:|:---:|:---:|
-| [![角色管理](./screenshots/thumbs/roles.png)](./screenshots/roles.png) | [![技能管理](./screenshots/thumbs/skills.png)](./screenshots/skills.png) | [![MCP 管理](./screenshots/thumbs/mcp.png)](./screenshots/mcp.png) |
-| **角色管理** | **技能管理** | **MCP 管理** |
+| [![Agent 管理](./screenshots/thumbs/roles.png)](./screenshots/roles.png) | [![技能管理](./screenshots/thumbs/skills.png)](./screenshots/skills.png) | [![MCP 管理](./screenshots/thumbs/mcp.png)](./screenshots/mcp.png) |
+| **Agent 管理** | **技能管理** | **MCP 管理** |
 
 | 审计监控 | 工作空间 | 系统设置 |
 |:---:|:---:|:---:|
@@ -59,17 +61,20 @@ Sophon 的目标不是让模型无限调用扫描器，而是让每次测试具�
 
 | 能力 | 说明 |
 |---|---|
-| 单 Agent | 直接使用当前角色、技能和项目上下文执行任务 |
-| 多 Agent | 主 Agent、Planner、Worker 和受限子 Agent 协同执行 |
-| 角色与技能 | 角色定义业务身份；技能提供方法和检查项，按需加载正文 |
-| 项目上下文 | 项目、资产、事实、测试假设、漏洞、会话和攻击路径统一关联 |
+| 主 Agent | 理解用户目标、调度 Planner/Worker、跟踪状态并汇总结果 |
+| 多 Agent | 主 Agent、Planner、Worker 和系统 Agent 按责任协同执行 |
+| 系统 Agent 与任务模板 | 系统 Agent 定义运行身份；Task Profile 和 Skill 只提供可选方法 |
+| 项目上下文 | 项目、资产、事实、待办意图、证据缺口、测试假设、漏洞、会话和攻击路径统一关联 |
 | 证据驱动 | 漏洞需关联工具输出、请求响应、源码位置或可复现步骤 |
 | 安全边界 | Mission Policy、授权范围、路径限制、人工审批和资源预算 |
-| MCP 与本地工具 | 支持 MCP 服务、工具白名单、YAML 工具和本地命令环境 |
+| MCP 与本地工具 | 支持 MCP 服务、YAML 工具、动态 PATH 和 Agent 自主补齐工具 |
+| WebShell 与隧道 | Godzilla 官方协议桥接、Payload Factory 和 suo5 SOCKS5 隧道管理 |
+| Tool Catalog | 已审核工具的快速安装、校验、源码构建和版本管理，不限制 Agent 自行下载其他工具 |
+| Agent 工具注册表 | 登记 Agent 自己下载或编译的工具，支持会话、项目、全局作用域及环境变量 |
 | 智子分身 | 将高并发扫描、脚本执行和工具调用分流到多台 VPS，降低本地资源压力 |
 | 代码审计 | 内置 Java、PHP、.NET、二进制和 App 逆向相关能力 |
 | 漏洞治理 | 漏洞审核、状态流转、复测、证据引用和报告导出 |
-| 审计与 RBAC | 登录审计、工具执行记录、Agent 状态、Token 用量和路由级权限 |
+| 审计与 RBAC | 登录审计、工具注册与执行、Agent 状态、Token 用量和路由级权限 |
 | 中英文界面 | 简体中文与英文界面，支持明暗主题 |
 
 ## 系统架构
@@ -88,7 +93,10 @@ Go API / Agent Runtime
   ├── SQLite
   ├── Workspace 与附件
   ├── MCP Client
-  ├── 本地工具执行器
+  ├── Tool Catalog
+  ├── Agent Tool Registry
+  ├── 动态工具 PATH
+  ├── Tool Runner / 本地工具执行器
   └── LLM / Embedding API
 ```
 
@@ -96,19 +104,18 @@ Go API / Agent Runtime
 
 Sophon 不会在每轮对话中加载全部技能正文。默认只注入：
 
-- 当前角色提示词
-- 已绑定技能名称
-- 技能摘要
+- 系统 Agent 身份与职责
+- 可选 Task Profile 的方法提示
+- 推荐方法包名称和摘要
 - 项目、资产、事实和记忆
 - Mission Policy
 
-只有模型需要具体执行步骤时，才通过 `read_skill` 加载技能正文。
+Task Profile 和 Skill 不改变 Agent 身份、模式、工具或权限。只有模型需要具体执行步骤时，才通过 `read_skill` 加载全局技能正文。
 
 ```text
-用户选择角色
-├── 角色提示词 ─────────────────┐
-└── 绑定技能列表
-    └── 技能名称与摘要 ─────────┤
+系统 Agent 身份
+├── 可选 Task Profile ──────────┐
+└── 推荐方法包名称与摘要 ───────┤
                                 ├── 初始上下文 → LLM
 项目、资产、事实 ───────────────┤
 会话摘要与长期记忆 ─────────────┤
@@ -116,6 +123,77 @@ Mission Policy ─────────────────┘
 
 LLM ── 需要完整步骤时 ──> read_skill ──> 技能正文
 ```
+
+## Agent 工具自主补齐
+
+Sophon 不把 Tool Catalog 当作工具白名单。Agent 可以根据实际任务自行下载、解包、编译、安装工具，也可以优先使用 Catalog 中已经审核的固定版本。
+
+完整流程：
+
+```text
+发现工具或依赖缺失
+  -> tool_probe 检查 PATH、项目/会话工具目录和 Catalog 状态
+  -> 使用已有命令、Catalog 快速安装，或自行下载/构建
+  -> tool_register 注册命令、参数、环境变量、版本和来源
+  -> tool_env_add_path 补充动态 PATH，或直接使用 tool_run
+  -> Tool Runner 执行工具并记录审计事件
+  -> Agent 继续原任务
+```
+
+Agent 可以使用以下工具：
+
+| 工具 | 用途 |
+|---|---|
+| `tool_probe` | 检查命令、依赖、包管理器、编译器和 Catalog 可用性 |
+| `tool_catalog_ensure` | Catalog 有对应工具时快速安装并验证；未收录时继续由 Agent 自行处理 |
+| `tool_register` | 注册 Agent 自己下载或编译的工具 |
+| `tool_run` | 运行已注册工具并自动应用保存的参数和环境变量 |
+| `tool_env_add_path` | 为当前会话、项目或用户全局环境添加动态 PATH |
+| `tool_unregister` | 删除工具注册或 PATH 条目，不删除已下载文件 |
+
+工具注册支持三类作用域：
+
+- `session`：仅当前会话可用
+- `project`：当前项目全部会话可用
+- `global`：当前用户的跨项目工具环境可用
+
+动态 PATH 不会写入 `.bashrc`、`.profile` 或容器全局环境，而是在 Tool Runner 启动工具进程时注入。全局工具和全局 PATH 按用户隔离。Agent 注册的工具仍受现有 Policy Engine、拦截规则、人工审批、超时、CPU 和进程预算约束。
+
+## WebShell 与隧道工具
+
+Sophon 将常用 WebShell 和 HTTP 隧道操作封装为平台工具，避免 Agent 在每个项目中反复研究客户端协议、JAR 内部实现或临时编写兼容脚本。
+
+| 工具 | 用途 |
+|---|---|
+| `payload_factory` | 生成 Godzilla WebShell、suo5 服务端脚本、客户端配置、验证脚本和报告片段 |
+| `godzilla` | 从 gsl5.jar 动态读取官方 Payload/Cryption，验证连接并返回分阶段错误 |
+| `suo5` | 启动、查询和停止只监听 `127.0.0.1` 的 SOCKS5 隧道 |
+
+Godzilla 工具直接使用内置 gsl5.jar 的官方 Payload 和 Cryption 实现，不再由 Python 重写官方密钥派生、响应 marker 或请求体格式。`operation=list` 和 `operation=help` 会动态读取当前 JAR 支持的协议组合；`auto` 与 `official` 只使用官方实现，官方失败不会自动降级到 simplified 协议。失败结果包含具体阶段、Java 原始错误、派生 key 指纹和实际 Payload/Cryption，不再统一显示为“官方协议握手失败”。
+
+Payload Factory 根据语言、容器、密码和密钥生成可直接使用的交付物：
+
+```text
+artifacts/payload-factory/<artifact-id>/
+├── Shell 文件
+├── client-config.json
+├── verify.py / start_tunnel.py
+├── request.http
+├── metadata.json
+└── report.md
+```
+
+Godzilla 支持 Java JSP/JSPX、C# ASPX/ASHX、PHP 和 ASP；suo5 支持 Java JSP、C# ASPX、PHP 和 Node.js。生成结果包含固定的模板来源、文件哈希和可复现报告片段，后续 Worker、漏洞编写和报告流程可以直接复用。
+
+suo5 管理工具仅监听 `127.0.0.1`，启动等待时间根据请求 `timeout` 和 `retry` 自动调整，避免远端握手耗时超过固定阈值时在代理端口建立前被误杀。隧道状态、认证信息、PID 和日志均保存在当前会话的 `.suo5` 目录。
+
+## 扩散与变换思维
+
+Planner 和 Worker 都使用扩散思维，但责任边界不同：
+
+- Worker 在当前 intent 内持续尝试不同入口、参数、身份、协议、编码、组件和利用链，不因已有成果或暂时失败而直接停止；超出 intent 的高价值线索写回事实交给 Planner。
+- Planner 在项目全局持续评估成果的普遍性、深入性、可延展性和替代路径，不因已发现单个漏洞而提前收敛，也不因暂时没有成果而停摆。
+- Planner 在扩散后必须去重、排序、遵守授权边界，并收敛为可执行假设或明确的 Goal 判断。
 
 ## 智子分身
 
@@ -245,6 +323,9 @@ chmod +x install-docker.sh
 - 生产环境必须使用 HTTPS，并设置 `SOPHON_COOKIE_SECURE=true`。
 - 服务应部署在受信任网络或带认证的反向代理之后。
 - MCP 服务、自定义工具和高风险命令启用前必须审核。
+- Agent 自主下载或编译的工具应确认来源可信，并在 `tool_register` 中记录版本、来源和健康检查命令。
+- 定期检查“MCP 管理”中的 Agent 工具注册表和动态 PATH，删除不再使用或来源不明的条目。
+- 工具环境变量在管理 API 和前端中按脱敏形式返回，但数据库中的原始环境配置仍属于敏感数据。
 - 工作区、附件、工具输出和漏洞证据均应视为敏感数据。
 - 定期轮换 LLM、Embedding 和其他第三方凭据。
 - 定期备份 SQLite 数据库、`config.yml`、工作区、附件和角色技能配置。
@@ -264,6 +345,22 @@ Sophon 仅允许用于本公司、本组织拥有或明确控制的系统，以�
 ## 更新记录
 
 - 20261113: 新增智子分身功能、修复一些小bug
+- 20261122: 解耦系统 Agent 与业务角色，新增可选 Task Profile/方法包机制
+- 20261124:
+  - 新增 Agent 工具自主补齐、Tool Catalog 快速安装、工具注册表和动态 PATH
+  - 新增会话/项目/用户全局工具作用域，以及已注册工具的 `tool_run`
+  - 新增 Planner/Worker 扩散与变换思维准则
+  - 新增漏洞草稿持久化、后台重试和待处理漏洞界面
+  - 新增同资产多假设并行调度、Worker 中断恢复和失败续跑
+  - 新增项目待办意图、证据缺口统计及项目列表排序/分页能力
+  - 新增 Planner/Worker 会话回到底部、会话折叠状态和批量启动运行设置
+  - 新增 Godzilla 官方协议桥接和动态协议目录，支持分阶段错误、key 指纹及官方 cryptor 自动解析
+  - 新增 Payload Factory，可生成 Godzilla WebShell、suo5 服务端脚本及完整验证/报告产物
+  - 重构 suo5 隧道管理，启动等待时间根据 timeout/retry 自适应，修复慢握手被固定超时误杀
+  - 安全策略会话改为显示真实拦截原因，不再生成无意义的“安全策略已完成”占位事件
+  - 修复 Planner 服务异常时已有假设无法启动 Worker，以及暂停编排无法继续的问题
+  - 修复续跑任务仍被旧主 Agent 运行状态占用的问题
+  - 修复会话切换消息丢失、重复新建会话、Worker 重复启动和任务暂停后继续执行等问题
 
 ## 许可证
 
@@ -276,12 +373,14 @@ Sophon 仅允许用于本公司、本组织拥有或明确控制的系统，以�
 
 ## Overview
 
-Sophon is a security Agent workbench for authorized security testing, code review, and defensive exercises. It combines roles, skills, project context, tool execution, evidence, vulnerability review, retesting, and reporting in one workflow.
+Sophon is a security Agent workbench for authorized security testing, code review, and defensive exercises. It combines system Agents, optional task profiles, skills, project context, tool execution, evidence, vulnerability review, retesting, and reporting in one workflow.
 
-It supports two execution modes:
+Sophon organizes Agent work according to task complexity:
 
-- **Single-Agent mode**: the selected role executes directly with its prompt, skills, and project context.
-- **Multi-Agent mode**: the main Agent coordinates work, the Planner creates verifiable hypotheses, and Workers execute within restricted scopes and write back evidence.
+- **Main Agent**: understands the user goal, observes project state, dispatches work, and reviews outcomes.
+- **Planner**: turns uncovered project areas into verifiable hypotheses.
+- **Worker**: executes one hypothesis, collects evidence, and writes results back.
+- **System Agents**: handle security policy, vulnerability review, writing, retesting, and reporting.
 
 Sophon is designed to make every test scoped, traceable, evidence-backed, reviewable, and auditable instead of allowing unbounded model-driven scanning.
 
@@ -300,10 +399,10 @@ Sophon is designed to make every test scoped, traceable, evidence-backed, review
 | [![Project Detail](./screenshots/thumbs/project-detail.png)](./screenshots/project-detail.png) | [![Assets](./screenshots/thumbs/assets.png)](./screenshots/assets.png) | [![Vulnerabilities](./screenshots/thumbs/vulnerabilities.png)](./screenshots/vulnerabilities.png) |
 | **Project Detail** | **Assets** | **Vulnerabilities** |
 
-| Roles | Skills | MCP |
+| Agent Control | Skills | MCP |
 |:---:|:---:|:---:|
-| [![Roles](./screenshots/thumbs/roles.png)](./screenshots/roles.png) | [![Skills](./screenshots/thumbs/skills.png)](./screenshots/skills.png) | [![MCP](./screenshots/thumbs/mcp.png)](./screenshots/mcp.png) |
-| **Roles** | **Skills** | **MCP** |
+| [![Agent Control](./screenshots/thumbs/roles.png)](./screenshots/roles.png) | [![Skills](./screenshots/thumbs/skills.png)](./screenshots/skills.png) | [![MCP](./screenshots/thumbs/mcp.png)](./screenshots/mcp.png) |
+| **Agent Control** | **Skills** | **MCP** |
 
 | Audit | Workspace | Settings |
 |:---:|:---:|:---:|
@@ -314,13 +413,16 @@ Sophon is designed to make every test scoped, traceable, evidence-backed, review
 
 | Capability | Description |
 |---|---|
-| Single Agent | Executes with the selected role, skills, and project context |
-| Multi Agent | Main Agent, Planner, Workers, and restricted sub-Agents |
-| Roles and skills | Roles define identity; skills provide methods and checklists |
-| Project context | Projects, assets, facts, hypotheses, findings, and graphs |
+| Main Agent | Understands goals, dispatches Planner/Worker work, tracks state, and reports results |
+| Multi Agent | Main Agent, Planner, Workers, and system Agents with explicit responsibilities |
+| System Agents and task profiles | System Agents define identity; task profiles and skills only provide optional methods |
+| Project context | Projects, assets, facts, pending intents, evidence gaps, hypotheses, findings, conversations, and graphs |
 | Evidence-driven findings | Tool output, HTTP evidence, source locations, and reproduction steps |
 | Security boundaries | Mission Policy, authorized scope, path restrictions, HITL, and budgets |
-| MCP and local tools | MCP servers, allowlists, YAML tools, and local command execution |
+| MCP and local tools | MCP servers, YAML tools, dynamic PATH, and Agent-managed tool provisioning |
+| WebShell and tunnels | Official Godzilla protocol bridge, Payload Factory, and suo5 SOCKS5 tunnel management |
+| Tool Catalog | Reviewed fast-path installation, verification, builds, and version management without restricting Agent downloads |
+| Agent tool registry | Registers tools downloaded or built by Agents with session, project, and global scopes |
 | Zhizi Clone | Distributes concurrent scanning, script execution, and tool calls across VPS nodes |
 | Code review | Java, PHP, .NET, binary analysis, and mobile reverse engineering |
 | Vulnerability governance | Review, status, retest, evidence references, and report export |
@@ -343,7 +445,10 @@ Go API / Agent Runtime
   ├── SQLite
   ├── Workspaces and attachments
   ├── MCP client
-  ├── Local tool runner
+  ├── Tool Catalog
+  ├── Agent tool registry
+  ├── Dynamic tool PATH
+  ├── Tool Runner / local execution
   └── LLM / Embedding APIs
 ```
 
@@ -351,19 +456,18 @@ Go API / Agent Runtime
 
 Sophon does not load every skill body on every turn. The initial context contains only:
 
-- The active role prompt
-- Bound skill names
-- Skill summaries
+- System Agent identity and responsibilities
+- Optional task profile guidance
+- Recommended method pack names and summaries
 - Project, asset, fact, and memory context
 - Mission Policy
 
-Full skill instructions are loaded through `read_skill` only when needed.
+Task profiles and skills do not change Agent identity, mode, tools, or permissions. Full skill instructions are loaded through the global `read_skill` tool only when needed.
 
 ```text
-User selects a role
-├── Role prompt ─────────────────┐
-└── Bound skills
-    └── Skill names + summaries ─┤
+System Agent identity
+├── Optional task profile ───────┐
+└── Recommended methods ────────┤
                                  ├── Initial context → LLM
 Projects / assets / facts ───────┤
 Conversation summaries / memory ─┤
@@ -371,6 +475,75 @@ Mission Policy ──────────────────┘
 
 LLM ── when full steps are needed ──> read_skill ──> Skill body
 ```
+
+## Agent-Managed Tool Provisioning
+
+Sophon does not use Tool Catalog as a hard allowlist. Agents may download, extract, build, or install the tools they need, while Tool Catalog provides a reviewed fast path for pinned versions.
+
+```text
+Missing tool or dependency detected
+  -> tool_probe checks PATH, project/session tool directories, and Catalog state
+  -> reuse an existing command, install from Catalog, or download/build it directly
+  -> tool_register records command, arguments, environment, version, and source
+  -> tool_env_add_path adds dynamic PATH, or the Agent uses tool_run
+  -> Tool Runner executes the tool and records audit events
+  -> the original task continues
+```
+
+Available provisioning tools:
+
+| Tool | Purpose |
+|---|---|
+| `tool_probe` | Checks executables, dependencies, package managers, compilers, and Catalog state |
+| `tool_catalog_ensure` | Installs and verifies reviewed Catalog artifacts when available |
+| `tool_register` | Registers tools downloaded or built by the Agent |
+| `tool_run` | Runs a registered tool with saved arguments and environment variables |
+| `tool_env_add_path` | Adds session, project, or user-global dynamic PATH entries |
+| `tool_unregister` | Removes registrations without deleting downloaded files |
+
+Supported scopes:
+
+- `session`: current conversation only
+- `project`: all conversations in the current project
+- `global`: the current user's tools across projects
+
+Dynamic PATH is injected only into tool processes. Sophon does not edit `.bashrc`, `.profile`, or the container-wide environment. Global tools and paths are isolated per user. Agent-registered tools remain subject to the Policy Engine, intercept rules, HITL, timeouts, CPU limits, and process budgets.
+
+## WebShell and Tunnel Tooling
+
+Sophon packages common WebShell and HTTP tunnel operations as platform tools so Agents do not repeatedly reverse engineer client implementations, JAR internals, or temporary compatibility scripts in every project.
+
+| Tool | Purpose |
+|---|---|
+| `payload_factory` | Generates Godzilla WebShells, suo5 server scripts, client configuration, verification scripts, and report snippets |
+| `godzilla` | Reads the official Payload/Cryption catalog from gsl5.jar, verifies connectivity, and reports phase-specific failures |
+| `suo5` | Starts, inspects, and stops a SOCKS5 tunnel bound only to `127.0.0.1` |
+
+The Godzilla tool uses the official Payload and Cryption implementations from the bundled gsl5.jar instead of reimplementing key derivation, response markers, or request encoding in Python. `operation=list` and `operation=help` dynamically read the protocol combinations supported by the current JAR. `auto` and `official` use only the official implementation and never fall back to the simplified protocol after an official failure. Failures include the exact phase, original Java error, derived-key fingerprint, Payload, and Cryption instead of a generic handshake error.
+
+Payload Factory generates language- and container-specific deliverables:
+
+```text
+artifacts/payload-factory/<artifact-id>/
+├── Shell file
+├── client-config.json
+├── verify.py / start_tunnel.py
+├── request.http
+├── metadata.json
+└── report.md
+```
+
+Godzilla generation supports Java JSP/JSPX, C# ASPX/ASHX, PHP, and ASP. suo5 generation supports Java JSP, C# ASPX, PHP, and Node.js. Generated artifacts include pinned template provenance, file hashes, and reproducible report snippets for downstream Workers, vulnerability writing, and reporting.
+
+The suo5 manager binds only to `127.0.0.1` and derives its startup deadline from the requested `timeout` and `retry` values. This prevents a slow remote handshake from being killed before the local proxy starts listening. Tunnel state, authentication, PID, and logs are stored in the conversation's `.suo5` directory.
+
+## Divergent and Adaptive Reasoning
+
+Planner and Worker both use divergent thinking with different boundaries:
+
+- Workers explore alternative entry points, parameters, identities, protocols, encodings, components, and exploitation chains within the current intent. High-value out-of-scope leads are written back for the Planner.
+- Planners continuously evaluate generality, depth, extensibility, and alternative explanations across the project. A successful finding does not automatically close the route, and a temporary lack of findings does not stop planning.
+- After divergence, the Planner deduplicates, prioritizes, respects authorization boundaries, and converges into executable hypotheses or a clear Goal decision.
 
 ## Zhizi Clone
 
@@ -500,6 +673,9 @@ See [`config.example.yml`](./config.example.yml) for the complete template.
 - Use HTTPS in production and set `SOPHON_COOKIE_SECURE=true`.
 - Deploy behind a trusted network or an authenticated reverse proxy.
 - Review MCP servers, custom tools, and high-risk commands before enabling them.
+- Verify the source of tools downloaded or built by Agents and record their version, source, and health checks through `tool_register`.
+- Periodically review the Agent tool registry and dynamic PATH entries in MCP Management, and remove stale or untrusted items.
+- Tool environment values are redacted in management APIs and the UI, but the stored configuration remains sensitive.
 - Treat workspaces, attachments, tool output, and vulnerability evidence as sensitive data.
 - Rotate LLM, Embedding, and third-party credentials regularly.
 - Back up the SQLite database, `config.yml`, workspaces, attachments, roles, and skills.
@@ -519,6 +695,22 @@ This statement is not legal advice and does not replace a formal authorization d
 ## Changelog
 
 - 20261113: Added the Zhizi Clone feature and fixed minor bugs.
+- 20261122: Decoupled system Agents from business roles and added optional Task Profiles/method packs.
+- 20261124:
+  - Added Agent-managed tool provisioning, Tool Catalog fast install, tool registration, and dynamic PATH.
+  - Added session/project/user-global tool scopes and registered-tool execution through `tool_run`.
+  - Added divergent and adaptive reasoning guidance for Planner and Worker.
+  - Added durable vulnerability drafts, background retries, and pending-finding UI.
+  - Added parallel hypothesis execution on the same asset, Worker recovery, and failure continuation.
+  - Added project pending-intent and evidence-gap statistics, sorting, and pagination.
+  - Added return-to-bottom controls and persisted collapsed states for Agent sessions.
+  - Added the official Godzilla protocol bridge and dynamic protocol catalog with phase-specific errors, key fingerprints, and official cryptor resolution.
+  - Added Payload Factory for Godzilla WebShells, suo5 server scripts, and complete verification/report artifacts.
+  - Reworked suo5 tunnel startup with an adaptive timeout derived from request timeout and retry values.
+  - Changed policy sessions to show actual interception reasons instead of meaningless completed placeholders.
+  - Fixed Worker dispatch when the Planner service is unavailable and restored paused orchestration recovery.
+  - Fixed stale main-Agent runs blocking resumed work.
+  - Fixed message loss during conversation switching, duplicate conversation creation, duplicate Worker starts, and execution after task pause.
 
 ## License
 

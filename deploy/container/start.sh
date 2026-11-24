@@ -5,6 +5,8 @@ set -eu
 umask 077
 
 APP_ROOT="${SOPHON_APP_ROOT:-/opt/sophon}"
+PATH="${PATH}:${APP_ROOT}/thirdTools/bin:${APP_ROOT}/thirdTools:${APP_ROOT}/venv/bin:${APP_ROOT}/customTools/scripts"
+export PATH
 BACKEND_BIN="${APP_ROOT}/backend/sophon-server"
 BACKEND_PID_FILE="/tmp/sophon-backend.pid"
 NGINX_CONF="${APP_ROOT}/deploy/nginx/nginx.conf"

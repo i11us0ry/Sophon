@@ -127,7 +127,46 @@ func TestStructuredFactConflictBlocksAndResolves(t *testing.T) {
 	}
 }
 
-func TestFinalizationBlocksHighPriorityConflict(t *testing.T) {
+func TestProjectRecordFactAutoSupersedesExplicitlyLinkedNegatedFact(t *testing.T) {
+	service, ctx := openProjectToolService(t, true)
+	if _, err := invokeProjectTool(t, service, ctx, "project_record_fact", map[string]interface{}{
+		"key":        "chain/entry-unauthenticated-write",
+		"summary":    "入口可未授权写入任意文件并可继续利用",
+		"fact_type":  "general",
+		"confidence": 80,
+		"evidence":   "旧反编译片段",
+	}); err != nil {
+		t.Fatalf("写入旧事实失败: %v", err)
+	}
+	out, err := invokeProjectTool(t, service, ctx, "project_record_fact", map[string]interface{}{
+		"key":        "chain/entry-auth-correction",
+		"summary":    "入口实际需要登录，路径不可控，未授权任意写入不成立",
+		"fact_type":  "general",
+		"confidence": 93,
+		"evidence":   "Servlet 内部 getCurrentUser 校验和 canonicalPath 约束",
+		"relation":   "fact:chain/entry-unauthenticated-write",
+	})
+	if err != nil {
+		t.Fatalf("写入纠正事实失败: %v", err)
+	}
+	if !strings.Contains(out, "自动失效") {
+		t.Fatalf("写回结果应说明旧事实已自动失效: %s", out)
+	}
+	old, err := service.db.GetProjectFactByKey(
+		ctx,
+		"project-tools",
+		"",
+		"chain/entry-unauthenticated-write",
+	)
+	if err != nil {
+		t.Fatalf("读取旧事实失败: %v", err)
+	}
+	if old == nil || old.ValidTo.IsZero() || old.SupersededBy == "" {
+		t.Fatalf("被关联否定的旧事实应失效: %+v", old)
+	}
+}
+
+func TestFinalizationDoesNotTurnProjectConflictsIntoTaskBlocker(t *testing.T) {
 	service, ctx := openProjectToolService(t, true)
 	now := time.Now().UTC()
 	left, err := service.db.UpsertProjectFact(ctx, database.ProjectFact{
@@ -161,7 +200,7 @@ func TestFinalizationBlocksHighPriorityConflict(t *testing.T) {
 		time.Now().UTC().Add(-time.Second),
 		&runCapture{},
 	)
-	if decision.Allowed || !strings.Contains(strings.Join(decision.Reasons, "\n"), "事实冲突") {
-		t.Fatalf("高优先级冲突应阻止最终化: %+v", decision)
+	if !decision.Allowed || len(decision.Reasons) != 0 {
+		t.Fatalf("项目事实冲突不应绕过当前请求直接阻塞收尾: %+v", decision)
 	}
 }

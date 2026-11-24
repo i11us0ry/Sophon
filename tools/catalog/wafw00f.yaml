@@ -1,0 +1,16 @@
+name: wafw00f
+version: 2.4.2
+description: WAF fingerprinting tool built from the pinned upstream source
+tool_definition: wafw00f.yaml
+build:
+  url: https://codeload.github.com/EnableSecurity/wafw00f/tar.gz/e81d38748109a805872ee92fd2377612bd639b3b
+  sha256: d5353d4f0974e8ea31c677cb674bebd19528e0ba466da2f0d06974c5946074a8
+  archive: tar.gz
+  strip_components: 1
+  recipe: copy
+  destination: wafw00f
+  directory: true
+  entry: wafw00f/bin/wafw00f
+  command: wafw00f
+  command_mode: python
+  command_target: wafw00f/bin/wafw00f

@@ -75,9 +75,9 @@ func (h *ChatHandler) StartProjectsBatch(c *gin.Context) {
 	}
 	roleID := ""
 	if strings.TrimSpace(request.RoleID) != "" {
-		resolved, ok := h.resolveRoleID(c.Request.Context(), request.RoleID)
+		resolved, ok := h.resolveTaskProfileID(c.Request.Context(), request.RoleID)
 		if !ok {
-			badRequest(c, "invalid_agent_role", "角色不存在或未启用")
+			badRequest(c, "invalid_agent_role", "任务模板不存在或未启用")
 			return
 		}
 		roleID = resolved

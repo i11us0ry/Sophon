@@ -11,6 +11,8 @@ const { t } = useI18n()
 
 interface ProjectCounts {
   facts: number
+  pendingIntents: number
+  evidenceGaps: number
   attackSteps: number
   assets: number
   conversations: number
@@ -108,7 +110,6 @@ const batchDraft = reactive({
 const batchStartInstruction = ref('')
 const batchStartRoleId = ref('')
 const batchStartUseZhizi = ref(false)
-const batchStartAgentMode = ref<'fast' | 'deep'>('deep')
 const batchStartHITL = ref(true)
 const batchStartAssetRestriction = ref(true)
 const batchStartAutoContinue = ref(true)
@@ -124,6 +125,7 @@ const rolesLoading = ref(false)
 const deleteTarget = ref<Project | null>(null)
 const deleteBatch = ref(false)
 const deleting = ref(false)
+const statusUpdating = ref<string[]>([])
 const pagination = reactive({
   page: 1,
   pageSize: 20,
@@ -138,6 +140,8 @@ const projectStats = reactive<ProjectStats>({
   risk: 0,
 })
 let projectFilterTimer: number | undefined
+let projectRefreshTimer: number | undefined
+let projectLoadSequence = 0
 
 const PROJECT_STATUSES = ['planning', 'active', 'paused', 'done', 'archived'] as const
 const PROJECT_BATCH_MAX_ASSETS = 500
@@ -191,12 +195,15 @@ function projectTokenTitle(project: Project) {
   return parts.join(' · ')
 }
 
-async function load(resetPage = false) {
+async function load(resetPage = false, silent = false) {
+  const sequence = ++projectLoadSequence
   if (resetPage) {
     pagination.page = 1
   }
-  loading.value = true
-  error.value = ''
+  if (!silent) {
+    loading.value = true
+    error.value = ''
+  }
   try {
     const query = new URLSearchParams({
       limit: String(pagination.pageSize),
@@ -213,10 +220,13 @@ async function load(resetPage = false) {
     }
     query.set('sort', projectSort.value)
     const response = await apiGet<ProjectPage>(`/projects?${query.toString()}`)
+    if (sequence !== projectLoadSequence) {
+      return
+    }
     const totalPages = Math.max(1, response.totalPages ?? 1)
     if (pagination.page > totalPages) {
       pagination.page = totalPages
-      return await load()
+      return await load(false, silent)
     }
     projects.value = response.items ?? []
     pagination.total = response.total ?? 0
@@ -229,9 +239,13 @@ async function load(resetPage = false) {
       projectStats.risk = response.stats.risk ?? 0
     }
   } catch (err) {
-    error.value = err instanceof Error ? err.message : t('message.readProjectsFailed')
+    if (!silent && sequence === projectLoadSequence) {
+      error.value = err instanceof Error ? err.message : t('message.readProjectsFailed')
+    }
   } finally {
-    loading.value = false
+    if (!silent && sequence === projectLoadSequence) {
+      loading.value = false
+    }
   }
 }
 
@@ -267,7 +281,7 @@ async function loadAgentRoles() {
     const response = await apiGet<{ items: AgentRoleOption[] }>('/agent-roles?enabled=true')
     agentRoles.value = (response.items ?? []).filter((role) => role.enabled)
     if (!agentRoles.value.some((role) => role.id === batchStartRoleId.value)) {
-      batchStartRoleId.value = agentRoles.value[0]?.id ?? ''
+      batchStartRoleId.value = ''
     }
   } catch {
     agentRoles.value = []
@@ -357,13 +371,12 @@ function openBatchStart() {
   notice.value = ''
   batchStartInstruction.value = t('project.batchStartDefaultInstruction')
   batchStartUseZhizi.value = false
-  batchStartAgentMode.value = 'deep'
   batchStartHITL.value = true
   batchStartAssetRestriction.value = true
   batchStartAutoContinue.value = true
   void loadZhiziAvailability()
   if (!agentRoles.value.some((role) => role.id === batchStartRoleId.value)) {
-    batchStartRoleId.value = agentRoles.value[0]?.id ?? ''
+    batchStartRoleId.value = ''
   }
   showBatchStart.value = true
 }
@@ -392,7 +405,6 @@ function closeBatchStart() {
   showBatchStart.value = false
   batchStartInstruction.value = ''
   batchStartUseZhizi.value = false
-  batchStartAgentMode.value = 'deep'
   batchStartHITL.value = true
   batchStartAssetRestriction.value = true
   batchStartAutoContinue.value = true
@@ -462,10 +474,6 @@ async function startSelectedProjects() {
   if (!selected.value.length || batchStarting.value) {
     return
   }
-  if (!batchStartRoleId.value) {
-    error.value = t('project.batchStartRoleRequired')
-    return
-  }
   if (batchStartUseZhizi.value && zhiziAvailability.value.available <= 0) {
     error.value = t('project.batchStartZhiziNoCapacity')
     return
@@ -479,7 +487,7 @@ async function startSelectedProjects() {
       instruction: batchStartInstruction.value.trim(),
       roleId: batchStartRoleId.value,
       useZhizi: batchStartUseZhizi.value,
-      agentMode: batchStartAgentMode.value,
+      agentMode: 'deep',
       hitlEnabled: batchStartHITL.value,
       assetRestrictionEnabled: batchStartAssetRestriction.value,
       autoContinue: batchStartAutoContinue.value,
@@ -503,6 +511,34 @@ async function startSelectedProjects() {
 
 function openProject(project: Project) {
   void router.push({ name: 'project-detail', params: { id: project.id } })
+}
+
+async function toggleProjectStatus(project: Project) {
+  const nextStatus =
+    project.status === 'active' ? 'paused' : project.status === 'paused' ? 'active' : ''
+  if (!nextStatus || statusUpdating.value.includes(project.id)) {
+    return
+  }
+  statusUpdating.value = [...statusUpdating.value, project.id]
+  error.value = ''
+  notice.value = ''
+  try {
+    await apiPut(`/projects/${project.id}`, {
+      name: project.name,
+      description: project.description,
+      goals: project.goals,
+      scope: project.scope,
+      status: nextStatus,
+    })
+    await load(false, true)
+    notice.value =
+      nextStatus === 'paused' ? t('project.paused') : t('project.resumed')
+  } catch (err) {
+    await load(false, true)
+    error.value = err instanceof Error ? err.message : t('message.operationFailed')
+  } finally {
+    statusUpdating.value = statusUpdating.value.filter((id) => id !== project.id)
+  }
 }
 
 function selectStatus(status: string) {
@@ -609,12 +645,27 @@ onMounted(() => {
   void load()
   void loadAgentRoles()
   void loadZhiziAvailability()
+  projectRefreshTimer = window.setInterval(() => {
+    if (
+      document.visibilityState === 'visible' &&
+      !loading.value &&
+      !showCreate.value &&
+      !showBatchCreate.value &&
+      !showBatchStart.value
+    ) {
+      void load(false, true)
+    }
+  }, 5000)
 })
 
 onUnmounted(() => {
   if (projectFilterTimer) {
     window.clearTimeout(projectFilterTimer)
   }
+  if (projectRefreshTimer) {
+    window.clearInterval(projectRefreshTimer)
+  }
+  projectLoadSequence++
 })
 </script>
 
@@ -771,9 +822,9 @@ onUnmounted(() => {
           active: projectStats.active,
         }) }}
       </span>
-        <button class="button compact" type="button" @click="resetProjectFilters">
-          {{ t('common.reset') }}
-        </button>
+      <button class="button compact" type="button" @click="resetProjectFilters">
+        {{ t('common.reset') }}
+      </button>
       </div>
     </section>
 
@@ -847,6 +898,14 @@ onUnmounted(() => {
           </div>
           <div class="project-meta-line">
             <span>
+              <small>{{ t('project.tabPendingIntents') }}</small>
+              <strong>{{ project.counts?.pendingIntents ?? 0 }}</strong>
+            </span>
+            <span>
+              <small>{{ t('project.tabEvidenceGaps') }}</small>
+              <strong>{{ project.counts?.evidenceGaps ?? 0 }}</strong>
+            </span>
+            <span>
               <small>{{ t('project.facts') }}</small>
               <strong>{{ project.counts?.facts ?? 0 }}</strong>
             </span>
@@ -880,36 +939,67 @@ onUnmounted(() => {
             {{ t('project.updatedAt', { time: formatTime(project.updatedAt) }) }}
           </small>
           <div class="project-actions">
-            <button class="project-action-open" type="button" @click="openProject(project)">
+            <button
+              class="project-action-open project-action-icon"
+              type="button"
+              :title="t('project.enter')"
+              :aria-label="t('project.enter')"
+              @click="openProject(project)"
+            >
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6" /></svg>
-              <span>{{ t('project.enter') }}</span>
             </button>
             <button
-              class="project-action-quiet"
+              v-if="project.status === 'active' || project.status === 'paused'"
+              class="project-action-lifecycle"
+              :class="project.status === 'active' ? 'pause' : 'resume'"
+              type="button"
+              :disabled="statusUpdating.includes(project.id)"
+              :title="project.status === 'active' ? t('project.pauseAction') : t('project.resumeAction')"
+              :aria-label="project.status === 'active' ? t('project.pauseAction') : t('project.resumeAction')"
+              @click="toggleProjectStatus(project)"
+            >
+              <svg v-if="project.status === 'active'" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M9 5v14M15 5v14" />
+              </svg>
+              <svg v-else viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M8 5l11 7-11 7z" />
+              </svg>
+              <span>
+                {{ project.status === 'active' ? t('project.pauseAction') : t('project.resumeAction') }}
+              </span>
+            </button>
+            <button
+              class="project-action-quiet project-action-icon"
               type="button"
               :title="t('project.export')"
               :aria-label="t('project.export')"
               @click="exportProject(project)"
             >
-              {{ t('project.export') }}
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M12 4v11M7 10l5 5 5-5M5 20h14" />
+              </svg>
             </button>
             <button
-              class="project-action-quiet"
+              class="project-action-quiet project-action-icon"
               type="button"
               :title="t('common.edit')"
               :aria-label="t('common.edit')"
               @click="openEdit(project)"
             >
-              {{ t('common.edit') }}
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M4 20h4l11-11-4-4L4 16v4zM13.5 6.5l4 4" />
+              </svg>
             </button>
             <button
-              class="project-action-quiet danger"
+              class="project-action-quiet project-action-icon danger"
               type="button"
               :title="t('common.delete')"
               :aria-label="t('common.delete')"
               @click="requestDelete(project)"
             >
-              {{ t('common.delete') }}
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13M10 11v5M14 11v5" />
+              </svg>
             </button>
           </div>
         </div>
@@ -1057,10 +1147,9 @@ onUnmounted(() => {
           <select
             v-model="batchStartRoleId"
             class="batch-start-role"
-            :disabled="batchStarting || rolesLoading || !agentRoles.length"
-            required
+            :disabled="batchStarting || rolesLoading"
           >
-            <option value="" disabled>
+            <option value="">
               {{ rolesLoading ? t('common.loading') : t('project.batchStartRolePlaceholder') }}
             </option>
             <option v-for="role in agentRoles" :key="role.id" :value="role.id">
@@ -1072,13 +1161,6 @@ onUnmounted(() => {
           <strong class="batch-start-run-title">
             {{ t('project.batchStartRunSettings') }}
           </strong>
-          <label class="field">
-            <span>{{ t('chat.agentMode') }}</span>
-            <select v-model="batchStartAgentMode" :disabled="batchStarting">
-              <option value="fast">{{ t('chat.fastPath') }}</option>
-              <option value="deep">{{ t('chat.deepPath') }}</option>
-            </select>
-          </label>
           <div class="batch-start-toggle-grid">
             <label class="batch-start-toggle" :title="t('chat.manualApprovalHint')">
               <input
@@ -1139,7 +1221,7 @@ onUnmounted(() => {
         <button
           class="button"
           type="submit"
-          :disabled="batchStarting || rolesLoading || !batchStartRoleId"
+          :disabled="batchStarting"
         >
           {{ batchStarting ? t('common.loading') : t('project.batchStartSubmit') }}
         </button>
@@ -1642,7 +1724,8 @@ onUnmounted(() => {
 }
 
 .project-action-open,
-.project-action-quiet {
+.project-action-quiet,
+.project-action-lifecycle {
   min-height: 28px;
   border-radius: 3px;
   font-size: 11px;
@@ -1666,6 +1749,42 @@ onUnmounted(() => {
   background: color-mix(in srgb, var(--project-tone) 12%, transparent);
 }
 
+.project-action-lifecycle {
+  --lifecycle-tone: var(--warning);
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+  justify-content: center;
+  padding: 5px 8px;
+  border: 1px solid color-mix(in srgb, var(--lifecycle-tone) 42%, var(--border));
+  color: var(--lifecycle-tone);
+  background: color-mix(in srgb, var(--lifecycle-tone) 7%, transparent);
+}
+
+.project-action-lifecycle.resume {
+  --lifecycle-tone: var(--success);
+}
+
+.project-action-lifecycle:hover {
+  border-color: var(--lifecycle-tone);
+  background: color-mix(in srgb, var(--lifecycle-tone) 12%, transparent);
+}
+
+.project-action-lifecycle:disabled {
+  cursor: wait;
+  opacity: 0.5;
+}
+
+.project-action-lifecycle svg {
+  width: 11px;
+  height: 11px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2;
+}
+
 .project-action-quiet {
   padding: 5px 7px;
   border: 1px solid transparent;
@@ -1685,9 +1804,30 @@ onUnmounted(() => {
   background: color-mix(in srgb, var(--danger) 8%, transparent);
 }
 
+.project-action-icon {
+  display: inline-grid;
+  width: 30px;
+  min-width: 30px;
+  height: 28px;
+  padding: 0;
+  place-items: center;
+}
+
+.project-action-icon svg {
+  display: block;
+  width: 12px;
+  height: 12px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2;
+}
+
 .project-action-open:focus-visible,
-.project-action-quiet:focus-visible {
-  outline: 2px solid var(--project-tone);
+.project-action-quiet:focus-visible,
+.project-action-lifecycle:focus-visible {
+  outline: 2px solid var(--lifecycle-tone, var(--project-tone));
   outline-offset: 1px;
 }
 
@@ -1850,14 +1990,16 @@ onUnmounted(() => {
     justify-content: stretch;
   }
 
-  .project-action-open {
-    flex: 1 1 100%;
-    width: 100%;
+  .project-action-open,
+  .project-action-quiet,
+  .project-action-lifecycle {
+    flex: 0 0 30px;
+    width: 30px;
+    min-width: 30px;
   }
 
-  .project-action-quiet {
-    flex: 1 1 calc(33.333% - 4px);
-    min-width: 0;
+  .project-action-lifecycle span {
+    display: none;
   }
 
   .project-meta-line {
@@ -1875,8 +2017,7 @@ onUnmounted(() => {
     border-left: 0;
   }
 
-  .project-meta-line span:nth-child(5),
-  .project-meta-line span:nth-child(6) {
+  .project-meta-line span:nth-child(n + 5) {
     padding-top: 5px;
     border-top: 1px solid color-mix(in srgb, var(--line) 64%, transparent);
   }
@@ -1925,9 +2066,7 @@ onUnmounted(() => {
   align-items: center;
 }
 
-.project-header-button svg,
-.project-action-quiet svg,
-.project-action-open svg {
+.project-header-button svg {
   display: none;
 }
 
@@ -2108,7 +2247,12 @@ onUnmounted(() => {
 
 .project-filter-console .project-filters {
   display: grid;
-  grid-template-columns: minmax(200px, 2fr) minmax(140px, 1fr) auto auto;
+  grid-template-columns:
+    minmax(160px, 2fr)
+    minmax(110px, 0.8fr)
+    minmax(140px, 1.2fr)
+    auto
+    max-content;
   gap: 8px;
   align-items: center;
   margin: 0;
@@ -2127,7 +2271,10 @@ onUnmounted(() => {
 
 .project-filter-console .project-filters .button {
   min-height: 34px;
+  min-width: 64px;
   padding: 6px 10px;
+  justify-self: end;
+  white-space: nowrap;
 }
 
 .project-filter-console .project-filter-stats {
@@ -2299,21 +2446,34 @@ onUnmounted(() => {
 
 .project-inventory .project-action-open {
   display: inline-flex;
-  gap: 5px;
   align-items: center;
-  min-height: 26px;
-  padding: 4px 8px;
+  justify-content: center;
+  width: 27px;
+  min-width: 27px;
+  height: 27px;
+  padding: 4px;
   font-size: 9px;
+}
+
+.project-inventory .project-action-lifecycle {
+  width: 27px;
+  min-width: 27px;
+  height: 27px;
+  padding: 4px;
+}
+
+.project-inventory .project-action-lifecycle span {
+  display: none;
 }
 
 .project-inventory .project-action-quiet {
   display: inline-flex;
-  width: auto;
+  width: 27px;
   height: 27px;
-  min-width: 0;
+  min-width: 27px;
   align-items: center;
   justify-content: center;
-  padding: 4px 7px;
+  padding: 4px;
   border-color: var(--border);
   white-space: nowrap;
 }
@@ -2507,6 +2667,19 @@ onUnmounted(() => {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
+  .project-filter-console .project-filters {
+    grid-template-columns: minmax(0, 2fr) minmax(110px, 0.8fr) minmax(140px, 1.2fr);
+  }
+
+  .project-filter-console .project-filter-stats {
+    grid-column: 1 / 3;
+    justify-self: start;
+  }
+
+  .project-filter-console .project-filters .button {
+    grid-column: 3;
+  }
+
   .project-inventory .project-card {
     grid-template-columns: minmax(0, 1fr) 220px;
   }
@@ -2559,7 +2732,14 @@ onUnmounted(() => {
   }
 
   .project-filter-console .project-filter-stats {
+    grid-column: auto;
     width: fit-content;
+  }
+
+  .project-filter-console .project-filters .button {
+    grid-column: auto;
+    justify-self: end;
+    width: auto;
   }
 
   .list-toolbar {
@@ -2610,10 +2790,18 @@ onUnmounted(() => {
   }
 
   .project-inventory .project-action-open {
-    flex: 1;
+    flex: 0 0 29px;
+    width: 29px;
+    height: 29px;
   }
 
   .project-inventory .project-action-quiet {
+    flex: 0 0 29px;
+    width: 29px;
+    height: 29px;
+  }
+
+  .project-inventory .project-action-lifecycle {
     flex: 0 0 29px;
     width: 29px;
     height: 29px;

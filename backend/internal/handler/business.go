@@ -19,6 +19,7 @@ import (
 	"sophon/internal/database"
 	knowledgepkg "sophon/internal/knowledge"
 	"sophon/internal/middleware"
+	"sophon/internal/skillaudit"
 	storagepkg "sophon/internal/storage"
 	"sophon/internal/task"
 	"sophon/internal/vulnerabilityfmt"
@@ -31,6 +32,16 @@ var safeSkillName = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
 
 type VulnerabilityReviewer interface {
 	ReviewVulnerability(context.Context, database.Vulnerability) error
+}
+
+type projectAgentController interface {
+	PauseProject(context.Context, string, string, string) (int, error)
+	ResumeProject(context.Context, string, string) (int, error)
+}
+
+type projectCampaignController interface {
+	PauseProjectCampaigns(context.Context, string, string) (int, error)
+	ResumeProjectCampaigns(context.Context, string, string) (int, error)
 }
 
 func respondVulnerabilityReviewFailure(c *gin.Context, err error) {
@@ -49,12 +60,15 @@ func respondVulnerabilityReviewFailure(c *gin.Context, err error) {
 }
 
 type BusinessHandler struct {
-	db                    *database.DB
-	skillsDir             string
-	knowledge             *knowledgepkg.Service
-	manager               *task.Manager
-	storage               *storagepkg.Service
-	vulnerabilityReviewer VulnerabilityReviewer
+	db                     *database.DB
+	skillsDir              string
+	knowledge              *knowledgepkg.Service
+	manager                *task.Manager
+	storage                *storagepkg.Service
+	jobs                   conversationJobCanceller
+	projectAgentController projectAgentController
+	projectCampaigns       projectCampaignController
+	vulnerabilityReviewer  VulnerabilityReviewer
 }
 
 func NewBusinessHandler(
@@ -63,19 +77,27 @@ func NewBusinessHandler(
 	knowledgeService *knowledgepkg.Service,
 	taskManager *task.Manager,
 	storageService *storagepkg.Service,
+	jobs conversationJobCanceller,
 	vulnerabilityReviewer VulnerabilityReviewer,
+	projectCampaigns projectCampaignController,
 ) *BusinessHandler {
 	if strings.TrimSpace(skillsDir) == "" {
 		skillsDir = "/opt/sophon/skills"
 	}
-	return &BusinessHandler{
+	handler := &BusinessHandler{
 		db:                    db,
 		skillsDir:             skillsDir,
 		knowledge:             knowledgeService,
 		manager:               taskManager,
 		storage:               storageService,
+		jobs:                  jobs,
 		vulnerabilityReviewer: vulnerabilityReviewer,
+		projectCampaigns:      projectCampaigns,
 	}
+	if controller, ok := jobs.(projectAgentController); ok {
+		handler.projectAgentController = controller
+	}
+	return handler
 }
 
 const (
@@ -346,17 +368,60 @@ func (h *BusinessHandler) UpdateProject(c *gin.Context) {
 	if _, err := h.db.SyncProjectScopeAssets(c.Request.Context(), item.ID, user.ID, item.Scope); err != nil {
 		log.Printf("sync project scope assets failed: project=%s err=%v", item.ID, err)
 	}
-	if status != "active" && h.manager != nil {
-		conversations, err := h.db.ListProjectConversations(
-			c.Request.Context(),
-			item.ID,
-			user.ID,
-		)
-		if err == nil {
+	var controlErrors []error
+	if status != "active" {
+		conversations, err := h.db.ListProjectConversations(c.Request.Context(), item.ID, user.ID)
+		if err != nil {
+			controlErrors = append(controlErrors, fmt.Errorf("读取项目会话: %w", err))
+		} else {
 			for _, conversation := range conversations {
-				h.manager.CancelConversation(conversation.ID, user.ID)
+				_, _ = cancelConversationWork(h.manager, h.jobs, conversation.ID, user.ID)
 			}
 		}
+	}
+	if h.projectCampaigns != nil {
+		var campaignErr error
+		if status == "active" {
+			_, campaignErr = h.projectCampaigns.ResumeProjectCampaigns(
+				c.Request.Context(),
+				item.ID,
+				user.ID,
+			)
+		} else {
+			_, campaignErr = h.projectCampaigns.PauseProjectCampaigns(
+				c.Request.Context(),
+				item.ID,
+				user.ID,
+			)
+		}
+		if campaignErr != nil {
+			controlErrors = append(controlErrors, fmt.Errorf("项目 Campaign 控制: %w", campaignErr))
+		}
+	}
+	if h.projectAgentController != nil {
+		var agentErr error
+		if status == "active" {
+			_, agentErr = h.projectAgentController.ResumeProject(
+				c.Request.Context(),
+				item.ID,
+				user.ID,
+			)
+		} else {
+			_, agentErr = h.projectAgentController.PauseProject(
+				c.Request.Context(),
+				item.ID,
+				user.ID,
+				"项目状态变更为"+status+"，已暂停所有 Agent 工作",
+			)
+		}
+		if agentErr != nil {
+			controlErrors = append(controlErrors, fmt.Errorf("项目 Agent 控制: %w", agentErr))
+		}
+	}
+	if err := errors.Join(controlErrors...); err != nil {
+		log.Printf("project lifecycle control failed: project=%s status=%s err=%v", item.ID, status, err)
+		internalError(c, "project_agent_control_failed", "项目状态已保存，但部分任务暂停/恢复失败，请重试保存")
+		return
 	}
 	c.Status(http.StatusNoContent)
 }
@@ -370,18 +435,14 @@ func (h *BusinessHandler) DeleteProject(c *gin.Context) {
 	projectID := strings.TrimSpace(c.Param("id"))
 	conversations, _ := h.db.ListProjectConversations(c.Request.Context(), projectID, user.ID)
 	for _, conversation := range conversations {
-		if h.manager != nil {
-			h.manager.CancelConversation(conversation.ID, user.ID)
-		}
+		_, _ = cancelConversationWork(h.manager, h.jobs, conversation.ID, user.ID)
 	}
 	if err := h.db.DeleteProject(c.Request.Context(), c.Param("id"), user.ID); err != nil {
 		respondMutationError(c, err, "project_not_found", "项目不存在", "delete_project_failed", "删除项目失败")
 		return
 	}
 	for _, conversation := range conversations {
-		if h.manager != nil {
-			h.manager.CancelConversation(conversation.ID, user.ID)
-		}
+		_, _ = cancelConversationWork(h.manager, h.jobs, conversation.ID, user.ID)
 	}
 	cleanupConversationStorage(h.storage, conversations)
 	c.Status(http.StatusNoContent)
@@ -844,8 +905,20 @@ func (h *BusinessHandler) CreateVulnerability(c *gin.Context) {
 		badRequest(c, "invalid_vulnerability_evidence", "漏洞必须提供证据")
 		return
 	}
-	if err := vulnerabilityfmt.ValidateReproduction(request.ReproductionSteps); err != nil {
+	if err := vulnerabilityfmt.ValidateReproductionForTarget(
+		request.ReproductionSteps,
+		request.Target,
+		request.HTTPMethod,
+	); err != nil {
 		badRequest(c, "invalid_vulnerability", err.Error())
+		return
+	}
+	if err := vulnerabilityfmt.ValidateEvidenceContent(
+		request.Evidence,
+		request.EvidenceRefs,
+		request.ReproductionSteps,
+	); err != nil {
+		badRequest(c, "invalid_vulnerability_evidence", err.Error())
 		return
 	}
 	if err := h.validateProjectReference(c.Request.Context(), user.ID, request.ProjectID); err != nil {
@@ -1116,8 +1189,20 @@ func (h *BusinessHandler) UpdateVulnerability(c *gin.Context) {
 			badRequest(c, "invalid_vulnerability_evidence", "漏洞必须提供证据")
 			return
 		}
-		if err := vulnerabilityfmt.ValidateReproduction(request.ReproductionSteps); err != nil {
+		if err := vulnerabilityfmt.ValidateReproductionForTarget(
+			request.ReproductionSteps,
+			request.Target,
+			request.HTTPMethod,
+		); err != nil {
 			badRequest(c, "invalid_vulnerability", err.Error())
+			return
+		}
+		if err := vulnerabilityfmt.ValidateEvidenceContent(
+			request.Evidence,
+			request.EvidenceRefs,
+			request.ReproductionSteps,
+		); err != nil {
+			badRequest(c, "invalid_vulnerability_evidence", err.Error())
 			return
 		}
 	} else if !validType {
@@ -1657,10 +1742,7 @@ func skillMetadataResponse(meta skillMetadata) gin.H {
 }
 
 func skillTemplate(name, description string) string {
-	if description == "" {
-		description = name
-	}
-	return fmt.Sprintf("---\nname: %s\ndescription: %s\nmetadata:\n  tags: []\n---\n\n## %s\n\n在这里编写技能说明。\n", name, description, name)
+	return skillaudit.Template(name, description)
 }
 
 func (h *BusinessHandler) SaveSkill(c *gin.Context) {

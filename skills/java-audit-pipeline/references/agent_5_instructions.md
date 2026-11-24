@@ -9,18 +9,17 @@
   - {output_path}/cross_analysis/high_risk_routes.md 中的「待追踪路由列表」
   - {output_path}/cross_analysis/auth_bypass_vulnerabilities.md（鉴权绕过信息）
 输出文件: {output_path}/cross_analysis/trace_batch_plan.md
-任务: 读取 P0+P1 全部高危路由，判断数量是否过多，按批次分配追踪任务，生成分批方案供负责人 spawn worker。若 P0+P1=0 则启用 P2 兜底逻辑
 ```
 
 ## 执行步骤
 
 1. 读取 `high_risk_routes.md` 中的「待追踪路由列表」，提取 **P0 和 P1 全部路由**（不再跳过 P1）
 2. 读取 `auth_bypass_vulnerabilities.md`，提取每条 P1 路由对应的鉴权绕过信息
-3. **⚠️ 完整性校验（必须执行）**：
+3. **⚠️ 完整性校验（可选）**：
    - 读取 `high_risk_routes.md` 顶部「筛选概览」表格中的三个数值：P0 数量、P1 数量、高危路由总数
    - 统计「待追踪路由列表」的实际行数
    - 验证：待追踪列表行数 == P0 数量 + P1 数量 == 高危路由总数
-   - **若不一致**：agent-5 立即暂停，通知负责人数据异常，报告「筛选概览显示高危路由 X 条，但待追踪列表仅 Y 条，agent-4a 疑似越权筛选」，由负责人通知 agent-4a 重新输出
+   - **若不一致**：可在输出中记录差异，并根据任务影响决定是否暂停、补全或说明筛选依据
    - **若一致**：继续执行步骤 4
 4. **⚠️ P2 兜底判断**：
    - **若 P0+P1 > 0**：忽略 P2，使用待追踪路由列表中的 P0+P1 路由，继续执行步骤 5
@@ -139,7 +138,6 @@ c. **层级内优先挑选规则**（按优先级从高到低）：
 
 1. 读取 `trace_batch_plan.md`，获取批次数 N
 2. 关闭 agent-5-route-tracer（分配员任务完成）
-3. 并行 spawn agent-5-1, agent-5-2, ..., agent-5-N（每个使用 SKILL.md 中的 Worker 模板）
 4. 为每个 worker 创建子任务并分配
 5. 每个 worker 完成后立即将校验任务分配给空闲的 agent-7-x，校验通过后关闭该 worker
 6. 全部 worker 校验通过后，负责人汇总追踪覆盖率（已追踪数 / 待追踪数 >= 90%），通过后进入阶段4

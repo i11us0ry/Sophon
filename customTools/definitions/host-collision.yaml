@@ -1,6 +1,6 @@
 name: "host-collision"
 command: "python3"
-args: ["/opt/sophon/thirdTools/host_collision.py"]
+args: ["/opt/sophon/customTools/scripts/host_collision.py"]
 enabled: true
 timeout_seconds: 900
 short_description: "通过Host头差异发现隐藏虚拟主机"

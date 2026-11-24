@@ -12,10 +12,10 @@ import (
 )
 
 const (
-	toolDigestMaxPairs    = 8
-	toolDigestMaxRunes    = 1500
-	toolDigestArgsRunes   = 160
-	toolDigestResultRunes = 300
+	toolDigestMaxPairs    = 16
+	toolDigestMaxRunes    = 5000
+	toolDigestArgsRunes   = 240
+	toolDigestResultRunes = 600
 	summaryInputRunes     = 6000
 	// minor 压缩输出更紧（增量合并），major 压缩允许更长（全量重写、消除摘要漂移）。
 	summaryOutputRunesMinor = 600

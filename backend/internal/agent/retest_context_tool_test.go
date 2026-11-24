@@ -465,10 +465,10 @@ func TestRetestTerminalResultStopsImmediately(t *testing.T) {
 	if err != nil || event.Result != "inconclusive" || event.Status != "completed" {
 		t.Fatalf("复测结果应规范化为 inconclusive 并完成: %+v err=%v", event, err)
 	}
-	if allowed, _ := service.missionToolDecision(ctx, "exec", map[string]interface{}{
+	if allowed, reason := service.missionToolDecision(ctx, "exec", map[string]interface{}{
 		"command": "curl http://10.8.0.61/FileService.svc",
-	}); allowed {
-		t.Fatal("复测终态写回后不应继续执行新的探测")
+	}); !allowed {
+		t.Fatalf("终态写回状态不应自行拒绝主 Agent 工具: %s", reason)
 	}
 	decision := service.checkFinalization(
 		ctx,

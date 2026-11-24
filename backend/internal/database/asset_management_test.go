@@ -197,8 +197,9 @@ func TestAssetValidationEnforcesSupportedKindsOnCreateAndUpdate(t *testing.T) {
 		"url":    "https://example.com/path",
 		"port":   "443",
 		"host":   "internal-host",
+		"source": "seeyon20250422",
 	}
-	for _, kind := range []string{"ip", "domain", "url", "port", "host"} {
+	for _, kind := range []string{"ip", "domain", "url", "port", "host", "source"} {
 		item := base
 		item.ID = "asset-kind-" + kind
 		item.Name = "合法类型 " + kind

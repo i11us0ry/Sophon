@@ -114,6 +114,26 @@ func TestValidateEvidenceReferencesChecksToolConversationAndArtifactOwnership(t 
 	if err := os.WriteFile(artifactPath, []byte("scan result"), 0o600); err != nil {
 		t.Fatalf("写入 artifact 失败: %v", err)
 	}
+	workspacePath := filepath.Join(
+		artifactRoot,
+		"tmp",
+		"workspace",
+		"projects",
+		"project-owner",
+		"conversations",
+		"conversation-owner",
+		"subagents",
+		"sub-worker",
+		"audit",
+		"artifact",
+		"proof.log",
+	)
+	if err := os.MkdirAll(filepath.Dir(workspacePath), 0o750); err != nil {
+		t.Fatalf("创建 Worker artifact 目录失败: %v", err)
+	}
+	if err := os.WriteFile(workspacePath, []byte("worker evidence"), 0o600); err != nil {
+		t.Fatalf("写入 Worker artifact 失败: %v", err)
+	}
 	outsidePath := filepath.Join(artifactRoot, "config.yml")
 	if err := os.WriteFile(outsidePath, []byte("secret"), 0o600); err != nil {
 		t.Fatalf("写入目录外文件失败: %v", err)
@@ -123,6 +143,7 @@ func TestValidateEvidenceReferencesChecksToolConversationAndArtifactOwnership(t 
 		"tool:" + executionID,
 		"conversation:conversation-owner",
 		"file:" + artifactPath,
+		"file:" + workspacePath,
 	} {
 		if err := db.ValidateEvidenceReferences(ctx, EvidenceReferenceOptions{
 			ProjectID: "project-owner", UserID: "user-1",

@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
+	"strings"
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
@@ -33,6 +35,7 @@ func (m *modelTokenBudget) Generate(
 	input []*schema.Message,
 	opts ...model.Option,
 ) (*schema.Message, error) {
+	input = sanitizeToolCallArguments(input)
 	return m.inner.Generate(ctx, withTokenBudgetWarning(ctx, input), opts...)
 }
 
@@ -41,7 +44,52 @@ func (m *modelTokenBudget) Stream(
 	input []*schema.Message,
 	opts ...model.Option,
 ) (*schema.StreamReader[*schema.Message], error) {
+	input = sanitizeToolCallArguments(input)
 	return m.inner.Stream(ctx, withTokenBudgetWarning(ctx, input), opts...)
+}
+
+func sanitizeToolCallArguments(input []*schema.Message) []*schema.Message {
+	var output []*schema.Message
+	for index, message := range input {
+		if message == nil || len(message.ToolCalls) == 0 {
+			continue
+		}
+		calls := append([]schema.ToolCall(nil), message.ToolCalls...)
+		changed := false
+		for callIndex := range calls {
+			normalized := normalizeToolCallArguments(calls[callIndex].Function.Arguments)
+			if normalized == calls[callIndex].Function.Arguments {
+				continue
+			}
+			calls[callIndex].Function.Arguments = normalized
+			changed = true
+		}
+		if !changed {
+			continue
+		}
+		if output == nil {
+			output = append([]*schema.Message(nil), input...)
+		}
+		cloned := *message
+		cloned.ToolCalls = calls
+		output[index] = &cloned
+	}
+	if output == nil {
+		return input
+	}
+	return output
+}
+
+func normalizeToolCallArguments(arguments string) string {
+	arguments = strings.TrimSpace(arguments)
+	if arguments == "" || !strings.HasPrefix(arguments, "{") {
+		return "{}"
+	}
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(arguments), &object); err != nil || object == nil {
+		return "{}"
+	}
+	return arguments
 }
 
 func withTokenBudgetWarning(ctx context.Context, input []*schema.Message) []*schema.Message {

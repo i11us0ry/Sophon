@@ -170,20 +170,43 @@ func (s *Service) RemoveConversationDirs(conversationIDs []string) int {
 				strings.ContainsAny(name, `/\`) {
 				continue
 			}
-			target := filepath.Join(root, name)
-			if !withinRoot(root, target) {
-				continue
+			targets := []string{filepath.Join(root, name)}
+			if category == "workspace" {
+				targets = append(targets, workspaceConversationTargets(root, name)...)
 			}
-			info, err := os.Lstat(target)
-			if err != nil || !info.IsDir() {
-				continue
-			}
-			if err := os.RemoveAll(target); err == nil {
-				removed++
+			for _, target := range targets {
+				if !withinRoot(root, target) {
+					continue
+				}
+				info, err := os.Lstat(target)
+				if err != nil || !info.IsDir() {
+					continue
+				}
+				if err := os.RemoveAll(target); err == nil {
+					removed++
+				}
 			}
 		}
 	}
 	return removed
+}
+
+func workspaceConversationTargets(root, conversationID string) []string {
+	projectRoots, err := os.ReadDir(filepath.Join(root, "projects"))
+	if err != nil {
+		return nil
+	}
+	targets := make([]string, 0, len(projectRoots))
+	for _, project := range projectRoots {
+		if !project.IsDir() || project.Type()&os.ModeSymlink != 0 {
+			continue
+		}
+		targets = append(
+			targets,
+			filepath.Join(root, "projects", project.Name(), "conversations", conversationID),
+		)
+	}
+	return targets
 }
 
 // withinRoot 判断 target 是否位于 root 之下（先取绝对路径再比较）。

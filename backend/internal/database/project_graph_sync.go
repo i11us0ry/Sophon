@@ -367,6 +367,7 @@ func projectFactsForGraph(facts []ProjectFact) []ProjectFact {
 
 func factMaterializationValue(fact ProjectFact) bool {
 	return fact.Pinned ||
+		(fact.SubjectType == "audit_cell" && fact.ObjectKey == "tested") ||
 		hasFactKeyPrefix(fact.Key, "chain/", "exploit/", "poc/", "finding/") ||
 		strings.Contains(strings.ToLower(fact.Relation), "intent:") ||
 		strings.Contains(strings.ToLower(fact.Relation), "finding:")
@@ -393,6 +394,8 @@ func graphNodeKey(kind, title, sourceRefID, assetID string) string {
 // graphFindingStatus 把漏洞状态映射为攻击路径 finding 节点状态（前端仅支持 confirmed/dismissed）。
 func graphFindingStatus(status string) string {
 	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "pending_review":
+		return "open"
 	case "fixed", "ignored", "false_positive":
 		return "dismissed"
 	default:

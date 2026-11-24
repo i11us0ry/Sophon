@@ -339,6 +339,9 @@ func (db *DB) DeleteProject(ctx context.Context, id, ownerUserID string) error {
 		`DELETE FROM project_attack_steps WHERE project_id = ?`,
 		`DELETE FROM project_graph_edges WHERE project_id = ?`,
 		`DELETE FROM project_graph_nodes WHERE project_id = ?`,
+		`DELETE FROM vulnerability_report_drafts WHERE project_id = ?`,
+		`DELETE FROM tool_registry WHERE project_id = ?`,
+		`DELETE FROM tool_runtime_paths WHERE project_id = ?`,
 	} {
 		if _, err := tx.ExecContext(ctx, statement, id); err != nil {
 			return err
@@ -1158,7 +1161,7 @@ func (db *DB) ListAssetsFiltered(
 ) ([]Asset, int, error) {
 	clauses := []string{
 		"owner_user_id = ?",
-		"LOWER(TRIM(kind)) IN ('domain', 'ip', 'url', 'port', 'host')",
+		"LOWER(TRIM(kind)) IN ('domain', 'ip', 'url', 'port', 'host', 'source')",
 	}
 	args := []interface{}{filter.OwnerUserID}
 	if value := strings.TrimSpace(filter.ProjectID); value != "" {

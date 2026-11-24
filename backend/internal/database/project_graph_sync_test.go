@@ -17,6 +17,21 @@ func openGraphSyncTestDB(t *testing.T) *DB {
 	return db
 }
 
+func TestFactMaterializationIncludesTestedAuditCells(t *testing.T) {
+	if !factMaterializationValue(ProjectFact{
+		SubjectType: "audit_cell",
+		ObjectKey:   "tested",
+	}) {
+		t.Fatal("已测试审计单元应进入攻击路径候选")
+	}
+	if factMaterializationValue(ProjectFact{
+		SubjectType: "audit_cell",
+		ObjectKey:   "not_audited",
+	}) {
+		t.Fatal("未审计单元不应作为攻击路径证据")
+	}
+}
+
 func TestSyncProjectGraphCreatesSkeletonAndBackfill(t *testing.T) {
 	db := openGraphSyncTestDB(t)
 	ctx := context.Background()

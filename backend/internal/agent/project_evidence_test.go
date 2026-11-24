@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -32,20 +33,14 @@ func standardFindingArgs(args map[string]interface{}) map[string]interface{} {
 		}
 	}
 	poc := strings.TrimSpace(fmt.Sprint(args["poc"]))
-	hasStructuredPOC := strings.Contains(poc, "```") ||
-		strings.Contains(poc, "curl ") ||
-		strings.Contains(poc, "GET ") ||
-		strings.Contains(poc, "POST ") ||
-		strings.Contains(poc, "PUT ") ||
-		strings.Contains(poc, "PATCH ") ||
-		strings.Contains(poc, "DELETE ") ||
-		strings.Contains(poc, "http://") ||
-		strings.Contains(poc, "https://")
-	if !hasStructuredPOC || len([]rune(poc)) < 20 {
+	hasBurpPacket := strings.Contains(poc, " HTTP/1.") &&
+		strings.Contains(strings.ToLower(poc), "\nhost:")
+	if !hasBurpPacket {
 		poc = "```http\nGET /test HTTP/1.1\nHost: evidence.example\n\nPayload: " + poc + "\n```"
 	}
-	if !strings.Contains(poc, "利用脚本") {
-		poc += "\n\n利用脚本（优先 Python）：\n```python\nimport requests\nprint(requests.get('https://evidence.example', timeout=5).status_code)\n```"
+	pythonPattern := regexp.MustCompile("(?ms)^```(?:python3?|py|bash|sh|powershell|pwsh)[ \t]*\n.*?^```[ \t]*$")
+	if !pythonPattern.MatchString(poc) {
+		poc += "\n\n```python\nimport requests\nresponse = requests.get('https://evidence.example', timeout=15)\nprint(response.status_code, len(response.content), response.text[:200])\n```"
 	}
 	args["poc"] = poc
 	return args
@@ -92,15 +87,106 @@ func TestProjectFindingRequiresEvidenceBeforeAssetWrite(t *testing.T) {
 
 func TestProjectFindingRequiresPOCForHighSeverity(t *testing.T) {
 	service, ctx := openProjectToolService(t, true)
-	if _, err := invokeProjectTool(t, service, ctx, "project_report_finding", map[string]interface{}{
+	evidenceRef := completedToolRef(t, service, ctx, "http-probe")
+	service.model = &vulnerabilityReviewTestModel{
+		content: `{"description":"未修复正文","preconditions":"否","reproduction_steps":"","evidence":"HTTP 500","impact":"可读取数据库数据","recommendation":"参数化查询","residual_notes":"无"}`,
+	}
+	output, err := invokeProjectTool(t, service, ctx, "project_report_finding", map[string]interface{}{
 		"title":              "高危无 POC",
 		"severity":           "high",
 		"vulnerability_type": "SQL 注入",
 		"target":             "https://evidence.example/login?id=1",
 		"evidence":           "HTTP 500",
+		"evidence_refs":      []string{evidenceRef},
 		"impact":             "可读取数据库数据",
-	}); err == nil || !strings.Contains(err.Error(), "POC") {
-		t.Fatalf("高危漏洞缺少 POC 应被拒绝: %v", err)
+	})
+	if err != nil || !strings.Contains(output, "漏洞已安全保存为草稿") {
+		t.Fatalf("漏洞编写修复失败后应保留草稿: output=%q err=%v", output, err)
+	}
+	drafts, total, err := service.db.ListVulnerabilityReportDrafts(ctx, "project-tools", "user-1", 10, 0)
+	if err != nil || total != 1 || len(drafts) != 1 || drafts[0].Status != database.VulnerabilityDraftStatusNeedsInput {
+		t.Fatalf("漏洞编写失败后草稿状态错误: total=%d drafts=%+v err=%v", total, drafts, err)
+	}
+	findings, findingTotal, err := service.db.ListVulnerabilitiesFiltered(ctx, database.VulnerabilityFilter{
+		OwnerUserID: "user-1",
+		ProjectID:   "project-tools",
+		Limit:       10,
+	})
+	if err != nil || findingTotal != 0 || len(findings) != 0 {
+		t.Fatalf("未通过正文校验时不应写入正式漏洞: total=%d findings=%+v err=%v", findingTotal, findings, err)
+	}
+}
+
+func TestProjectFindingAllowsObservedStaticCodeEvidence(t *testing.T) {
+	service, ctx := openProjectToolService(t, true)
+	args := standardFindingArgs(map[string]interface{}{
+		"title":              "Servlet 免登录文件写入链",
+		"severity":           "high",
+		"vulnerability_type": "文件上传",
+		"target":             "source:seeyon20250422",
+		"verification_state": "observed",
+		"poc":                "HtmlOfficeServlet.doPost -> SAVEASIMG -> FILENAME -> transferTo；仅用源码调用链和反编译证据证明。",
+		"evidence":           "免登录 Servlet 名单包含 htmlofficeservlet，SAVEASIMG 分支 FILENAME 可控，写入后缀黑名单未覆盖 .jspx。",
+		"evidence_refs": []string{
+			completedToolRef(t, service, ctx, "java_decompile"),
+		},
+	})
+	if _, err := invokeProjectTool(t, service, ctx, "project_report_finding", args); err != nil {
+		t.Fatalf("observed 静态代码漏洞应允许写回: %v", err)
+	}
+	findings, _, err := service.db.ListVulnerabilitiesFiltered(ctx, database.VulnerabilityFilter{
+		OwnerUserID: "user-1",
+		ProjectID:   "project-tools",
+		Limit:       10,
+	})
+	if err != nil || len(findings) != 1 {
+		t.Fatalf("读取静态漏洞失败: %+v err=%v", findings, err)
+	}
+	if findings[0].VerificationState != "observed" {
+		t.Fatalf("静态漏洞状态应为 observed，实际 %q", findings[0].VerificationState)
+	}
+}
+
+func TestProjectFindingSurvivesReviewServiceUnavailable(t *testing.T) {
+	service, ctx := openProjectToolService(t, true)
+	service.vulnerabilityReviewHook = func(context.Context, database.Vulnerability) error {
+		return &VulnerabilityReviewUnavailableError{Reason: "审核模型返回格式无效"}
+	}
+	args := standardFindingArgs(map[string]interface{}{
+		"title":              "审核不可用时的 SQL 注入",
+		"severity":           "high",
+		"vulnerability_type": "SQL 注入",
+		"target":             "https://review-unavailable.example/item?id=1",
+		"evidence_refs": []string{
+			completedToolRef(t, service, ctx, "sqlmap"),
+		},
+	})
+	out, err := invokeProjectTool(t, service, ctx, "project_report_finding", args)
+	if err != nil {
+		t.Fatalf("审核服务临时不可用不应丢弃 finding: %v", err)
+	}
+	if !strings.Contains(out, "已暂存为待审核") || !strings.Contains(out, "审核服务暂不可用") {
+		t.Fatalf("finding 结果应提示待复核: %q", out)
+	}
+	findings, _, err := service.db.ListVulnerabilitiesFiltered(ctx, database.VulnerabilityFilter{
+		OwnerUserID: "user-1",
+		ProjectID:   "project-tools",
+		Limit:       10,
+	})
+	if err != nil || len(findings) != 1 {
+		t.Fatalf("审核不可用时 finding 未保存: %+v err=%v", findings, err)
+	}
+	if findings[0].Status != "pending_review" {
+		t.Fatalf("审核不可用时 finding 状态应为 pending_review: %+v", findings[0])
+	}
+	nodes, err := service.db.ListProjectGraphNodes(ctx, "project-tools")
+	if err != nil {
+		t.Fatalf("读取攻击路径失败: %v", err)
+	}
+	for _, node := range nodes {
+		if node.Kind == "finding" {
+			t.Fatalf("待审核 finding 不应提前生成攻击路径节点: %+v", node)
+		}
 	}
 }
 
@@ -136,7 +222,7 @@ func TestProjectFindingRejectsFakeToolEvidence(t *testing.T) {
 		"severity":           "high",
 		"vulnerability_type": "SQL 注入",
 		"target":             "https://evidence.example/login?id=1",
-		"poc":                "id=1 AND 1=1\n利用脚本（优先 Python）：\n```python\nprint('test')\n```",
+		"poc":                "```http\nGET /login?id=1%20AND%201=1 HTTP/1.1\nHost: evidence.example\nUser-Agent: curl/8\n```\n\n```python\nimport requests\nprint(requests.get('https://evidence.example/login?id=1', timeout=10).status_code)\n```",
 		"impact":             "可读取数据库数据",
 		"evidence":           "看起来存在漏洞",
 		"evidence_refs":      []string{"tool:not-a-real-execution"},

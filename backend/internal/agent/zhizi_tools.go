@@ -3,12 +3,14 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"sophon/internal/database"
 	"sophon/internal/execctx"
 
 	"github.com/cloudwego/eino/components/tool"
@@ -27,6 +29,8 @@ const (
 	maxZhiziLocalFile     = 32 * 1024 * 1024
 )
 
+var errZhiziRuntimeStateUnavailable = errors.New("智子运行时状态不可用")
+
 func newZhiziTools(service *Service) []tool.BaseTool {
 	return []tool.BaseTool{
 		newZhiziExecTool(service),
@@ -38,7 +42,7 @@ func newZhiziTools(service *Service) []tool.BaseTool {
 }
 
 func isZhiziToolName(name string) bool {
-	switch strings.ToLower(strings.TrimSpace(name)) {
+	switch canonicalToolName(name) {
 	case zhiziExecToolName, zhiziPythonToolName, zhiziUploadToolName,
 		zhiziDownloadToolName, zhiziStatusToolName:
 		return true
@@ -47,17 +51,103 @@ func isZhiziToolName(name string) bool {
 	}
 }
 
+func canonicalToolName(name string) string {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if index := strings.LastIndex(name, "__"); index >= 0 && index+2 < len(name) {
+		return name[index+2:]
+	}
+	return name
+}
+
 func (s *Service) hasActiveZhiziLease(ctx context.Context) bool {
+	_, active, err := s.zhiziLeaseState(ctx)
+	return err == nil && active
+}
+
+func (s *Service) zhiziLeaseState(ctx context.Context) (bool, bool, error) {
+	if state, ok := execctx.ZhiziRuntimeStateFromContext(ctx); ok {
+		if state.Unavailable {
+			return false, false, errZhiziRuntimeStateUnavailable
+		}
+		return state.Enabled, state.Active, nil
+	}
 	if s == nil || s.db == nil {
-		return false
+		return false, false, nil
 	}
 	conversationID := strings.TrimSpace(execctx.ConversationID(ctx))
 	userID := strings.TrimSpace(execctx.UserID(ctx))
 	if conversationID == "" || userID == "" {
-		return false
+		return false, false, nil
 	}
 	state, err := s.db.GetZhiziConversationState(ctx, conversationID, userID)
-	return err == nil && state.Enabled && state.Lease != nil
+	if err != nil {
+		return false, false, err
+	}
+	return state.Enabled, state.Enabled && state.Lease != nil, nil
+}
+
+func (s *Service) localExecutionBlockedByZhizi(ctx context.Context) (bool, string) {
+	enabled, active, err := s.zhiziLeaseState(ctx)
+	if err != nil {
+		if errors.Is(err, database.ErrZhiziConversationUnauthorized) {
+			return false, ""
+		}
+		return true, "无法确认当前会话的智子租约状态，已阻止本地执行以避免工作区串用"
+	}
+	if !enabled {
+		return false, ""
+	}
+	if !active {
+		return true, "当前会话已启用智子分身但租约不可用，请重试智子工具；不得回退到本地执行"
+	}
+	return true, "当前会话已绑定智子分身，shell、Python、扫描器和其他工具执行必须使用 zhizi_* 远端工具"
+}
+
+func isLocalExecutionToolName(name string) bool {
+	switch canonicalToolName(name) {
+	case "exec", "execute-python-script", "install-python-package", "java_decompile", "job":
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Service) isLocalExecutionTool(toolName string) bool {
+	if isLocalExecutionToolName(toolName) {
+		return true
+	}
+	return s != nil &&
+		s.registry != nil &&
+		strings.EqualFold(strings.TrimSpace(s.registry.serverOf(toolName)), toolRunnerServerName)
+}
+
+func (s *Service) filterLocalExecutionToolsUnderZhizi(
+	ctx context.Context,
+	items []tool.BaseTool,
+) []tool.BaseTool {
+	blocked, _ := s.localExecutionBlockedByZhizi(ctx)
+	if !blocked {
+		return items
+	}
+	filtered := make([]tool.BaseTool, 0, len(items))
+	for _, item := range items {
+		if item == nil {
+			continue
+		}
+		info, err := item.Info(ctx)
+		if err != nil || info == nil {
+			continue
+		}
+		if isLocalExecutionToolName(info.Name) {
+			continue
+		}
+		if named, ok := item.(serverNamedTool); ok &&
+			strings.EqualFold(strings.TrimSpace(named.MCPServerName()), toolRunnerServerName) {
+			continue
+		}
+		filtered = append(filtered, item)
+	}
+	return filtered
 }
 
 func newZhiziExecTool(service *Service) tool.BaseTool {
@@ -337,19 +427,20 @@ func (s *Service) validateZhiziLocalInput(ctx context.Context, raw string) (stri
 	}
 	bases := []string{
 		filepath.Join(root, "chat_uploads", conversationID),
-		filepath.Join(root, "tmp", "workspace", conversationID),
 		filepath.Join(root, "data", "conversation_artifacts", conversationID),
+	}
+	if paths, pathErr := s.agentWorkspacePathsFor(projectID, conversationID); pathErr == nil {
+		bases = append(bases, paths.conversationDirs()...)
 	}
 	conversations, err := s.db.ListProjectConversations(ctx, projectID, userID)
 	if err != nil {
 		return "", err
 	}
 	for _, conversation := range conversations {
-		bases = append(bases,
-			filepath.Join(root, "chat_uploads", conversation.ID),
-			filepath.Join(root, "tmp", "workspace", conversation.ID),
-			filepath.Join(root, "data", "conversation_artifacts", conversation.ID),
-		)
+		bases = append(bases, filepath.Join(root, "chat_uploads", conversation.ID))
+		if paths, pathErr := s.agentWorkspacePathsFor(projectID, conversation.ID); pathErr == nil {
+			bases = append(bases, paths.conversationDirs()...)
+		}
 	}
 	for _, base := range bases {
 		resolvedBase := base

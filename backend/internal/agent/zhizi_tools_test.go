@@ -40,7 +40,7 @@ func TestZhiziToolWritesPersistentExecutionRecord(t *testing.T) {
 	}
 }
 
-func TestCompletedMissionBlocksZhiziTools(t *testing.T) {
+func TestCompletedMissionDoesNotBlockZhiziTools(t *testing.T) {
 	service := &Service{}
 	ctx := withMissionExecution(context.Background(), missionExecution{
 		Plan:      missionPlan{Mode: missionModeAgent},
@@ -52,8 +52,8 @@ func TestCompletedMissionBlocksZhiziTools(t *testing.T) {
 	allowed, reason := service.missionToolDecision(ctx, zhiziExecToolName, map[string]interface{}{
 		"command": "printf should-not-run",
 	})
-	if allowed || reason == "" {
-		t.Fatalf("任务完成后必须阻止新的智子工具调用: allowed=%v reason=%q", allowed, reason)
+	if !allowed {
+		t.Fatalf("目标完成状态不应剥夺主 Agent 的智子工具选择: %s", reason)
 	}
 }
 
@@ -78,9 +78,9 @@ func TestZhiziExecutionPriorityGuidance(t *testing.T) {
 	for _, expected := range []string{
 		"智子分身执行优先级（强约束）",
 		"必须首先选择 zhizi_exec、zhizi_python",
-		"不得在没有尝试智子工具的情况下直接选择本地 exec",
-		"只有智子工具明确失败、租约不可用",
-		"使用本地 exec 或 execute-python-script 前",
+		"本地 exec、execute-python-script",
+		"其余 sophon-tool-runner 工具已被禁用",
+		"不得回退到本地 shell",
 	} {
 		if !strings.Contains(guidance, expected) {
 			t.Fatalf("智子优先提示缺少 %q: %s", expected, guidance)
@@ -207,8 +207,56 @@ func TestZhiziToolsRequireActiveLeaseForMainAndSubAgents(t *testing.T) {
 	if !hasTool(service.subAgentActiveTools(subCtx), zhiziStatusToolName) {
 		t.Fatalf("活跃租约下子 Agent 应恢复智子工具")
 	}
+	if hasTool(service.activeTools(ctx), "exec") {
+		t.Fatalf("活跃智子租约下不应继续暴露本地 exec")
+	}
+	if hasTool(service.subAgentActiveTools(subCtx), "exec") {
+		t.Fatalf("活跃智子租约下子 Agent 不应继续暴露本地 exec")
+	}
 	if _, _, err := zhiziExecutionContext(subCtx, service); err != nil {
 		t.Fatalf("活跃租约下运行时校验失败: %v", err)
+	}
+}
+
+func TestZhiziQualifiedToolAliasesAreRecognized(t *testing.T) {
+	for _, name := range []string{
+		"zhizi_exec",
+		"sophon-zhizi__zhizi_exec",
+		"SOPHON-ZHIZI__ZHIZI_PYTHON",
+	} {
+		if !isZhiziToolName(name) {
+			t.Fatalf("智子工具别名未识别: %s", name)
+		}
+	}
+	if isZhiziToolName("sophon-tool-runner__exec") {
+		t.Fatalf("本地 exec 不应被识别为智子工具")
+	}
+}
+
+func TestZhiziEnabledWithoutLeaseBlocksLocalFallback(t *testing.T) {
+	service, ctx := openProjectToolService(t, true)
+	if err := service.db.SetZhiziConversationEnabled(ctx, "conv-tools", "user-1", true); err != nil {
+		t.Fatalf("启用智子失败: %v", err)
+	}
+	blocked, reason := service.localExecutionBlockedByZhizi(ctx)
+	if !blocked || !strings.Contains(reason, "租约不可用") {
+		t.Fatalf("租约不可用时应阻止本地回退: blocked=%t reason=%q", blocked, reason)
+	}
+	service.tools = []tool.BaseTool{&jsonTool{name: "exec", desc: "本地命令"}}
+	if names := toolNamesForTest(service.activeTools(ctx), ctx); len(names) != 0 {
+		t.Fatalf("租约不可用时不应暴露本地执行工具: %v", names)
+	}
+}
+
+func TestZhiziRuntimeStateAvoidsPerToolDatabaseLookup(t *testing.T) {
+	service := &Service{}
+	ctx := execctx.WithZhiziRuntimeState(context.Background(), execctx.ZhiziRuntimeState{
+		Enabled: true,
+		Active:  true,
+	})
+	blocked, reason := service.localExecutionBlockedByZhizi(ctx)
+	if !blocked || !strings.Contains(reason, "必须使用 zhizi_*") {
+		t.Fatalf("运行时智子状态未生效: blocked=%t reason=%q", blocked, reason)
 	}
 }
 

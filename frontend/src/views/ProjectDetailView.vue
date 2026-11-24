@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, reactive, ref, watch, type Ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch, type Ref } from 'vue'
 import { RouterLink, useRoute } from 'vue-router'
 
 import { apiDelete, apiGet, apiPost, apiPut } from '../api/client'
@@ -55,6 +55,8 @@ interface ProjectCoverage {
   coverageRatio: number
   fullCoverageRatio: number
   nextTargets: CoverageTarget[]
+  pendingIntentTargets?: CoverageTarget[]
+  evidenceGapTargets?: CoverageTarget[]
 }
 
 interface Fact {
@@ -124,6 +126,41 @@ interface Vulnerability {
   updatedAt: string
 }
 
+interface VulnerabilityDetail extends Vulnerability {
+  projectId: string
+  assetId: string
+  vulnerabilityType: string
+  parameter: string
+  httpMethod: string
+  preconditions: string
+  reproductionSteps: string
+  description: string
+  evidence: string
+  evidenceRefs: string[]
+  impact: string
+  recommendation: string
+  retestNotes: string
+  verificationState: string
+  confidence: number
+  exploitability: string
+  testTechnique: string
+}
+
+interface VulnerabilityReportDraft {
+  id: string
+  fingerprint: string
+  status: string
+  attempts: number
+  lastError: string
+  vulnerabilityId: string
+  title: string
+  severity: string
+  vulnerabilityType: string
+  target: string
+  nextAttemptAt: string
+  updatedAt: string
+}
+
 interface PageResponse<T> {
   items: T[]
   total: number
@@ -132,6 +169,8 @@ interface PageResponse<T> {
 }
 
 const TABS = [
+  { key: 'pending-intents', labelKey: 'project.tabPendingIntents', countKey: 'pendingIntents' },
+  { key: 'evidence-gaps', labelKey: 'project.tabEvidenceGaps', countKey: 'evidenceGaps' },
   { key: 'facts', labelKey: 'project.tabFacts', countKey: 'facts' },
   { key: 'attack', labelKey: 'project.attackSteps', countKey: 'attackSteps' },
   { key: 'assets', labelKey: 'project.tabAssets', countKey: 'assets' },
@@ -141,7 +180,7 @@ const TABS = [
 
 const visibleTabs = computed(() =>
   TABS.filter((tab) => {
-    if (tab.key === 'attack' || tab.key === 'vulnerabilities') {
+    if (tab.key === 'pending-intents' || tab.key === 'evidence-gaps' || tab.key === 'attack' || tab.key === 'vulnerabilities') {
       return auth.hasPermission('vulnerability:read')
     }
     if (tab.key === 'assets') {
@@ -161,6 +200,7 @@ const SEVERITY_LABELS: Record<string, string> = {
   low: 'severity.low',
   info: 'severity.info',
 }
+const SEVERITY_OPTIONS = Object.keys(SEVERITY_LABELS)
 
 const GRAPH_KINDS = ['begin', 'goal', 'intent', 'fact', 'finding', 'hint', 'asset', 'chain', 'digest'] as const
 const GRAPH_CREATE_KINDS = ['begin', 'goal', 'intent', 'fact', 'finding', 'hint'] as const
@@ -170,7 +210,7 @@ const GRAPH_STATUS_OPTIONS: Record<string, string[]> = {
   goal: ['open', 'met', 'abandoned'],
   intent: ['open', 'running', 'done', 'blocked', 'exhausted', 'capacity_blocked'],
   fact: ['confirmed', 'dismissed'],
-  finding: ['confirmed', 'dismissed'],
+  finding: ['open', 'confirmed', 'dismissed'],
   hint: ['active', 'consumed'],
 }
 
@@ -198,18 +238,42 @@ const GRAPH_RELATIONS = ['spawns', 'derived_from', 'yields', 'proves', 'blocks',
 
 const STATUS_LABELS: Record<string, string> = {
   open: 'vulnStatus.open',
+  pending_review: 'vulnStatus.pending_review',
   confirmed: 'vulnStatus.confirmed',
   fixed: 'vulnStatus.fixed',
   ignored: 'vulnStatus.ignored',
   false_positive: 'vulnStatus.false_positive',
 }
+const VULNERABILITY_STATUS_OPTIONS = Object.keys(STATUS_LABELS)
 
 const route = useRoute()
 const projectId = String(route.params.id ?? '')
+let projectStatusTimer: number | undefined
+let projectStatusSequence = 0
 
 const project = ref<Project | null>(null)
 const counts = ref<ProjectCounts | null>(null)
 const coverage = ref<ProjectCoverage | null>(null)
+const pendingIntentTargets = computed(() =>
+  (coverage.value?.pendingIntentTargets?.length
+    ? coverage.value.pendingIntentTargets
+    : (coverage.value?.nextTargets ?? []).filter((target) => target.kind === 'intent'))
+    .filter((target) => target.kind === 'intent')
+    .slice(0, 6),
+)
+const evidenceGapTargets = computed(() =>
+  (coverage.value?.evidenceGapTargets?.length
+    ? coverage.value.evidenceGapTargets
+    : (coverage.value?.nextTargets ?? []).filter((target) => target.kind === 'evidence'))
+    .filter((target) => target.kind === 'evidence')
+    .slice(0, 6),
+)
+const pendingIntentTotal = computed(
+  () => (coverage.value?.intentsOpen ?? 0) + (coverage.value?.intentsRunning ?? 0),
+)
+const evidenceGapTotal = computed(
+  () => (coverage.value?.factsWithoutEvidence ?? 0) + (coverage.value?.findingsWithoutEvidence ?? 0),
+)
 const activeTab = ref('facts')
 const loading = ref(false)
 const error = ref('')
@@ -233,8 +297,60 @@ const vulnerabilities = ref<Vulnerability[]>([])
 const vulnerabilitiesHasMore = ref(false)
 const vulnerabilitiesNextOffset = ref(0)
 const vulnerabilitiesLoadingMore = ref(false)
+const vulnerabilityReportDrafts = ref<VulnerabilityReportDraft[]>([])
+const vulnerabilityEditOpen = ref(false)
+const vulnerabilityEditLoading = ref(false)
+const vulnerabilityDraft = ref<VulnerabilityDetail | null>(null)
 const graphNodes = ref<GraphNode[]>([])
 const graphEdges = ref<GraphEdge[]>([])
+const pendingIntentCards = computed(() => {
+  const graph = new Map(graphNodes.value.map((node) => [node.id, node]))
+  return pendingIntentTargets.value
+    .map((target) => ({ target, node: graph.get(target.refId) }))
+    .filter((item): item is { target: CoverageTarget; node: GraphNode } => Boolean(item.node))
+})
+const intentCards = computed(() => {
+  const statusOrder: Record<string, number> = {
+    running: 0,
+    open: 1,
+    blocked: 2,
+    exhausted: 3,
+    capacity_blocked: 4,
+    done: 5,
+    stopped: 6,
+  }
+  const targetByID = new Map(
+    (coverage.value?.pendingIntentTargets ?? []).map((target) => [target.refId, target]),
+  )
+  return graphNodes.value
+    .filter((node) => node.kind === 'intent')
+    .sort((left, right) => {
+      const statusDiff = (statusOrder[left.status] ?? 9) - (statusOrder[right.status] ?? 9)
+      if (statusDiff !== 0) {
+        return statusDiff
+      }
+      return new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime()
+    })
+    .map((node) => ({
+      node,
+      score: targetByID.get(node.id)?.score ?? node.confidence ?? 0,
+      reason: targetByID.get(node.id)?.reason ?? graphStatusLabel(node.status),
+    }))
+})
+const evidenceGapFacts = computed(() => {
+  const byID = new Map(facts.value.map((fact) => [fact.id, fact]))
+  return (coverage.value?.evidenceGapTargets ?? [])
+    .map((target) => ({ target, fact: byID.get(target.refId) }))
+    .filter((item): item is { target: CoverageTarget; fact: Fact } => Boolean(item.fact))
+})
+const evidenceGapFindings = computed(() => {
+  const byID = new Map(vulnerabilities.value.map((item) => [item.id, item]))
+  return (coverage.value?.evidenceGapTargets ?? [])
+    .map((target) => ({ target, finding: byID.get(target.refId) }))
+    .filter(
+      (item): item is { target: CoverageTarget; finding: Vulnerability } => Boolean(item.finding),
+    )
+})
 const graphAssetFilter = ref('')
 const graphScope = ref<'chain' | 'full'>('chain')
 const editingNodeId = ref('')
@@ -255,6 +371,7 @@ let layoutTimer: number | undefined
 let graphRequestId = 0
 const drawerOpen = ref(false)
 const drawerMode = ref<'create' | 'edit' | 'view'>('create')
+const pendingIntentEditOpen = ref(false)
 
 const factDraft = reactive({
   assetId: '',
@@ -307,6 +424,7 @@ async function run(action: () => Promise<void>, successText = '') {
 }
 
 async function loadProject() {
+  const sequence = ++projectStatusSequence
   loading.value = true
   error.value = ''
   try {
@@ -314,13 +432,20 @@ async function loadProject() {
       apiGet<Project>(`/projects/${projectId}`),
       apiGet<{ counts: ProjectCounts }>(`/projects/${projectId}/summary`),
     ])
+    if (sequence !== projectStatusSequence) {
+      return
+    }
     project.value = projectResponse
     counts.value = summary.counts
-    void loadCoverage()
+    void loadMissionBoards()
   } catch (err) {
-    error.value = err instanceof Error ? err.message : t('message.readProjectsFailed')
+    if (sequence === projectStatusSequence) {
+      error.value = err instanceof Error ? err.message : t('message.readProjectsFailed')
+    }
   } finally {
-    loading.value = false
+    if (sequence === projectStatusSequence) {
+      loading.value = false
+    }
   }
 }
 
@@ -336,12 +461,49 @@ async function loadCoverage() {
   }
 }
 
+async function loadGraphData(scope: 'chain' | 'full') {
+  const requestId = ++graphRequestId
+  const query = new URLSearchParams()
+  if (graphAssetFilter.value) {
+    query.set('assetId', graphAssetFilter.value)
+  }
+  if (scope === 'chain') {
+    query.set('view', 'chain')
+  }
+  const queryString = query.toString()
+  const graph = await apiGet<{ nodes: GraphNode[]; edges: GraphEdge[] }>(
+    `/projects/${projectId}/graph${queryString ? `?${queryString}` : ''}`,
+  )
+  if (requestId !== graphRequestId) {
+    return
+  }
+  graphNodes.value = graph.nodes ?? []
+  graphEdges.value = graph.edges ?? []
+}
+
+async function loadMissionBoards() {
+  await loadCoverage()
+  await loadGraphData('full')
+  if (!coverage.value?.evidenceGapTargets?.length) {
+    return
+  }
+  const [factsResponse, findingsResponse] = await Promise.all([
+    apiGet<PageResponse<Fact>>(`/projects/${projectId}/facts?limit=500&offset=0`),
+    apiGet<PageResponse<Vulnerability>>(`/projects/${projectId}/vulnerabilities?limit=500&offset=0`),
+  ])
+  facts.value = factsResponse.items ?? []
+  vulnerabilities.value = findingsResponse.items ?? []
+}
+
 async function loadTab() {
   if (!projectId) {
     return
   }
   try {
-    if ((activeTab.value === 'facts' || activeTab.value === 'attack') && !assetsFullyLoaded.value) {
+    if (
+      ['facts', 'attack', 'pending-intents', 'evidence-gaps'].includes(activeTab.value) &&
+      !assetsFullyLoaded.value
+    ) {
       await loadAllProjectAssets()
     }
     if (activeTab.value === 'facts') {
@@ -355,23 +517,17 @@ async function loadTab() {
       factsHasMore.value = Boolean(response.hasMore)
       factsNextOffset.value = response.nextOffset || 0
     } else if (activeTab.value === 'attack') {
-      const requestId = ++graphRequestId
-      const query = new URLSearchParams()
-      if (graphAssetFilter.value) {
-        query.set('assetId', graphAssetFilter.value)
-      }
-      if (graphScope.value === 'chain') {
-        query.set('view', 'chain')
-      }
-      const queryString = query.toString()
-      const graph = await apiGet<{ nodes: GraphNode[]; edges: GraphEdge[] }>(
-        `/projects/${projectId}/graph${queryString ? `?${queryString}` : ''}`,
-      )
-      if (requestId !== graphRequestId) {
-        return
-      }
-      graphNodes.value = graph.nodes ?? []
-      graphEdges.value = graph.edges ?? []
+      await loadGraphData(graphScope.value)
+    } else if (activeTab.value === 'pending-intents') {
+      await loadGraphData('full')
+    } else if (activeTab.value === 'evidence-gaps') {
+      await loadCoverage()
+      const [factsResponse, findingsResponse] = await Promise.all([
+        apiGet<PageResponse<Fact>>(`/projects/${projectId}/facts?limit=500&offset=0`),
+        apiGet<PageResponse<Vulnerability>>(`/projects/${projectId}/vulnerabilities?limit=500&offset=0`),
+      ])
+      facts.value = factsResponse.items ?? []
+      vulnerabilities.value = findingsResponse.items ?? []
     } else if (activeTab.value === 'assets') {
       const response = await apiGet<PageResponse<Asset>>(
         `/projects/${projectId}/assets?limit=200&offset=0`,
@@ -388,12 +544,18 @@ async function loadTab() {
       conversationsHasMore.value = Boolean(response.hasMore)
       conversationsNextOffset.value = response.nextOffset || 0
     } else if (activeTab.value === 'vulnerabilities') {
-      const response = await apiGet<PageResponse<Vulnerability>>(
-        `/projects/${projectId}/vulnerabilities?limit=200&offset=0`,
-      )
+      const [response, draftsResponse] = await Promise.all([
+        apiGet<PageResponse<Vulnerability>>(
+          `/projects/${projectId}/vulnerabilities?limit=200&offset=0`,
+        ),
+        apiGet<PageResponse<VulnerabilityReportDraft>>(
+          `/projects/${projectId}/vulnerability-drafts?limit=200&offset=0`,
+        ),
+      ])
       vulnerabilities.value = response.items ?? []
       vulnerabilitiesHasMore.value = Boolean(response.hasMore)
       vulnerabilitiesNextOffset.value = response.nextOffset || 0
+      vulnerabilityReportDrafts.value = draftsResponse.items ?? []
     }
   } catch (err) {
     error.value = err instanceof Error ? err.message : t('message.readDataFailed')
@@ -489,6 +651,12 @@ function switchTab(key: string) {
 }
 
 function countValue(tab: (typeof TABS)[number]) {
+  if (tab.key === 'pending-intents') {
+    return intentCards.value.length
+  }
+  if (tab.key === 'evidence-gaps') {
+    return evidenceGapTotal.value
+  }
   return counts.value?.[tab.countKey as keyof ProjectCounts] ?? 0
 }
 
@@ -573,6 +741,101 @@ function removeFact(fact: Fact) {
     await loadTab()
     await loadProject()
   }, t('project.deletedFact'))
+}
+
+async function editEvidenceFact(fact: Fact) {
+  activeTab.value = 'facts'
+  await nextTick()
+  editFact(fact)
+  void loadTab()
+}
+
+async function openVulnerabilityEditor(item: Vulnerability) {
+  vulnerabilityEditLoading.value = true
+  error.value = ''
+  try {
+    const detail = await apiGet<VulnerabilityDetail>(`/vulnerabilities/${item.id}`)
+    vulnerabilityDraft.value = {
+      ...detail,
+      evidenceRefs: detail.evidenceRefs ?? [],
+    }
+    vulnerabilityEditOpen.value = true
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : t('message.readDataFailed')
+  } finally {
+    vulnerabilityEditLoading.value = false
+  }
+}
+
+function closeVulnerabilityEditor() {
+  vulnerabilityEditOpen.value = false
+  vulnerabilityDraft.value = null
+}
+
+function saveVulnerabilityGap() {
+  const draft = vulnerabilityDraft.value
+  if (!draft) {
+    return
+  }
+  void run(async () => {
+    await apiPut(`/vulnerabilities/${draft.id}`, {
+      projectId: draft.projectId,
+      assetId: draft.assetId,
+      title: draft.title,
+      titleImpact: draft.title,
+      severity: draft.severity,
+      status: draft.status,
+      vulnerabilityType: draft.vulnerabilityType,
+      target: draft.target,
+      parameter: draft.parameter,
+      httpMethod: draft.httpMethod,
+      preconditions: draft.preconditions,
+      reproductionSteps: draft.reproductionSteps,
+      description: draft.description,
+      evidence: draft.evidence,
+      evidenceRefs: draft.evidenceRefs,
+      impact: draft.impact,
+      recommendation: draft.recommendation,
+      retestNotes: draft.retestNotes,
+      verificationState: draft.verificationState,
+      confidence: draft.confidence,
+      exploitability: draft.exploitability,
+      testTechnique: draft.testTechnique,
+    })
+    closeVulnerabilityEditor()
+    await loadCoverage()
+    await loadTab()
+    await loadProject()
+  }, t('project.savedVulnerability'))
+}
+
+function removeEvidenceFinding(item: Vulnerability) {
+  if (!window.confirm(t('project.confirmDeleteVulnerability', { name: item.title }))) {
+    return
+  }
+  void run(async () => {
+    await apiDelete(`/vulnerabilities/${item.id}`)
+    await loadCoverage()
+    await loadTab()
+    await loadProject()
+  }, t('project.deletedVulnerability'))
+}
+
+function retryVulnerabilityReportDraft(item: VulnerabilityReportDraft) {
+  void run(async () => {
+    await apiPost(`/projects/${projectId}/vulnerability-drafts/${item.id}/retry`)
+    await loadTab()
+  }, t('project.vulnerabilityDraftRetryQueued'))
+}
+
+function vulnerabilityDraftStatusLabel(status: string) {
+  const key = `vulnDraftStatus.${status}`
+  const translated = t(key)
+  return translated === key ? status : translated
+}
+
+function canRetryVulnerabilityDraft(item: VulnerabilityReportDraft) {
+  return ['needs_input', 'pending_retry', 'pending_review', 'needs_attention'].includes(item.status)
 }
 
 const nodeStatusOptions = computed(() => GRAPH_STATUS_OPTIONS[nodeDraft.kind] ?? [])
@@ -670,6 +933,39 @@ function closeDrawer() {
   resetNodeDraft()
 }
 
+function openPendingIntentEditor(node: GraphNode) {
+  editNode(node)
+  pendingIntentEditOpen.value = true
+}
+
+function closePendingIntentEditor() {
+  pendingIntentEditOpen.value = false
+  resetNodeDraft()
+}
+
+function savePendingIntent() {
+  if (!editingNodeId.value || !nodeDraft.title.trim()) {
+    error.value = t('graph.titleRequired')
+    return
+  }
+  void run(async () => {
+    await apiPut(`/projects/${projectId}/graph/nodes/${editingNodeId.value}`, {
+      kind: 'intent',
+      title: nodeDraft.title.trim(),
+      detail: nodeDraft.detail.trim(),
+      status: nodeDraft.status,
+      confidence: Number(nodeDraft.confidence) || 0,
+      severity: '',
+      assetId: nodeDraft.assetId,
+      parentId: '',
+      relation: 'spawns',
+    })
+    closePendingIntentEditor()
+    await loadTab()
+    await loadProject()
+  }, t('graph.saved'))
+}
+
 function saveNode() {
   if (!nodeDraft.title.trim()) {
     error.value = t('graph.titleRequired')
@@ -705,6 +1001,7 @@ function removeNode(node: GraphNode) {
     await apiDelete(`/projects/${projectId}/graph/nodes/${node.id}`)
     closeDrawer()
     await loadTab()
+    await loadProject()
   }, t('graph.deleted'))
 }
 
@@ -840,6 +1137,27 @@ function openReadOnlyDrawer(node: GraphNode) {
 onMounted(async () => {
   await loadProject()
   await loadTab()
+  projectStatusTimer = window.setInterval(async () => {
+    if (document.visibilityState !== 'visible' || loading.value || !projectId) {
+      return
+    }
+    try {
+      const sequence = ++projectStatusSequence
+      const refreshed = await apiGet<Project>(`/projects/${projectId}`)
+      if (sequence === projectStatusSequence) {
+        project.value = refreshed
+      }
+    } catch {
+      // 状态轮询失败不覆盖当前已加载的项目详情。
+    }
+  }, 5000)
+})
+
+onUnmounted(() => {
+  if (projectStatusTimer) {
+    window.clearInterval(projectStatusTimer)
+  }
+  projectStatusSequence++
 })
 </script>
 
@@ -925,19 +1243,141 @@ onMounted(async () => {
           </span>
         </div>
       </div>
-      <div v-if="coverage.nextTargets.length" class="coverage-targets">
-        <div
-          v-for="target in coverage.nextTargets.slice(0, 5)"
-          :key="`${target.kind}-${target.refId}`"
-          class="coverage-target"
-        >
-          <span class="target-kind">{{ target.kind }}</span>
-          <span class="target-label">{{ target.label }}</span>
-          <span class="target-reason">{{ target.reason }}</span>
-          <span class="target-score">{{ target.score }}</span>
-        </div>
+      <div v-if="false" class="mission-workboards">
+        <section class="mission-workboard mission-workboard-intents">
+          <header class="mission-workboard-head">
+            <div>
+              <span class="mission-workboard-code">INTENTS // FRONTIER</span>
+              <h3>{{ t('project.pendingIntentLabel') }}</h3>
+            </div>
+            <span class="mission-workboard-total">{{ pendingIntentTotal }}</span>
+          </header>
+          <div v-if="pendingIntentCards.length" class="mission-gap-cards">
+            <article
+              v-for="item in pendingIntentCards"
+              :key="`intent-${item.target.refId}`"
+              class="mission-gap-card mission-intent-card"
+            >
+              <header>
+                <span class="gap-status" :class="`is-${item.node.status}`">
+                  {{ graphStatusLabel(item.node.status) }}
+                </span>
+                <strong :title="item.node.title">{{ item.node.title }}</strong>
+                <span class="mission-workboard-score">{{ item.target.score }}</span>
+              </header>
+              <p :title="item.node.detail || item.target.reason">
+                {{ item.node.detail || item.target.reason }}
+              </p>
+              <div class="mission-gap-meta">
+                <span v-if="item.node.assetId">{{ assetName(item.node.assetId) }}</span>
+                <span>{{ formatTime(item.node.updatedAt) }}</span>
+              </div>
+              <footer>
+                <button class="button compact" type="button" @click="openPendingIntentEditor(item.node)">
+                  {{ t('common.edit') }}
+                </button>
+                <button class="button compact danger" type="button" @click="removeNode(item.node)">
+                  {{ t('common.delete') }}
+                </button>
+              </footer>
+            </article>
+          </div>
+          <p v-else class="mission-workboard-empty">{{ t('project.pendingIntentBoardEmpty') }}</p>
+          <button
+            v-if="pendingIntentTotal > pendingIntentTargets.length"
+            class="mission-workboard-more"
+            type="button"
+            @click="switchTab('attack')"
+          >
+            {{ t('project.workboardViewAll', { count: pendingIntentTotal }) }}
+          </button>
+        </section>
+
+        <section class="mission-workboard mission-workboard-evidence">
+          <header class="mission-workboard-head">
+            <div>
+              <span class="mission-workboard-code">EVIDENCE // GAPS</span>
+              <h3>{{ t('project.evidenceGapLabel') }}</h3>
+            </div>
+            <span class="mission-workboard-total">{{ evidenceGapTotal }}</span>
+          </header>
+          <div
+            v-if="evidenceGapFacts.length || evidenceGapFindings.length"
+            class="mission-gap-cards"
+          >
+            <article
+              v-for="item in evidenceGapFacts"
+              :key="`fact-gap-${item.fact.id}`"
+              class="mission-gap-card mission-evidence-card"
+            >
+              <header>
+                <span class="mission-evidence-type">FACT GAP</span>
+                <strong :title="item.fact.key">{{ item.fact.key }}</strong>
+                <span class="mission-workboard-score">{{ item.target.score }}</span>
+              </header>
+              <p :title="item.fact.body || item.fact.summary">
+                {{ item.fact.summary || item.fact.value || item.target.reason }}
+              </p>
+              <div class="mission-gap-meta">
+                <span>{{ item.fact.factType || 'fact' }}</span>
+                <span>{{ formatTime(item.fact.updatedAt) }}</span>
+              </div>
+              <footer>
+                <button class="button compact" type="button" @click="editEvidenceFact(item.fact)">
+                  {{ t('common.edit') }}
+                </button>
+                <button class="button compact danger" type="button" @click="removeFact(item.fact)">
+                  {{ t('common.delete') }}
+                </button>
+              </footer>
+            </article>
+            <article
+              v-for="item in evidenceGapFindings"
+              :key="`finding-gap-${item.finding.id}`"
+              class="mission-gap-card mission-evidence-card"
+            >
+              <header>
+                <span class="chip" :class="`sev-${item.finding.severity}`">
+                  {{ severityLabel(item.finding.severity) }}
+                </span>
+                <strong :title="item.finding.title">{{ item.finding.title }}</strong>
+                <span class="mission-workboard-score">{{ item.target.score }}</span>
+              </header>
+              <p>{{ item.finding.target || item.target.reason }}</p>
+              <div class="mission-gap-meta">
+                <span>FINDING GAP</span>
+                <span>{{ formatTime(item.finding.updatedAt) }}</span>
+              </div>
+              <footer>
+                <button
+                  class="button compact"
+                  type="button"
+                  :disabled="vulnerabilityEditLoading"
+                  @click="openVulnerabilityEditor(item.finding)"
+                >
+                  {{ t('common.edit') }}
+                </button>
+                <button
+                  class="button compact danger"
+                  type="button"
+                  @click="removeEvidenceFinding(item.finding)"
+                >
+                  {{ t('common.delete') }}
+                </button>
+              </footer>
+            </article>
+          </div>
+          <p v-else class="mission-workboard-empty">{{ t('project.evidenceGapBoardEmpty') }}</p>
+          <button
+            v-if="evidenceGapTotal > evidenceGapTargets.length"
+            class="mission-workboard-more"
+            type="button"
+            @click="switchTab('facts')"
+          >
+            {{ t('project.workboardViewAll', { count: evidenceGapTotal }) }}
+          </button>
+        </section>
       </div>
-      <p v-else class="muted">{{ t('project.coverageComplete') }}</p>
     </section>
 
     <div class="count-row project-module-nav">
@@ -950,7 +1390,13 @@ onMounted(async () => {
         @click="switchTab(tab.key)"
       >
         <svg class="project-module-icon" viewBox="0 0 24 24" aria-hidden="true">
-          <template v-if="tab.key === 'facts'">
+          <template v-if="tab.key === 'pending-intents'">
+            <circle cx="5" cy="12" r="2" />
+            <circle cx="12" cy="6" r="2" />
+            <circle cx="19" cy="12" r="2" />
+            <path d="M7 11l3-3M14 7l3 3M5 14v3M19 14v3" />
+          </template>
+          <template v-else-if="tab.key === 'facts'">
             <path d="M5 4h14v16H5zM8 8h8M8 12h8M8 16h5" />
           </template>
           <template v-else-if="tab.key === 'attack'">
@@ -969,13 +1415,146 @@ onMounted(async () => {
           </template>
           <template v-else>
             <path d="m12 3 7 3v5c0 5-3 8-7 10-4-2-7-5-7-10V6l7-3Z" />
-            <path d="M12 8v4M12 16h.01" />
+            <path d="M9 9h6M9 13h6M9 17h4" />
           </template>
         </svg>
         <small>{{ t(tab.labelKey) }}</small>
         <strong>{{ countValue(tab) }}</strong>
       </button>
     </div>
+
+    <section v-if="activeTab === 'pending-intents'" class="panel">
+      <header class="panel-header">
+        <h2>{{ t('project.tabPendingIntents') }}</h2>
+        <span class="panel-hint">{{ t('project.pendingIntentManageHint') }}</span>
+      </header>
+      <div v-if="intentCards.length" class="fact-grid">
+        <article
+          v-for="item in intentCards"
+          :key="`tab-intent-${item.node.id}`"
+          class="fact-card"
+        >
+          <header>
+            <span class="fact-type">
+              {{ graphStatusLabel(item.node.status) }}
+            </span>
+            <strong class="fact-key" :title="item.node.title">{{ item.node.title }}</strong>
+            <span v-if="item.score > 0" class="fact-confidence">{{ item.score }}</span>
+          </header>
+          <p class="fact-summary" :title="item.node.detail || item.reason">
+            {{ item.node.detail || item.reason }}
+          </p>
+          <p v-if="item.node.assetId" class="fact-scope">
+            {{ t('project.factAsset') }}: {{ assetName(item.node.assetId) }}
+          </p>
+          <p v-else class="fact-scope">{{ t('project.factProjectScope') }}</p>
+          <footer>
+            <small>{{ formatTime(item.node.updatedAt) }}</small>
+            <div class="fact-actions">
+              <button class="button compact" type="button" @click="openPendingIntentEditor(item.node)">
+                {{ t('common.edit') }}
+              </button>
+              <button class="button compact danger" type="button" @click="removeNode(item.node)">
+                {{ t('common.delete') }}
+              </button>
+            </div>
+          </footer>
+        </article>
+      </div>
+      <p v-else class="empty-cell">{{ t('project.pendingIntentBoardEmpty') }}</p>
+    </section>
+
+    <section v-if="activeTab === 'evidence-gaps'" class="panel">
+      <header class="panel-header">
+        <h2>{{ t('project.tabEvidenceGaps') }}</h2>
+        <span class="panel-hint">{{ t('project.evidenceGapManageHint') }}</span>
+      </header>
+      <div
+        v-if="evidenceGapFacts.length || evidenceGapFindings.length"
+        class="evidence-gap-columns"
+      >
+        <section class="evidence-gap-group">
+          <header>
+            <strong>{{ t('project.factEvidenceGap') }}</strong>
+            <span>{{ evidenceGapFacts.length }}</span>
+          </header>
+          <div class="fact-grid">
+            <article
+              v-for="item in evidenceGapFacts"
+              :key="`tab-fact-gap-${item.fact.id}`"
+              class="fact-card"
+            >
+              <header>
+                <span class="fact-type">FACT GAP</span>
+                <strong class="fact-key" :title="item.fact.key">{{ item.fact.key }}</strong>
+                <span class="fact-confidence">{{ item.target.score }}</span>
+              </header>
+              <p class="fact-summary" :title="item.fact.body || item.fact.summary">
+                {{ item.fact.summary || item.fact.value || item.target.reason }}
+              </p>
+              <p class="fact-scope">{{ item.fact.factType || 'fact' }}</p>
+              <p class="fact-body" :title="item.target.reason">{{ item.target.reason }}</p>
+              <footer>
+                <small>{{ formatTime(item.fact.updatedAt) }}</small>
+                <div class="fact-actions">
+                  <button class="button compact" type="button" @click="editEvidenceFact(item.fact)">
+                    {{ t('common.edit') }}
+                  </button>
+                  <button class="button compact danger" type="button" @click="removeFact(item.fact)">
+                    {{ t('common.delete') }}
+                  </button>
+                </div>
+              </footer>
+            </article>
+          </div>
+        </section>
+        <section class="evidence-gap-group">
+          <header>
+            <strong>{{ t('project.findingEvidenceGap') }}</strong>
+            <span>{{ evidenceGapFindings.length }}</span>
+          </header>
+          <div class="fact-grid">
+            <article
+              v-for="item in evidenceGapFindings"
+              :key="`tab-finding-gap-${item.finding.id}`"
+              class="fact-card"
+            >
+              <header>
+                <span class="fact-type">
+                  {{ severityLabel(item.finding.severity) }}
+                </span>
+                <strong class="fact-key" :title="item.finding.title">{{ item.finding.title }}</strong>
+                <span class="fact-confidence">{{ item.target.score }}</span>
+              </header>
+              <p class="fact-summary">{{ item.finding.target || item.target.reason }}</p>
+              <p class="fact-scope">FINDING GAP</p>
+              <p class="fact-body" :title="item.target.reason">{{ item.target.reason }}</p>
+              <footer>
+                <small>{{ formatTime(item.finding.updatedAt) }}</small>
+                <div class="fact-actions">
+                  <button
+                    class="button compact"
+                    type="button"
+                    :disabled="vulnerabilityEditLoading"
+                    @click="openVulnerabilityEditor(item.finding)"
+                  >
+                    {{ t('common.edit') }}
+                  </button>
+                  <button
+                    class="button compact danger"
+                    type="button"
+                    @click="removeEvidenceFinding(item.finding)"
+                  >
+                    {{ t('common.delete') }}
+                  </button>
+                </div>
+              </footer>
+            </article>
+          </div>
+        </section>
+      </div>
+      <p v-else class="empty-cell">{{ t('project.evidenceGapBoardEmpty') }}</p>
+    </section>
 
     <section v-if="activeTab === 'facts'" class="panel">
       <header class="panel-header">
@@ -1431,6 +2010,146 @@ onMounted(async () => {
       </button>
     </section>
 
+    <section v-if="false" class="panel">
+      <header class="panel-header">
+        <h2>{{ t('project.tabEvidenceGaps') }}</h2>
+        <span class="panel-hint">{{ t('project.evidenceGapManageHint') }}</span>
+      </header>
+      <div
+        v-if="evidenceGapFacts.length || evidenceGapFindings.length"
+        class="evidence-gap-columns"
+      >
+        <section class="evidence-gap-group">
+          <header>
+            <strong>{{ t('project.factEvidenceGap') }}</strong>
+            <span>{{ evidenceGapFacts.length }}</span>
+          </header>
+          <article v-for="item in evidenceGapFacts" :key="item.fact.id" class="gap-management-row">
+            <div class="gap-management-main">
+              <div class="gap-management-title">
+                <span class="gap-status is-fact">{{ item.fact.factType || 'fact' }}</span>
+                <strong>{{ item.fact.key }}</strong>
+              </div>
+              <p>{{ item.target.reason }} · {{ item.fact.summary || item.fact.value }}</p>
+              <small>{{ formatTime(item.fact.updatedAt) }}</small>
+            </div>
+            <div class="gap-management-actions">
+              <button class="button compact" type="button" @click="editEvidenceFact(item.fact)">
+                {{ t('common.edit') }}
+              </button>
+              <button class="button compact danger" type="button" @click="removeFact(item.fact)">
+                {{ t('common.delete') }}
+              </button>
+            </div>
+          </article>
+        </section>
+
+        <section class="evidence-gap-group">
+          <header>
+            <strong>{{ t('project.findingEvidenceGap') }}</strong>
+            <span>{{ evidenceGapFindings.length }}</span>
+          </header>
+          <article
+            v-for="item in evidenceGapFindings"
+            :key="item.finding.id"
+            class="gap-management-row"
+          >
+            <div class="gap-management-main">
+              <div class="gap-management-title">
+                <span class="chip" :class="`sev-${item.finding.severity}`">
+                  {{ severityLabel(item.finding.severity) }}
+                </span>
+                <strong>{{ item.finding.title }}</strong>
+              </div>
+              <p>{{ item.target.reason }} · {{ item.finding.target || '-' }}</p>
+              <small>{{ formatTime(item.finding.updatedAt) }}</small>
+            </div>
+            <div class="gap-management-actions">
+              <button
+                class="button compact"
+                type="button"
+                :disabled="vulnerabilityEditLoading"
+                @click="openVulnerabilityEditor(item.finding)"
+              >
+                {{ t('common.edit') }}
+              </button>
+              <button
+                class="button compact danger"
+                type="button"
+                @click="removeEvidenceFinding(item.finding)"
+              >
+                {{ t('common.delete') }}
+              </button>
+            </div>
+          </article>
+        </section>
+      </div>
+      <p v-else class="empty-cell">{{ t('project.evidenceGapBoardEmpty') }}</p>
+
+      <div
+        v-if="vulnerabilityEditOpen && vulnerabilityDraft"
+        class="fact-modal-backdrop"
+        @click.self="closeVulnerabilityEditor"
+      >
+        <section class="fact-modal gap-edit-modal" role="dialog" aria-modal="true">
+          <header class="fact-modal-head">
+            <h3>{{ t('project.editEvidenceVulnerability') }}</h3>
+            <button class="text-button dark" type="button" @click="closeVulnerabilityEditor">
+              {{ t('common.close') }}
+            </button>
+          </header>
+          <div class="gap-edit-form">
+            <label>
+              <span>{{ t('vulnerability.name') }}</span>
+              <input v-model="vulnerabilityDraft.title" />
+            </label>
+            <div class="gap-edit-grid">
+              <label>
+                <span>{{ t('vulnerability.severity') }}</span>
+                <select v-model="vulnerabilityDraft.severity">
+                  <option v-for="severity in SEVERITY_OPTIONS" :key="severity" :value="severity">
+                    {{ severityLabel(severity) }}
+                  </option>
+                </select>
+              </label>
+              <label>
+                <span>{{ t('common.status') }}</span>
+                <select v-model="vulnerabilityDraft.status">
+                  <option
+                    v-for="status in VULNERABILITY_STATUS_OPTIONS"
+                    :key="status"
+                    :value="status"
+                  >
+                    {{ vulnerabilityStatusLabel(status) }}
+                  </option>
+                </select>
+              </label>
+            </div>
+            <label>
+              <span>{{ t('vulnerability.target') }}</span>
+              <input v-model="vulnerabilityDraft.target" />
+            </label>
+            <label>
+              <span>{{ t('project.factEvidence') }}</span>
+              <textarea v-model="vulnerabilityDraft.evidence" rows="6"></textarea>
+            </label>
+            <label>
+              <span>{{ t('vulnerability.impact') }}</span>
+              <textarea v-model="vulnerabilityDraft.impact" rows="5"></textarea>
+            </label>
+            <div class="gap-edit-actions">
+              <button class="button compact" type="button" @click="saveVulnerabilityGap">
+                {{ t('common.save') }}
+              </button>
+              <button class="button compact" type="button" @click="closeVulnerabilityEditor">
+                {{ t('common.cancel') }}
+              </button>
+            </div>
+          </div>
+        </section>
+      </div>
+    </section>
+
     <section v-if="activeTab === 'conversations'" class="panel">
       <header class="panel-header">
         <h2>{{ t('project.tabConversations') }}</h2>
@@ -1460,6 +2179,47 @@ onMounted(async () => {
         <h2>{{ t('project.tabVulnerabilities') }}</h2>
         <RouterLink class="panel-link" to="/vulnerabilities">{{ t('project.goVulnerabilities') }}</RouterLink>
       </header>
+      <section v-if="vulnerabilityReportDrafts.length" class="vulnerability-draft-section">
+        <header class="vulnerability-draft-section-head">
+          <div>
+            <strong>{{ t('project.pendingVulnerabilityDrafts') }}</strong>
+            <p>{{ t('project.pendingVulnerabilityDraftsHint') }}</p>
+          </div>
+          <span class="chip">{{ vulnerabilityReportDrafts.length }}</span>
+        </header>
+        <div class="mission-gap-cards">
+          <article
+            v-for="item in vulnerabilityReportDrafts"
+            :key="item.id"
+            class="mission-gap-card vulnerability-draft-card"
+          >
+            <header>
+              <span class="chip" :class="`sev-${item.severity}`">
+                {{ severityLabel(item.severity) }}
+              </span>
+              <strong>{{ item.title || item.vulnerabilityType || item.id }}</strong>
+            </header>
+            <p>{{ item.target || '-' }}</p>
+            <p class="vulnerability-draft-error" :title="item.lastError">
+              {{ item.lastError || t('project.vulnerabilityDraftProcessing') }}
+            </p>
+            <footer>
+              <span>
+                {{ vulnerabilityDraftStatusLabel(item.status) }}
+                · {{ t('project.vulnerabilityDraftAttempts', { count: item.attempts }) }}
+              </span>
+              <button
+                v-if="canRetryVulnerabilityDraft(item)"
+                class="button compact"
+                type="button"
+                @click="retryVulnerabilityReportDraft(item)"
+              >
+                {{ t('project.retryVulnerabilityDraft') }}
+              </button>
+            </footer>
+          </article>
+        </div>
+      </section>
       <div class="factory-table-scroll">
         <table class="data-list">
         <thead>
@@ -1495,6 +2255,119 @@ onMounted(async () => {
         {{ vulnerabilitiesLoadingMore ? t('common.loading') : t('common.loadMore') }}
       </button>
     </section>
+
+    <div
+      v-if="vulnerabilityEditOpen && vulnerabilityDraft"
+      class="fact-modal-backdrop"
+      @click.self="closeVulnerabilityEditor"
+    >
+      <section class="fact-modal gap-edit-modal" role="dialog" aria-modal="true">
+        <header class="fact-modal-head">
+          <h3>{{ t('project.editEvidenceVulnerability') }}</h3>
+          <button class="text-button dark" type="button" @click="closeVulnerabilityEditor">
+            {{ t('common.close') }}
+          </button>
+        </header>
+        <div class="gap-edit-form">
+          <label>
+            <span>{{ t('vulnerability.name') }}</span>
+            <input v-model="vulnerabilityDraft.title" />
+          </label>
+          <div class="gap-edit-grid">
+            <label>
+              <span>{{ t('vulnerability.severity') }}</span>
+              <select v-model="vulnerabilityDraft.severity">
+                <option v-for="severity in SEVERITY_OPTIONS" :key="severity" :value="severity">
+                  {{ severityLabel(severity) }}
+                </option>
+              </select>
+            </label>
+            <label>
+              <span>{{ t('common.status') }}</span>
+              <select v-model="vulnerabilityDraft.status">
+                <option
+                  v-for="status in VULNERABILITY_STATUS_OPTIONS"
+                  :key="status"
+                  :value="status"
+                >
+                  {{ vulnerabilityStatusLabel(status) }}
+                </option>
+              </select>
+            </label>
+          </div>
+          <label>
+            <span>{{ t('vulnerability.target') }}</span>
+            <input v-model="vulnerabilityDraft.target" />
+          </label>
+          <label>
+            <span>{{ t('project.factEvidence') }}</span>
+            <textarea v-model="vulnerabilityDraft.evidence" rows="6"></textarea>
+          </label>
+          <label>
+            <span>{{ t('vulnerability.impact') }}</span>
+            <textarea v-model="vulnerabilityDraft.impact" rows="5"></textarea>
+          </label>
+          <div class="gap-edit-actions">
+            <button class="button compact" type="button" @click="saveVulnerabilityGap">
+              {{ t('common.save') }}
+            </button>
+            <button class="button compact" type="button" @click="closeVulnerabilityEditor">
+              {{ t('common.cancel') }}
+            </button>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <div
+      v-if="pendingIntentEditOpen"
+      class="fact-modal-backdrop"
+      @click.self="closePendingIntentEditor"
+    >
+      <section class="fact-modal gap-edit-modal" role="dialog" aria-modal="true">
+        <header class="fact-modal-head">
+          <h3>{{ t('project.editPendingIntent') }}</h3>
+          <button class="text-button dark" type="button" @click="closePendingIntentEditor">
+            {{ t('common.close') }}
+          </button>
+        </header>
+        <div class="gap-edit-form">
+          <label>
+            <span>{{ t('graph.titleLabel') }}</span>
+            <input v-model="nodeDraft.title" />
+          </label>
+          <label>
+            <span>{{ t('graph.statusLabel') }}</span>
+            <select v-model="nodeDraft.status">
+              <option v-for="status in GRAPH_STATUS_OPTIONS.intent" :key="status" :value="status">
+                {{ graphStatusLabel(status) }}
+              </option>
+            </select>
+          </label>
+          <label>
+            <span>{{ t('graph.assetLabel') }}</span>
+            <select v-model="nodeDraft.assetId">
+              <option value="">{{ t('graph.assetNone') }}</option>
+              <option v-for="asset in assets" :key="asset.id" :value="asset.id">
+                {{ asset.name || asset.value }}
+              </option>
+            </select>
+          </label>
+          <label>
+            <span>{{ t('graph.detailLabel') }}</span>
+            <textarea v-model="nodeDraft.detail" rows="8"></textarea>
+          </label>
+          <div class="gap-edit-actions">
+            <button class="button compact" type="button" @click="savePendingIntent">
+              {{ t('common.save') }}
+            </button>
+            <button class="button compact" type="button" @click="closePendingIntentEditor">
+              {{ t('common.cancel') }}
+            </button>
+          </div>
+        </div>
+      </section>
+    </div>
   </section>
 </template>
 
@@ -2560,6 +3433,7 @@ onMounted(async () => {
 }
 
 .project-mission-panel {
+  --mission-evidence: #55c7e8;
   margin-bottom: 10px;
   padding: 0;
   overflow: hidden;
@@ -2674,6 +3548,320 @@ onMounted(async () => {
   background: var(--project-panel);
 }
 
+.mission-workboards {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  border-top: 1px solid var(--project-line);
+  background: var(--project-line);
+}
+
+.mission-workboard {
+  min-width: 0;
+  padding: 10px 12px 0;
+  background: var(--project-panel);
+}
+
+.mission-workboard-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.mission-workboard-head h3 {
+  margin: 2px 0 0;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.mission-workboard-code {
+  color: var(--text-muted);
+  font-family: var(--mono);
+  font-size: 8px;
+  letter-spacing: 0.08em;
+}
+
+.mission-workboard-total {
+  color: var(--project-accent);
+  font-family: var(--mono);
+  font-size: 18px;
+  line-height: 1;
+}
+
+.mission-workboard-evidence .mission-workboard-total {
+  color: var(--mission-evidence);
+}
+
+.mission-gap-cards {
+  display: grid;
+  gap: 8px;
+  padding-bottom: 10px;
+}
+
+.tab-gap-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 10px;
+}
+
+.evidence-gap-group .tab-gap-card-grid {
+  grid-template-columns: 1fr;
+}
+
+.mission-gap-card {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid var(--project-line);
+  border-radius: 4px;
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--project-accent) 4%, transparent), transparent 36px),
+    var(--surface);
+}
+
+.mission-evidence-card {
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--mission-evidence) 5%, transparent), transparent 36px),
+    var(--surface);
+}
+
+.mission-gap-card header {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+}
+
+.mission-gap-card header strong {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mission-gap-card > p {
+  display: -webkit-box;
+  overflow: hidden;
+  min-height: 26px;
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 9px;
+  line-height: 1.45;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.mission-gap-meta,
+.mission-gap-card footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.mission-gap-meta {
+  color: var(--text-muted);
+  font-family: var(--mono);
+  font-size: 8px;
+}
+
+.mission-gap-meta span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mission-gap-card footer {
+  justify-content: flex-end;
+}
+
+.mission-gap-card footer .button {
+  min-height: 24px;
+  padding: 4px 8px;
+  font-size: 9px;
+}
+
+.vulnerability-draft-section {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 14px;
+  padding: 12px;
+  border: 1px solid color-mix(in srgb, var(--project-accent) 24%, var(--project-line));
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--project-accent) 3%, var(--surface));
+}
+
+.vulnerability-draft-section-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.vulnerability-draft-section-head strong {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.vulnerability-draft-section-head p {
+  margin: 3px 0 0;
+  color: var(--text-muted);
+  font-size: 9px;
+}
+
+.vulnerability-draft-card footer {
+  justify-content: space-between;
+}
+
+.vulnerability-draft-card footer > span {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-family: var(--mono);
+  font-size: 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vulnerability-draft-error {
+  color: var(--warning, #d49b3f) !important;
+}
+
+.mission-workboard-rows {
+  display: grid;
+  gap: 1px;
+}
+
+.mission-workboard-row {
+  display: grid;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  min-height: 42px;
+  padding: 7px 8px;
+  border-left: 2px solid var(--project-accent);
+  background: color-mix(in srgb, var(--project-accent) 5%, var(--surface));
+}
+
+.mission-workboard-row + .mission-workboard-row {
+  border-top: 1px solid var(--project-line);
+}
+
+.mission-intent-row {
+  grid-template-columns: 12px minmax(0, 1fr) auto;
+}
+
+.mission-evidence-row {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  border-left-color: var(--mission-evidence);
+  background: color-mix(in srgb, var(--mission-evidence) 5%, var(--surface));
+}
+
+.mission-intent-rail {
+  position: relative;
+  align-self: stretch;
+  display: grid;
+  place-items: center;
+}
+
+.mission-intent-rail::before {
+  position: absolute;
+  top: -7px;
+  bottom: -7px;
+  left: 5px;
+  width: 1px;
+  background: color-mix(in srgb, var(--project-accent) 34%, transparent);
+  content: '';
+}
+
+.mission-intent-rail i {
+  position: relative;
+  z-index: 1;
+  width: 7px;
+  height: 7px;
+  border: 1px solid var(--project-accent);
+  border-radius: 50%;
+  background: var(--surface);
+}
+
+.mission-evidence-type {
+  padding: 2px 5px;
+  border: 1px solid color-mix(in srgb, var(--mission-evidence) 38%, var(--border));
+  border-radius: 2px;
+  color: var(--mission-evidence);
+  font-family: var(--mono);
+  font-size: 7px;
+  white-space: nowrap;
+}
+
+.mission-workboard-copy {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.mission-workboard-copy strong {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 10px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mission-workboard-copy small {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mission-workboard-score {
+  min-width: 24px;
+  color: var(--project-accent);
+  font-family: var(--mono);
+  font-size: 9px;
+  text-align: right;
+}
+
+.mission-evidence-row .mission-workboard-score {
+  color: var(--mission-evidence);
+}
+
+.mission-workboard-empty {
+  min-height: 42px;
+  margin: 0;
+  padding: 12px 8px;
+  border: 1px dashed var(--project-line);
+  color: var(--text-muted);
+  font-size: 9px;
+}
+
+.mission-workboard-more {
+  display: block;
+  margin: 6px 0 0 auto;
+  padding: 4px 0 7px;
+  border: 0;
+  background: transparent;
+  color: var(--project-accent);
+  font-size: 9px;
+  cursor: pointer;
+}
+
+.mission-workboard-evidence .mission-workboard-more {
+  color: var(--mission-evidence);
+}
+
+.mission-workboard-more:hover {
+  text-decoration: underline;
+}
+
 .project-mission-panel > .muted {
   margin: 0;
   padding: 10px 12px;
@@ -2683,7 +3871,7 @@ onMounted(async () => {
 
 .project-module-nav {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(7, minmax(0, 1fr));
   gap: 10px;
   margin-bottom: 10px;
   overflow: visible;
@@ -2901,9 +4089,186 @@ onMounted(async () => {
   background: color-mix(in srgb, var(--surface-soft) 76%, transparent);
 }
 
+.gap-management-list,
+.evidence-gap-group {
+  display: grid;
+  gap: 6px;
+}
+
+.gap-management-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--project-accent);
+  border-radius: 4px;
+  background: var(--surface-raised);
+}
+
+.gap-management-main {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.gap-management-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.gap-management-title strong {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gap-management-main p {
+  display: -webkit-box;
+  overflow: hidden;
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 10px;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.gap-management-main small {
+  color: var(--text-muted);
+  font-family: var(--mono);
+  font-size: 8px;
+}
+
+.gap-management-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.gap-status {
+  flex: 0 0 auto;
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  color: var(--text-muted);
+  font-family: var(--mono);
+  font-size: 8px;
+  font-style: normal;
+}
+
+.gap-status.is-open {
+  border-color: color-mix(in srgb, var(--project-accent) 38%, var(--border));
+  color: var(--project-accent);
+}
+
+.gap-status.is-running {
+  border-color: color-mix(in srgb, var(--success) 44%, var(--border));
+  color: var(--success);
+}
+
+.gap-status.is-fact {
+  color: var(--mission-evidence);
+}
+
+.evidence-gap-columns {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.evidence-gap-group {
+  align-content: start;
+}
+
+.evidence-gap-group > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.evidence-gap-group > header span {
+  color: var(--mission-evidence);
+  font-family: var(--mono);
+}
+
+.evidence-gap-group .gap-management-row {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.evidence-gap-group .gap-management-actions {
+  justify-content: flex-end;
+}
+
+.gap-edit-modal {
+  width: min(720px, calc(100vw - 24px));
+  max-height: calc(100vh - 32px);
+  overflow: auto;
+}
+
+.gap-edit-form {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+}
+
+.gap-edit-form label {
+  display: grid;
+  gap: 5px;
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.gap-edit-form input,
+.gap-edit-form select,
+.gap-edit-form textarea {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  background: var(--field-bg);
+  font: inherit;
+}
+
+.gap-edit-form textarea {
+  resize: vertical;
+}
+
+.gap-edit-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.gap-edit-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 @media (max-width: 980px) {
   .coverage-body {
     grid-template-columns: 1fr;
+  }
+
+  .mission-workboards {
+    grid-template-columns: 1fr;
+  }
+
+  .evidence-gap-columns {
+    grid-template-columns: 1fr;
+  }
+
+  .project-module-nav {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
   }
 
   .coverage-signals {
@@ -2937,6 +4302,18 @@ onMounted(async () => {
 
   .coverage-signals {
     width: 100%;
+  }
+
+  .gap-management-row {
+    grid-template-columns: 1fr;
+  }
+
+  .gap-management-actions {
+    justify-content: flex-end;
+  }
+
+  .gap-edit-grid {
+    grid-template-columns: 1fr;
   }
 
   .project-module-nav {

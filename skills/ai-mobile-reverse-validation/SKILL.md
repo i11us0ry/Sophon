@@ -1,75 +1,55 @@
 ---
 name: ai-mobile-reverse-validation
 description: >-
-  Android App 授权逆向的 Phase 5 最小验证设计。用于基于前序发现生成授权环境下的最小 PoC、验证用例、止损点与复现步骤，禁止破坏性和批量攻击。
+  Android App 最小验证设计方法。用于基于已有发现设计最小 PoC、验证用例、止损点与复现步骤。
 metadata:
   tags: [移动安全, app逆向, 授权验证, poc]
 ---
 
 # Agent: ValidationDesigner（最小验证 POC 设计 Agent）
 
-## 角色定义
+## 适用场景
 
-你是移动安全验证设计 Agent，负责针对 Phase 4 已发现的漏洞，设计**仅适用于授权环境**的最小化验证方案，输出可执行、可审计、可复核的验证步骤、验证用例以及**每个漏洞对应的最小 POC 脚本模板**，不破坏业务数据。
+适合已经形成明确漏洞候选，需要设计最小、可复核、可停止的验证方案。
 
-**注意**：
-- 你的职责是设计验证方案和 POC，不是重新做全量审计。
-- 你的输入必须来自前序阶段的明确发现和用户授权范围。
-- 你的输出重点是“如何安全、可复现地验证漏洞存在”，而不是追求攻击效果最大化。
-- 对每个高危或需验证漏洞，应尽量生成一个对应的最小 POC 脚本，作为授权测试环境中的执行模板。
+## 不适用场景
 
-## 安全边界（必须遵守）
+没有任何漏洞候选时，不应为了生成 PoC 而推测漏洞。已有材料不完整时，可以针对现有候选设计受限验证计划，但要明确缺失证据。
 
-- 仅设计授权环境下的最小验证方案。
-- 不输出破坏性自动化攻击脚本。
-- 允许输出仅用于授权环境、默认指向占位目标、需人工补齐参数后才能运行的最小验证脚本模板。
-- 不做批量攻击、持久化、横向移动、破坏业务数据等无关行为。
-- 所有步骤必须以“验证存在性”为目标，而不是扩大影响。
-- 若某漏洞的验证天然可能触碰高风险操作，必须明确写出风险提示和止损点。
+## 核心判断
 
-## 路径约定
+验证设计的目标是安全地证明存在性，不是最大化攻击效果。每个用例都需要前置条件、最小操作、期望结果、证据和止损点。
 
-- 用户提供的输出目录、补充请求样本、测试材料路径，可以使用真实路径。
-- 本仓库内部的模板、规则、脚本若被引用，一律以 `ai-mobile-reverse-skills/` 为根目录描述。
-- 不在本 Agent 中写入任何个人机器绝对路径。
-- 本阶段默认读取 `{output_dir}/step4/` 的漏洞分析产物，并写入 `{output_dir}/step5/`；旧版根目录平铺文件只作为兼容兜底读取。
+## 证据标准
 
-## 启动前置条件（硬性门控，不满足则立即终止）
+- 验证用例必须绑定候选漏洞、接口或代码证据。
+- PoC 可优先使用合成或无效测试数据，并说明目标环境。
+- 需要明确成功、失败、不可复现和证据不足的判定。
+- 可标记验证的停止条件和影响边界。
 
-1. `{output_dir}/step4/vuln_analysis.json` 必须存在。
-2. 以下文件中至少存在 2 个：
-   - `{output_dir}/step3/crypto_native_analysis.json`
-   - `{output_dir}/step3/jni_analysis.json`
-   - `{output_dir}/step2/protocol_map.json`
-   - `{output_dir}/step2/api_endpoints.json`
-   - `{output_dir}/step2/traffic_alignment.json`
-3. `{custom_requests}` 可选，但若存在应作为重点目标输入。
+## 决策树
 
-若 1 不满足，立即终止并输出：
+- 候选和目标环境明确：设计最小验证。
+- 前置材料缺失：缩小验证目标并标记限制。
+- 验证涉及写入或敏感数据：改为只读证明或要求人工审批。
+- 无法安全验证：输出阻断原因和待补证据。
+- 已取得存在性证据：停止扩展并写回复现结果。
 
-`「错误：vuln_analysis.json 不存在，尚无明确漏洞发现，无法设计最小验证 POC。」`
+## 常见误判
 
-## 输入
+- 为了验证而批量抓取真实数据。
+- 把环境依赖写成确定漏洞。
+- 把 PoC 脚本存在当成漏洞已验证。
+- 忽略账号、设备、时间和业务前置条件。
+- 没有止损点就设计高风险写入测试。
 
-- `{output_dir}/step4/vuln_analysis.json`
-- `{output_dir}/step3/crypto_native_analysis.json`，可选
-- `{output_dir}/step3/jni_analysis.json`，可选
-- `{output_dir}/step2/protocol_map.json`，可选
-- `{output_dir}/step2/api_endpoints.json`，可选
-- `{output_dir}/step2/traffic_alignment.json`，可选
-- `{custom_requests}`，可选
-- `{output_dir}/step5/pocs/`，若已存在则复用其目录结构
+## 方法定位
 
-若当前由 Phase 4 自动衔接进入本阶段，则默认继承以下参数，无需再次向用户重复索取：
-
-- `{output_dir}`
-- `authorized_only`
-- `target_name`（若后续还要继续进入 Phase 6）
-- `report_type` / `include_appendix`（若后续还要继续进入 Phase 6）
+从已有漏洞候选、接口、代码、流量、Native 分析或运行时观察中提取可验证假设。验证设计围绕最小影响、明确观测点、可停止条件和可复现证据展开；没有固定输入文件或阶段依赖。
 
 ## 执行步骤
 
-### Step 1: 加载 Phase 4 已确认或待验证问题
+### 梳理已确认或待验证问题
 
 从 `vuln_analysis.json` 中读取：
 - 已确认漏洞
@@ -83,7 +63,7 @@ metadata:
 
 **优先读取 Guardian Level（若存在）：**
 
-若 `vuln_analysis.json` 的 `vulnerabilities[]` 条目中包含 `guardian_level` 字段，必须以此作为本阶段 PoC 设计优先级的第一依据：
+若 `vuln_analysis.json` 的 `vulnerabilities[]` 条目中包含 `guardian_level` 字段，可优先参考该字段安排 PoC 设计：
 
 | guardian_level | Phase 5 动作 |
 |---------------|-------------|
@@ -259,13 +239,10 @@ metadata:
 脚本生成原则：
 - 一个漏洞至少对应一个脚本文件；若同一漏洞需同时有请求验证和运行时观察，可生成多个脚本
 - 默认使用占位目标、占位 token、占位测试数据，不得内嵌真实生产地址或真实敏感值
-- 若前序阶段已给出 `reproduction_materials`、`runtime_hook_points`、`input_order`，必须优先消费这些字段生成脚本注释与占位参数
-- 若脚本只能部分生成，必须保留 `TODO` 注释，明确仍需人工补齐的字段
+- 若前序阶段已给出 `reproduction_materials`、`runtime_hook_points`、`input_order`，可优先使用这些字段生成脚本注释与占位参数
+- 若脚本只能部分生成，可保留 `TODO` 注释并说明仍需人工补齐的字段
 
-推荐命名：
-- `{output_dir}/step5/pocs/{vuln_id}/validate_request.py`
-- `{output_dir}/step5/pocs/{vuln_id}/runtime_observe.js`
-- `{output_dir}/step5/pocs/{vuln_id}/README.md`
+如需生成脚本，可按验证类型选择合适的请求验证、运行时观察或说明文件，不固定目录和命名。
 
 若仓库中存在 `ai-mobile-reverse-skills/tools/poc_templates/`，应优先复用其中模板，而不是从零自由发挥。
 
@@ -295,129 +272,15 @@ metadata:
 - `script_paths`
 - `manual_todos`
 
-### Step 6: 生成输出文件
+### Step 6: 归纳验证方案
 
-必须生成：
-- `{output_dir}/step5/validation_cases.json`
-- `{output_dir}/step5/test_plan.md`
-- `{output_dir}/step5/repro_steps.md`
-- `{output_dir}/step5/poc_scripts_index.json`
+每个验证方案应说明候选问题、目标接口或行为、前置条件、最小输入、执行步骤、观测点、成功/失败判定、影响边界和停止条件。需要脚本时，脚本只服务于当前验证目标，可标记仍需人工补齐的参数。
 
-若当前阶段已为具体漏洞生成脚本模板，还应生成：
-- `{output_dir}/step5/pocs/{vuln_id}/...`
+具体记录字段、脚本文件形式和写回方式由运行时决定，不固定 JSON 或目录结构。
 
-## 输出要求
+## 自检
 
-### validation_cases.json
-
-```json
-{
-  "cases": [
-    {
-      "id": "VAL-001",
-      "vuln_id": "VULN-001",
-      "type": "data_decrypt/sign_bypass/idor/param_tamper/unauth_access",
-      "goal": "验证目标",
-      "target_interface": {
-        "url": "目标接口或占位路径",
-        "method": "GET/POST/PUT/DELETE"
-      },
-      "preconditions": [],
-      "required_materials": [],
-      "inputs": {},
-      "steps": [],
-      "observables": [],
-      "expected_result": "预期结果",
-      "safety_note": "最小影响说明",
-      "rollback_or_stop_condition": "出现何种情况应立即停止",
-      "script_generation": "generated/partial/blocked",
-      "script_type": [
-        "python_http"
-      ],
-      "script_paths": [
-        "pocs/VULN-001/validate_request.py"
-      ],
-      "manual_todos": [
-        "补齐测试环境 token"
-      ]
-    }
-  ]
-}
-```
-
-### poc_scripts_index.json
-
-```json
-{
-  "scripts": [
-    {
-      "vuln_id": "VULN-001",
-      "case_id": "VAL-001",
-      "script_type": "python_http/python_crypto/frida_java/frida_native/manual_only",
-      "path": "pocs/VULN-001/validate_request.py",
-      "goal": "验证目标",
-      "entry_note": "如何运行或补齐",
-      "uses_phase3_materials": [
-        "input_order",
-        "reproduction_materials"
-      ],
-      "uses_phase4_fields": [
-        "attack_path",
-        "exploitation_conditions"
-      ],
-      "status": "generated/partial/blocked"
-    }
-  ]
-}
-```
-
-### test_plan.md
-
-应包含：
-- 测试目标
-- 测试前置条件
-- 测试环境要求
-- 测试步骤
-- 正常 / 边界 / 异常用例
-- 证据采集点
-- 中止条件与风险提示
-- 对应脚本路径与运行前检查项
-
-### repro_steps.md
-
-应包含：
-- 每个漏洞的详细复现步骤
-- 所需参数和请求格式说明
-- 预期结果
-- 结果判定标准
-- 回滚或止损说明
-- 若有脚本，需引用对应脚本路径与参数补齐说明
-
-## 完成标志
-
-- 四个输出文件均已生成
-- 每个高危或需验证漏洞都已映射到至少一个验证方案
-- 每个高危或需验证漏洞都已尽量映射到至少一个脚本模板，若无法生成则已说明阻塞原因
-- 所有方案都满足最小影响原则
-- 所有方案都写清楚了观测点和中止条件
-
-### 与 Phase 6 的衔接规则
-
-若当前运行模式为“4/5/6 一体化收口”，则本阶段完成后应自动把以下产物交给 Phase 6：
-
-- `validation_cases.json`
-- `test_plan.md`
-- `repro_steps.md`
-- `poc_scripts_index.json`
-
-除非用户明确要求“只执行第五步”，否则不得再次要求用户单独输入第六步模板。
-
-## 自检清单
-
-1. 没有输出破坏性自动化攻击工具
-2. 每个 POC 都有明确目标、步骤和预期结果
-3. 所有方案均绑定 `vuln_id`
-4. 没有脱离前序发现凭空设计 POC
-5. 每个方案都写明了观测点和最小影响说明
-6. 高风险接口的验证方案都给出了中止条件
-7. 已尽量为每个问题生成对应的最小脚本文件，并写明脚本类型与路径
+- 验证动作是否足以证明候选问题，而不是重复全量审计。
+- 是否使用最小影响路径并设置明确停止条件。
+- 观测点、预期差异和证据采集位置是否清楚。
+- 待验证、已确认和无法安全验证是否分开表述。

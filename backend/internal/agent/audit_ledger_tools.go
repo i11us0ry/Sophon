@@ -41,25 +41,27 @@ var auditConclusionStates = map[string]bool{
 }
 
 type auditRecordRequest struct {
-	Action             string   `json:"action"`
-	AssetID            string   `json:"asset_id"`
-	IncludedCategories []string `json:"included_categories"`
-	ExcludedCategories []string `json:"excluded_categories"`
-	Service            string   `json:"service"`
-	Entry              string   `json:"entry"`
-	Shape              string   `json:"shape"`
-	Surface            string   `json:"surface"`
-	CoverageStatus     string   `json:"coverage_status"`
-	ConclusionState    string   `json:"conclusion_state"`
-	Result             string   `json:"result"`
-	Evidence           string   `json:"evidence"`
-	EvidenceRefs       []string `json:"evidence_refs"`
-	FindingID          string   `json:"finding_id"`
-	RescanSurfaces     []string `json:"rescan_surfaces"`
-	NextAction         string   `json:"next_action"`
-	ActiveHypothesisID string   `json:"active_hypothesis_id"`
-	PendingDirections  []string `json:"pending_directions"`
-	Confidence         flexInt  `json:"confidence"`
+	Action              string   `json:"action"`
+	AssetID             string   `json:"asset_id"`
+	IncludedCategories  []string `json:"included_categories"`
+	ExcludedCategories  []string `json:"excluded_categories"`
+	Service             string   `json:"service"`
+	Entry               string   `json:"entry"`
+	Shape               string   `json:"shape"`
+	Surface             string   `json:"surface"`
+	CoverageStatus      string   `json:"coverage_status"`
+	ConclusionState     string   `json:"conclusion_state"`
+	Result              string   `json:"result"`
+	Evidence            string   `json:"evidence"`
+	EvidenceRefs        []string `json:"evidence_refs"`
+	FindingID           string   `json:"finding_id"`
+	RescanSurfaces      []string `json:"rescan_surfaces"`
+	NextAction          string   `json:"next_action"`
+	ActiveHypothesisID  string   `json:"active_hypothesis_id"`
+	PendingDirections   []string `json:"pending_directions"`
+	CompletedDirections []string `json:"completed_directions"`
+	RuledOutDirections  []string `json:"ruled_out_directions"`
+	Confidence          flexInt  `json:"confidence"`
 }
 
 func (s *Service) recordAuditTool() tool.BaseTool {
@@ -90,6 +92,8 @@ func (s *Service) recordAuditTool() tool.BaseTool {
 			"next_action":          stringParam("断点后的第一个动作"),
 			"active_hypothesis_id": stringParam("当前活跃假设 id"),
 			"pending_directions":   stringArrayParam("本轮已声明但未取证的方向"),
+			"completed_directions": stringArrayParam("checkpoint：已经完成并形成证据的方向"),
+			"ruled_out_directions": stringArrayParam("checkpoint：已经排除且不得重复分析的方向"),
 			"confidence":           integerParam("置信度 0-100"),
 		},
 		run: func(ctx context.Context, raw string) (string, error) {
@@ -369,9 +373,14 @@ func (s *Service) recordAuditCheckpoint(
 		}
 	}
 	pending := cleanAuditValues(request.PendingDirections)
+	completed := cleanAuditValues(request.CompletedDirections)
+	ruledOut := cleanAuditValues(request.RuledOutDirections)
 	body, _ := json.Marshal(map[string]interface{}{
 		"active_hypothesis_id": hypothesisID,
 		"pending_directions":   pending,
+		"completed_directions": completed,
+		"ruled_out_directions": ruledOut,
+		"evidence_refs":        cleanAuditValues(request.EvidenceRefs),
 		"next_action":          nextAction,
 	})
 	conversationID := execctx.ConversationID(ctx)

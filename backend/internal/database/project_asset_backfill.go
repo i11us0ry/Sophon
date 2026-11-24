@@ -383,7 +383,8 @@ func inferAssetKind(value string) string {
 	if _, _, err := net.ParseCIDR(value); err == nil {
 		return "host"
 	}
-	if host, err := NormalizeAssetValue("host", value); err == nil && !strings.Contains(host, ".") {
+	if host, err := NormalizeAssetValue("host", value); err == nil &&
+		(strings.Contains(host, ".") || strings.Contains(host, ":")) {
 		return "host"
 	}
 	return ""

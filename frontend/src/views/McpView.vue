@@ -87,6 +87,48 @@ interface MCPDoctorSummary {
   serverError: number
 }
 
+interface CatalogTool {
+  name: string
+  version: string
+  description: string
+  license?: string
+  architecture: string
+  source: string
+  installable: boolean
+  installedVersion?: string
+  installed: boolean
+  executable: boolean
+  toolDefinitionExists: boolean
+  state: string
+  detail?: string
+  sha256?: string
+}
+
+interface RegisteredAgentTool {
+  id: string
+  scope: string
+  name: string
+  command: string
+  args: string[]
+  env: Record<string, string>
+  version?: string
+  source?: string
+  healthCheck: string[]
+  enabled: boolean
+  status: string
+  lastError?: string
+  projectId?: string
+  conversationId?: string
+}
+
+interface RegisteredToolPath {
+  id: string
+  scope: string
+  path: string
+  projectId?: string
+  conversationId?: string
+}
+
 const STATUS_LABELS: Record<string, string> = {
   connected: t('mcp.statusConnected'),
   error: t('mcp.statusError'),
@@ -113,7 +155,13 @@ const doctorRunning = ref(false)
 const doctorItems = ref<MCPDoctorItem[]>([])
 const doctorSummary = ref<MCPDoctorSummary | null>(null)
 const doctorOnlyProblems = ref(true)
-const activeTab = ref<'servers' | 'tools'>('servers')
+const catalogItems = ref<CatalogTool[]>([])
+const catalogLoading = ref(false)
+const catalogBusy = ref('')
+const registeredTools = ref<RegisteredAgentTool[]>([])
+const registeredPaths = ref<RegisteredToolPath[]>([])
+const registryLoading = ref(false)
+const activeTab = ref<'servers' | 'tools' | 'catalog' | 'registry'>('servers')
 const activeServerId = ref('')
 const serverSearch = ref('')
 const serverHealth = ref<'' | 'online' | 'issues' | 'disabled'>('')
@@ -352,6 +400,34 @@ async function loadTools() {
   }
 }
 
+async function loadCatalog() {
+  catalogLoading.value = true
+  try {
+    const response = await apiGet<{ items: CatalogTool[] }>('/mcp/tool-catalog')
+    catalogItems.value = response.items ?? []
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : t('message.operationFailed')
+  } finally {
+    catalogLoading.value = false
+  }
+}
+
+async function loadRegistry() {
+  registryLoading.value = true
+  try {
+    const response = await apiGet<{
+      tools: RegisteredAgentTool[]
+      paths: RegisteredToolPath[]
+    }>('/mcp/tool-registry')
+    registeredTools.value = response.tools ?? []
+    registeredPaths.value = response.paths ?? []
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : t('message.operationFailed')
+  } finally {
+    registryLoading.value = false
+  }
+}
+
 function toolKey(item: AgentToolItem) {
   return item.qualifiedName || item.name
 }
@@ -470,10 +546,44 @@ function resetDraft() {
   draft.enabled = true
 }
 
-function switchTab(tab: 'servers' | 'tools') {
+function switchTab(tab: 'servers' | 'tools' | 'catalog' | 'registry') {
   activeTab.value = tab
   if (tab === 'tools') {
     doctorOpen.value = false
+  }
+  if (tab === 'catalog') {
+    doctorOpen.value = false
+    void loadCatalog()
+  }
+  if (tab === 'registry') {
+    doctorOpen.value = false
+    void loadRegistry()
+  }
+}
+
+async function removeRegisteredTool(item: RegisteredAgentTool) {
+  if (!window.confirm(t('mcp.registryDeleteConfirm', { name: item.name }))) {
+    return
+  }
+  try {
+    await apiDelete(`/mcp/tool-registry/${item.id}`)
+    notice.value = t('mcp.registryDeleted', { name: item.name })
+    await loadRegistry()
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : t('message.operationFailed')
+  }
+}
+
+async function removeRegisteredPath(item: RegisteredToolPath) {
+  if (!window.confirm(t('mcp.registryPathDeleteConfirm', { path: item.path }))) {
+    return
+  }
+  try {
+    await apiDelete(`/mcp/tool-registry/${item.id}?kind=path`)
+    notice.value = t('mcp.registryPathDeleted')
+    await loadRegistry()
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : t('message.operationFailed')
   }
 }
 
@@ -622,6 +732,40 @@ function changeToolPageSize(key: 'direct' | 'searchable', pageSize: number) {
   toolPages[key].page = 1
 }
 
+function catalogStateLabel(state: string) {
+  return t(`mcp.catalogState.${state}`)
+}
+
+function catalogSourceLabel(source: string) {
+  return t(`mcp.catalogSource.${source}`)
+}
+
+function installCatalog(item: CatalogTool) {
+  if (!window.confirm(t('mcp.catalogConfirmInstall', { name: item.name, version: item.version }))) {
+    return
+  }
+  catalogBusy.value = item.name
+  void run(async () => {
+    await apiPost('/mcp/tool-catalog/install', {
+      name: item.name,
+      force: false,
+    })
+    await loadCatalog()
+  }, t('mcp.catalogInstalled', { name: item.name })).finally(() => {
+    catalogBusy.value = ''
+  })
+}
+
+function verifyCatalog(item: CatalogTool) {
+  catalogBusy.value = item.name
+  void run(async () => {
+    await apiPost('/mcp/tool-catalog/verify', { name: item.name })
+    await loadCatalog()
+  }, t('mcp.catalogVerified', { name: item.name })).finally(() => {
+    catalogBusy.value = ''
+  })
+}
+
 watch([serverSearch, serverHealth], () => {
   serverPage.page = 1
 })
@@ -641,6 +785,8 @@ watch(
 onMounted(() => {
   void load()
   void loadTools()
+  void loadCatalog()
+  void loadRegistry()
 })
 </script>
 
@@ -781,6 +927,40 @@ onMounted(() => {
           <small>{{ t('mcp.toolRackHint') }}</small>
         </span>
         <b>{{ toolStats.total }}</b>
+      </button>
+      <button
+        type="button"
+        class="mcp-tab"
+        :class="{ active: activeTab === 'catalog' }"
+        @click="switchTab('catalog')"
+      >
+        <span class="mcp-tab-icon">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M4 5h16v14H4zM8 9h8M8 13h5M8 17h3" />
+          </svg>
+        </span>
+        <span>
+          <strong>{{ t('mcp.catalog') }}</strong>
+          <small>{{ t('mcp.catalogHint') }}</small>
+        </span>
+        <b>{{ catalogItems.length }}</b>
+      </button>
+      <button
+        type="button"
+        class="mcp-tab"
+        :class="{ active: activeTab === 'registry' }"
+        @click="switchTab('registry')"
+      >
+        <span class="mcp-tab-icon">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M5 4h14v16H5zM8 8h8M8 12h8M8 16h5" />
+          </svg>
+        </span>
+        <span>
+          <strong>{{ t('mcp.agentRegistry') }}</strong>
+          <small>{{ t('mcp.agentRegistryHint') }}</small>
+        </span>
+        <b>{{ registeredTools.length }}</b>
       </button>
     </nav>
 
@@ -940,7 +1120,7 @@ onMounted(() => {
       </aside>
     </section>
 
-    <section v-else class="mcp-tool-floor">
+    <section v-else-if="activeTab === 'tools'" class="mcp-tool-floor">
       <header class="mcp-discovery-track">
         <div class="mcp-discovery-copy">
           <span class="mcp-floor-code">02 // TOOL LOADOUT</span>
@@ -1095,6 +1275,138 @@ onMounted(() => {
             @page-size-change="changeToolPageSize(section.key, $event)"
           />
         </section>
+      </section>
+    </section>
+
+    <section v-else-if="activeTab === 'catalog'" class="mcp-tool-floor">
+      <header class="mcp-discovery-track">
+        <div class="mcp-discovery-copy">
+          <span class="mcp-floor-code">03 // TOOL CATALOG</span>
+          <h2>{{ t('mcp.catalog') }}</h2>
+          <p>{{ t('mcp.catalogHint') }}</p>
+        </div>
+        <button class="button compact" type="button" :disabled="catalogLoading" @click="loadCatalog">
+          {{ catalogLoading ? t('common.loading') : t('common.refresh') }}
+        </button>
+      </header>
+      <section class="mcp-rack-panel">
+        <div v-if="catalogItems.length" class="mcp-tool-list">
+          <article v-for="item in catalogItems" :key="item.name" class="mcp-tool-row">
+            <div class="mcp-tool-row-main">
+              <span class="mcp-equipment-icon searchable" aria-hidden="true">
+                <svg viewBox="0 0 24 24">
+                  <path d="M4 7h16v13H4zM8 7V4h8v3M8 12h8M8 16h5" />
+                </svg>
+              </span>
+              <div class="mcp-tool-identity">
+                <div class="mcp-tool-name-line">
+                  <strong>{{ item.name }}</strong>
+                  <span v-if="item.version" class="mcp-exposure-badge searchable">{{ item.version }}</span>
+                  <span class="mcp-exposure-badge">{{ catalogSourceLabel(item.source) }}</span>
+                  <span class="mcp-capability-badge">{{ catalogStateLabel(item.state) }}</span>
+                </div>
+                <code>{{ item.architecture }}</code>
+                <p>{{ item.description }}</p>
+              </div>
+              <span class="mcp-tool-source">
+                {{ item.toolDefinitionExists ? t('mcp.catalogDefinitionReady') : t('mcp.catalogDefinitionMissing') }}
+              </span>
+              <button
+                class="button compact"
+                type="button"
+                :disabled="catalogBusy === item.name"
+                @click="verifyCatalog(item)"
+              >
+                {{ t('mcp.catalogVerify') }}
+              </button>
+              <button
+                v-if="item.installable && !item.installed"
+                class="button compact mcp-primary-button"
+                type="button"
+                :disabled="catalogBusy === item.name || item.state === 'unsupported'"
+                @click="installCatalog(item)"
+              >
+                {{ t('mcp.catalogInstall') }}
+              </button>
+            </div>
+            <p v-if="item.detail" class="robot-error">{{ item.detail }}</p>
+          </article>
+        </div>
+        <div v-else class="mcp-empty-state compact">
+          <strong>{{ catalogLoading ? t('common.loading') : t('mcp.catalogEmpty') }}</strong>
+        </div>
+      </section>
+    </section>
+
+    <section v-else class="mcp-tool-floor">
+      <header class="mcp-discovery-track">
+        <div class="mcp-discovery-copy">
+          <span class="mcp-floor-code">04 // AGENT PROVISIONING</span>
+          <h2>{{ t('mcp.agentRegistry') }}</h2>
+          <p>{{ t('mcp.agentRegistryHint') }}</p>
+        </div>
+        <button class="button compact" type="button" :disabled="registryLoading" @click="loadRegistry">
+          {{ registryLoading ? t('common.loading') : t('common.refresh') }}
+        </button>
+      </header>
+      <section class="mcp-rack-panel">
+        <div v-if="registeredTools.length" class="mcp-tool-list">
+          <article v-for="item in registeredTools" :key="item.id" class="mcp-tool-row">
+            <div class="mcp-tool-row-main">
+              <span class="mcp-equipment-icon searchable" aria-hidden="true">
+                <svg viewBox="0 0 24 24">
+                  <path d="M4 7h16v13H4zM8 7V4h8v3M8 12h8M8 16h5" />
+                </svg>
+              </span>
+              <div class="mcp-tool-identity">
+                <div class="mcp-tool-name-line">
+                  <strong>{{ item.name }}</strong>
+                  <span v-if="item.version" class="mcp-exposure-badge searchable">{{ item.version }}</span>
+                  <span class="mcp-exposure-badge">{{ item.scope }}</span>
+                  <span class="mcp-capability-badge">{{ item.status }}</span>
+                </div>
+                <code>{{ item.command }}</code>
+                <p>
+                  {{ item.source || '-' }}
+                  <template v-if="item.args.length"> · args {{ item.args.join(' ') }}</template>
+                </p>
+              </div>
+              <button class="button compact danger" type="button" @click="removeRegisteredTool(item)">
+                {{ t('common.delete') }}
+              </button>
+            </div>
+            <p v-if="item.lastError" class="robot-error">{{ item.lastError }}</p>
+          </article>
+        </div>
+        <div v-else class="mcp-empty-state compact">
+          <strong>{{ registryLoading ? t('common.loading') : t('mcp.agentRegistryEmpty') }}</strong>
+        </div>
+
+        <div class="mcp-discovery-track">
+          <div class="mcp-discovery-copy">
+            <span class="mcp-floor-code">PATH OVERLAYS</span>
+            <h2>{{ t('mcp.agentRegistryPaths') }}</h2>
+          </div>
+        </div>
+        <div v-if="registeredPaths.length" class="mcp-tool-list">
+          <article v-for="item in registeredPaths" :key="item.id" class="mcp-tool-row">
+            <div class="mcp-tool-row-main">
+              <div class="mcp-tool-identity">
+                <div class="mcp-tool-name-line">
+                  <strong>{{ item.scope }}</strong>
+                  <span class="mcp-exposure-badge">{{ item.projectId || item.conversationId || 'global' }}</span>
+                </div>
+                <code>{{ item.path }}</code>
+              </div>
+              <button class="button compact danger" type="button" @click="removeRegisteredPath(item)">
+                {{ t('common.delete') }}
+              </button>
+            </div>
+          </article>
+        </div>
+        <div v-else class="mcp-empty-state compact">
+          <strong>{{ t('mcp.agentRegistryPathsEmpty') }}</strong>
+        </div>
       </section>
     </section>
 

@@ -1,13 +1,6 @@
 # 模块详情文件 — 填充式输出模板
 
-> **硬约束（不可违反）：**
-> 1. 不得增删章节 — 模板有 3 个章节，输出必须有 3 个章节
-> 2. 不得调整章节顺序
-> 3. 所有【填写】占位符必须替换为实际内容，不得保留
-> 4. **必须列出该模块下所有接口，不得省略任何接口**
-> 5. **每个接口必须有完整的参数结构**
-> 6. 文件命名格式:
->    - 普通模块: `{project_name}_module_{module_name}_{YYYYMMDD_HHMMSS}.md`
+> **说明：以下模板仅作组织参考，章节、字段和文件名可按任务调整。**
 >    - Web Service: `{project_name}_ws_{service_name}_{YYYYMMDD_HHMMSS}.md`
 >
 > 参考: java-shared/OUTPUT_STANDARD.md
@@ -64,7 +57,6 @@ Content-Type: 【填写（仅 form/json/xml 区分必要时）】
 展开实例（共 【N】 个）:
 - 【URL】 → 【ClassName.methodName()】
 - 【URL】 → 【ClassName.methodName()】
-<!-- 逐行列出全部 N 个，禁止省略，禁止 "..." / "等" -->
 
 <!-- 通配符模式族区块结束 -->
 

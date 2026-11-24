@@ -510,6 +510,8 @@ func llmProbeQuotaError(message string) bool {
 		"quota exceeded",
 		"insufficient_balance",
 		"insufficient balance",
+		"not_enough_balance",
+		"not enough balance",
 		"credit balance",
 		"余额不足",
 		"额度不足",

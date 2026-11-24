@@ -3,6 +3,7 @@ package mcpclient
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -27,6 +28,7 @@ type Manager struct {
 	toolInfos      map[string][]*schema.ToolInfo
 	lastErrors     map[string]string
 	proxyEnv       []string
+	runtimeRoot    string
 }
 
 func NewManager(
@@ -71,6 +73,12 @@ func (m *Manager) ProxyEnv() []string {
 	return append([]string(nil), m.proxyEnv...)
 }
 
+func (m *Manager) SetRuntimeRoot(root string) {
+	m.mu.Lock()
+	m.runtimeRoot = strings.TrimSpace(root)
+	m.mu.Unlock()
+}
+
 // Start 连接内置服务与所有启用的外部服务，返回合并后的工具列表。
 // 内置服务连接失败会返回错误；外部服务失败只记录状态。
 func (m *Manager) Start(
@@ -96,6 +104,12 @@ func (m *Manager) Start(
 		client.SetExecutionRecorder(m.recorder)
 		client.SetEnv(mergeEnvironment(m.proxyEnv, server.Env))
 		client.SetLimiter(newConcurrencyLimiter(m.perServerLimit, m.totalLimit))
+		m.mu.Lock()
+		runtimeRoot := m.runtimeRoot
+		m.mu.Unlock()
+		if runtimeRoot != "" {
+			client.SetWorkDir(filepath.Join(runtimeRoot, safePathPart(server.ID)))
+		}
 		if err := client.Connect(ctx); err != nil {
 			m.recordStatus(ctx, server, "error", err.Error(), 0)
 			if server.Builtin {
@@ -122,6 +136,30 @@ func (m *Manager) Start(
 		tools = append(tools, serverTools...)
 	}
 	return tools, nil
+}
+
+func safePathPart(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "default"
+	}
+	var builder strings.Builder
+	for _, char := range value {
+		switch {
+		case char >= 'a' && char <= 'z',
+			char >= 'A' && char <= 'Z',
+			char >= '0' && char <= '9',
+			char == '.', char == '_', char == '-':
+			builder.WriteRune(char)
+		default:
+			builder.WriteByte('_')
+		}
+	}
+	result := strings.Trim(builder.String(), "._-")
+	if result == "" {
+		return "default"
+	}
+	return result
 }
 
 // Tools 返回某个 MCP 服务当前暴露的工具明细，用于工具管理页。

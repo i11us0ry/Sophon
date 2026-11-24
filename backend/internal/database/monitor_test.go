@@ -332,7 +332,11 @@ func TestFailRunningToolExecutionsCleansRestartLeavings(t *testing.T) {
 		t.Fatalf("清理 running 记录失败: affected=%d err=%v", affected, err)
 	}
 	running, err := db.GetToolExecution(ctx, runningID)
-	if err != nil || running.Status != "failed" {
+	if err != nil ||
+		running.Status != "failed" ||
+		running.Outcome.Status != "error" ||
+		running.Outcome.ErrorClass != "tool_error" ||
+		running.Outcome.Retryable {
 		t.Fatalf("遗留 running 记录未标记失败: %+v err=%v", running, err)
 	}
 	completed, err := db.GetToolExecution(ctx, completedID)

@@ -1,8 +1,7 @@
 # 质检员校验报告模板
 
-本文件定义质检员（agent-7-x）在每个阶段的**强制填充式校验报告模板**。
+本文件提供质检员（agent-7-x）可参考的填充式校验报告模板。
 
-质检员完成校验后，必须按照对应模板**逐项填写**所有字段，禁止省略、合并或用一句话概括。每个 `{填写}` 占位符都必须替换为实际内容。
 
 **报告交付方式**: 质检员完成校验后，将完整报告写入 `{output_path}/qa_reports/qa_report_{被校验agent名称}.md`，然后仅将「通过/不通过 + 文件路径」通知负责人。**禁止在消息中发送报告正文。**
 
@@ -32,7 +31,6 @@
 
 ## 通用报告结构
 
-每份校验报告必须包含以下三个部分，缺一不可：
 
 ````markdown
 # 校验报告: {被校验 agent 名称}
@@ -69,8 +67,8 @@
 | 3 | 第 1 层模块清单与 ls 全集一致 | 第 1 层表格行数 == `ls -1` 输出行数（一级子目录全集对账，diff 为空） | {填写：表行数} / {填写：ls 行数} | {✅/❌} |
 | 4 | SKIP 行均填 skip_reason | 所有 SKIP 类型的模块都有非空 `skip_reason` 字段 | {填写：SKIP 行数} / {填写：含 skip_reason 行数} | {✅/❌} |
 | 5 | WAR 模块完全分配 | 任务分配表的「处理模块」并集 == 全部 WAR/Web 模块（含 Maven `src/main/webapp` 形态、`<packaging>war</packaging>` 模块），无重复无遗漏 | {填写：分配并集 vs WAR 集合 diff} | {✅/❌} |
-| 6 | 通配符模块独占 | 含 Struts `*_*` / executeInterface / 路径变量等通配符的模块按通配符上界估算判定：上界 ≥ 150 强制独占；上界 < 150 允许参与同框架小模块合并（合并后总上界 ≤ 150） | {填写：通配符模块数 / 独占 agent 数 / 合并到小模块的通配符模块数} | {✅/❌} |
-| 6b | 通配符独占粒度合规 | 「强制独占」均落在逻辑模块级（namespace / 包前缀 / endpoint）；不存在以「物理模块含通配符」为由让整 WAR 由 1 个 agent 承包的行 | {填写：可疑 agent 列表（处理多个 namespace 的）} | {✅/❌} |
+| 6 | 通配符模块拆分 | 含 Struts `*_*` / executeInterface / 路径变量等通配符的模块可结合规模决定拆分或合并 | {填写：通配符模块数 / 独立 agent 数 / 合并模块数} | {✅/❌} |
+| 6b | 通配符任务粒度 | 可按实际工作量和覆盖收益选择逻辑模块或物理模块粒度 | {填写：处理多个 namespace 的 agent 列表} | {✅/❌} |
 | 7 | 第 2 层下钻覆盖 | 所有第 1 层预估路由 > 150（含通配符上界估算）的物理模块都在第 2 层有逻辑模块拆分 | {填写：>150 模块数 / 已下钻模块数} | {✅/❌} |
 | 7b | 大负载 agent 必须对应第 2 层 | 分配表中任意 agent 处理路由 > 150 必须对应第 2 层逻辑模块行；不存在第 2 层行就直接承包整 WAR 的 agent 视为不通过 | {填写：>150 路由 agent 列表 / 第 2 层覆盖情况} | {✅/❌} |
 | 8 | agent_id 命名规范 | 全部为 `agent-1-{数字}` 格式，序号从 1 连续递增，无 `#`、`_` 等非法字符 | {填写：agent_id 列表} | {✅/❌} |
@@ -92,7 +90,7 @@
 | 3 | 状态文件 schema 完整 | 含 schema_version=1、agent_id、recon_id、status、attempt、actual_route_count、estimated_route_count、output_file_sha256；status="success"；数字字段为 JSON number（禁止 "200+"） | {填写：缺失字段列表 + status 值} | {✅/❌} |
 | 4 | 输出隔离 | 仅写自己模块子目录与 `decompiled/agent-1-{N}/`；未写其他模块子目录、共享 `webservice/` 或主索引根 | {填写：实际写入路径列表} | {✅/❌} |
 | 5 | 接口块格式 | 详情文件中 `grep -c "^=== \[" {report}` ≥ status JSON 中 `actual_route_count` × 80% | {填写：接口块数 / actual_route_count} | {✅/❌} |
-| 6 | 通配符强制展开 | Struts `*_*`、Spring 路径变量、JAX-RS `@PathParam`、Servlet url-pattern 通配均已穷举/展开 | {填写：每类通配符的处理结果} | {✅/❌} |
+| 6 | 通配符展开参考 | Struts `*_*`、Spring 路径变量、JAX-RS `@PathParam`、Servlet url-pattern 通配可按需展开或抽样 | {填写：每类通配符的处理结果} | {✅/❌} |
 | 6b | 网关方法 sub_function 展开 | 识别到 dispatch 模式方法（如 `executeInterface(String code, String json)`、`dispatch(String action, …)`、方法体含 `switch(code)`/字符串 if-else 链/`Map<String,Handler>` 路由）必须穷举每个 sub_function 为独立 `=== [N] ===` 接口块；状态 JSON 含 `sub_functions` 数组且 `actual_route_count` 计入每个分支 | {填写：网关方法列表 / 已展开 sub_function 数} | {✅/❌} |
 | 7 | 参数结构覆盖 | 每个路由都标注参数名、类型、来源（@RequestParam/@PathVariable/@RequestBody 等） | {填写：是否覆盖所有路由} | {✅/❌} |
 | 8 | Content-Type 标注 | 每个路由都标注 Content-Type | {填写：是否覆盖所有路由} | {✅/❌} |

@@ -106,6 +106,13 @@ func TestProjectCoverageComputesQueueAndRatio(t *testing.T) {
 	if len(coverage.NextTargets) == 0 {
 		t.Fatalf("未覆盖队列不应为空")
 	}
+	if len(coverage.PendingIntentTargets) != 1 ||
+		coverage.PendingIntentTargets[0].RefID != "intent-1" {
+		t.Fatalf("待办意图独立队列错误: %+v", coverage.PendingIntentTargets)
+	}
+	if len(coverage.EvidenceGapTargets) != 2 {
+		t.Fatalf("证据缺口独立队列错误: %+v", coverage.EvidenceGapTargets)
+	}
 	for index := 1; index < len(coverage.NextTargets); index++ {
 		if coverage.NextTargets[index-1].Score < coverage.NextTargets[index].Score {
 			t.Fatalf("队列应按优先级降序: %+v", coverage.NextTargets)

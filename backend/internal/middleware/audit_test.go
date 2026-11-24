@@ -105,3 +105,14 @@ func TestSummarizeAuditBodyRedactsLLMKeyRoutes(t *testing.T) {
 		t.Fatalf("LLM 设置审计不能泄露 Key: %q", got)
 	}
 }
+
+func TestSummarizeAuditBodyRedactsTaskProfilePrompt(t *testing.T) {
+	body := []byte(`{"name":"Java代码审计","prompt":"secret internal method","skills":["java-code-audit"],"enabled":true}`)
+	got := summarizeAuditBody("/api/agent-roles/java", body)
+	if strings.Contains(got, "secret internal method") {
+		t.Fatalf("Task Profile Prompt 不应进入审计日志: %q", got)
+	}
+	if !strings.Contains(got, `redacted:22 chars`) {
+		t.Fatalf("Task Profile Prompt 应显示脱敏长度: %q", got)
+	}
+}

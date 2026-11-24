@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
@@ -33,14 +34,16 @@ type ProjectHandler struct {
 	db      *database.DB
 	manager *task.Manager
 	storage *storagepkg.Service
+	jobs    conversationJobCanceller
 }
 
 func NewProjectHandler(
 	db *database.DB,
 	manager *task.Manager,
 	storageService *storagepkg.Service,
+	jobs conversationJobCanceller,
 ) *ProjectHandler {
-	return &ProjectHandler{db: db, manager: manager, storage: storageService}
+	return &ProjectHandler{db: db, manager: manager, storage: storageService, jobs: jobs}
 }
 
 func (h *ProjectHandler) Summary(c *gin.Context) {
@@ -141,6 +144,81 @@ func (h *ProjectHandler) ListVulnerabilities(c *gin.Context) {
 		"hasMore":    offset+len(items) < total,
 		"nextOffset": offset + len(items),
 	})
+}
+
+func (h *ProjectHandler) ListVulnerabilityDrafts(c *gin.Context) {
+	project, ok := h.projectForRequest(c)
+	if !ok {
+		return
+	}
+	user := middleware.UserFromContext(c)
+	limit := clampQueryInt(c.Query("limit"), 200, 1, 500)
+	offset := clampQueryInt(c.Query("offset"), 0, 0, 1000000)
+	items, total, err := h.db.ListVulnerabilityReportDrafts(
+		c.Request.Context(),
+		project.ID,
+		user.ID,
+		limit,
+		offset,
+	)
+	if err != nil {
+		internalError(c, "list_project_vulnerability_drafts_failed", "读取待处理漏洞失败")
+		return
+	}
+	result := make([]gin.H, 0, len(items))
+	for _, item := range items {
+		var finding database.Vulnerability
+		_ = json.Unmarshal([]byte(item.Payload), &finding)
+		result = append(result, gin.H{
+			"id":                item.ID,
+			"fingerprint":       item.Fingerprint,
+			"status":            item.Status,
+			"attempts":          item.Attempts,
+			"lastError":         item.LastError,
+			"vulnerabilityId":   item.VulnerabilityID,
+			"title":             finding.Title,
+			"severity":          finding.Severity,
+			"vulnerabilityType": finding.VulnerabilityType,
+			"target":            finding.Target,
+			"createdAt":         item.CreatedAt,
+			"updatedAt":         item.UpdatedAt,
+			"nextAttemptAt":     item.NextAttemptAt,
+		})
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"items":      result,
+		"total":      total,
+		"hasMore":    offset+len(items) < total,
+		"nextOffset": offset + len(items),
+	})
+}
+
+func (h *ProjectHandler) RetryVulnerabilityDraft(c *gin.Context) {
+	project, ok := h.projectForRequest(c)
+	if !ok {
+		return
+	}
+	user := middleware.UserFromContext(c)
+	draftID := strings.TrimSpace(c.Param("draftId"))
+	if draftID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "漏洞草稿 id 不能为空"})
+		return
+	}
+	okToRetry, err := h.db.RetryVulnerabilityReportDraft(
+		c.Request.Context(),
+		project.ID,
+		user.ID,
+		draftID,
+	)
+	if err != nil {
+		internalError(c, "retry_project_vulnerability_draft_failed", "重试漏洞草稿失败")
+		return
+	}
+	if !okToRetry {
+		c.JSON(http.StatusConflict, gin.H{"error": "漏洞草稿当前状态不允许重试"})
+		return
+	}
+	c.JSON(http.StatusAccepted, gin.H{"status": "pending"})
 }
 
 func (h *ProjectHandler) ListAttackSteps(c *gin.Context) {
@@ -273,9 +351,7 @@ func (h *ProjectHandler) BatchDeleteProjects(c *gin.Context) {
 	for _, id := range ids {
 		conversations, _ := h.db.ListProjectConversations(c.Request.Context(), id, user.ID)
 		for _, conversation := range conversations {
-			if h.manager != nil {
-				h.manager.CancelConversation(conversation.ID, user.ID)
-			}
+			_, _ = cancelConversationWork(h.manager, h.jobs, conversation.ID, user.ID)
 		}
 		if err := h.db.DeleteProject(c.Request.Context(), id, user.ID); err != nil {
 			if database.NoRows(err) {
@@ -285,9 +361,7 @@ func (h *ProjectHandler) BatchDeleteProjects(c *gin.Context) {
 			return
 		}
 		for _, conversation := range conversations {
-			if h.manager != nil {
-				h.manager.CancelConversation(conversation.ID, user.ID)
-			}
+			_, _ = cancelConversationWork(h.manager, h.jobs, conversation.ID, user.ID)
 		}
 		cleanupConversationStorage(h.storage, conversations)
 		deleted++

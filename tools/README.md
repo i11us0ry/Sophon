@@ -16,10 +16,11 @@
 | `description` | ✅ | string | 详细描述，支持多行 Markdown，供 AI 深度理解及 `resources/read` 查询。 |
 | `short_description` | 可选 | string | 20-50 字摘要，用于工具列表、减少 token 消耗；缺失时会自动截取 `description` 开头。 |
 | `args` | 可选 | string[] | 固定参数，按顺序 prepend 到命令行，常用于定义默认扫描模式。 |
+| `environment` | 可选 | map | 固定环境变量，例如源码工具的 `PYTHONPATH`。 |
 | `parameters` | 可选 | array | 运行时可配置参数列表，详见「参数定义」章节。 |
 | `arg_mapping` | 可选 | string | 参数映射模式（`auto`/`manual`/`template`），默认 `auto`；除非有特殊需求，无需填写。 |
 | `timeout_seconds` | 可选 | int | 单次执行超时上限（秒），只能收紧 runner 全局上限（默认 900s）；0 或缺省表示继承全局。 |
-| `requires_binaries` | 可选 | string[] | 包装脚本依赖的外部命令（如 `msfconsole`、`rpcclient`），工具自检会校验其是否在 PATH 中。 |
+| `requires_binaries` | 可选 | string[] | 包装脚本依赖的外部命令（如 `nmap`、`smbclient`），工具自检会校验其是否在 PATH 中。 |
 | `requires_python` | 可选 | string[] | 运行时才 import 的 Python 模块（如 `angr`、`pwn`），工具自检会校验是否可导入。 |
 
 > 若某字段填写错误或漏填必填项，系统会在加载时跳过该工具并在日志中输出警告，但不会影响其他工具。

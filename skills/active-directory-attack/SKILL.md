@@ -8,6 +8,37 @@ metadata:
 
 ## 内网域攻击
 
+## 适用场景
+
+适合已确认存在 Active Directory、Kerberos、ADCS、SMB、LDAP 或域内主机，需要判断域权限路径和候选攻击面。
+
+## 核心判断
+
+先确认当前身份、凭据、机器可达性和域权限关系，再选择侦察、Kerberos、ADCS、Relay、Coerce、DACL 或域 CVE 路径。
+
+## 证据标准
+
+- 域路径需要域内对象、权限边、凭据或协议响应证据。
+- 证书和 Relay 利用需要 CA、目标协议和权限证据。
+- DCSync、域管凭据和持久化应结合权限、影响和回滚条件判断。
+- 只有一个 CVE 名称或组件版本时保持候选。
+
+## 决策树
+
+- 域环境未知：先做最低影响的识别和路径验证。
+- 有普通域凭据：检查 ACL、委派和攻击路径。
+- 有 CA/ADCS：检查证书模板和注册权限。
+- 有 Relay/Coerce 面：先证明协议和认证可达。
+- 达到域权限证据：停止扩展并写回，不默认持久化。
+
+## 常见误判
+
+- 把 BloodHound 路径当成已利用路径。
+- 把域内服务命中当成域管。
+- 把 CVE 版本命中当成可直接打。
+- 忽略 EDR、日志和业务影响。
+- 仅凭域内对象名称认定 DCSync 或持久化可执行。
+
 ```
 === 内网域(2023+真实主战场) ===
 侦察: BloodHound(SharpHound收集→攻击路径) | Kerberos: GetNPUsers(AS-REP)/GetUserSPNs(Kerberoast)

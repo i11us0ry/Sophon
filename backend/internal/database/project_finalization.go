@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 )
 
 type ProjectFinalizationMetrics struct {
@@ -37,6 +38,56 @@ func (db *DB) ProjectFinalizationMetricsForAssets(
 		return ProjectFinalizationMetrics{}, nil
 	}
 	return db.projectFinalizationMetrics(ctx, projectID, ownerUserID, assetIDs)
+}
+
+// ProjectAuditStateSince 返回项目是否启用审计台账，以及某个时间点后是否写入了
+// 实质性分析结果。checkpoint、scope 等流程事实不计入分析产出。
+func (db *DB) ProjectAuditStateSince(
+	ctx context.Context,
+	projectID string,
+	since time.Time,
+) (bool, bool, error) {
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		return false, false, fmt.Errorf("项目不能为空")
+	}
+	var hasScope bool
+	if err := db.QueryRowContext(
+		ctx,
+		`SELECT EXISTS(
+			SELECT 1 FROM project_facts
+			WHERE project_id = ? AND subject_type = 'audit_scope'
+		)`,
+		projectID,
+	).Scan(&hasScope); err != nil {
+		return false, false, err
+	}
+	var changed bool
+	if err := db.QueryRowContext(
+		ctx,
+		`SELECT EXISTS(
+			SELECT 1 FROM project_facts
+			WHERE project_id = ?
+			  AND updated_at >= ?
+			  AND fact_type NOT IN ('note', 'scope')
+			  AND subject_type NOT IN ('audit_checkpoint', 'audit_scope')
+			UNION ALL
+			SELECT 1 FROM project_test_results
+			WHERE project_id = ? AND updated_at >= ?
+			UNION ALL
+			SELECT 1 FROM vulnerabilities
+			WHERE project_id = ? AND updated_at >= ?
+		)`,
+		projectID,
+		since.Unix(),
+		projectID,
+		since.Unix(),
+		projectID,
+		since.Unix(),
+	).Scan(&changed); err != nil {
+		return false, false, err
+	}
+	return hasScope, changed, nil
 }
 
 func (db *DB) projectFinalizationMetrics(

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"sophon/internal/database"
+	"sophon/internal/execctx"
 )
 
 func TestProjectHypothesisPlannerWorkerFlow(t *testing.T) {
@@ -31,6 +32,18 @@ func TestProjectHypothesisPlannerWorkerFlow(t *testing.T) {
 	if err != nil || len(items) != 2 || items[0].Priority != 90 {
 		t.Fatalf("假设队列错误: %+v err=%v", items, err)
 	}
+	for _, item := range items {
+		if item.IntentID == "" {
+			t.Fatalf("Hypothesis 未关联 Graph Intent: %+v", item)
+		}
+		if item.OriginConversationID != "conv-tools" {
+			t.Fatalf("Hypothesis 未记录来源会话: %+v", item)
+		}
+		node, err := service.db.GetProjectGraphNode(ctx, item.IntentID, "project-tools")
+		if err != nil || node == nil || node.Kind != "intent" {
+			t.Fatalf("Graph Intent 不存在: intent=%s node=%+v err=%v", item.IntentID, node, err)
+		}
+	}
 	started, err := invokeProjectTool(t, service, ctx, "project_start_hypothesis", map[string]interface{}{
 		"hypothesis_id": items[0].ID,
 	})
@@ -49,6 +62,238 @@ func TestProjectHypothesisPlannerWorkerFlow(t *testing.T) {
 	coverage, err := service.db.ProjectCoverage(ctx, "project-tools", "user-1")
 	if err != nil || coverage.TestsTotal != 2 || coverage.TestsCovered != 1 {
 		t.Fatalf("假设完成后的覆盖率错误: %+v err=%v", coverage, err)
+	}
+	intentNode, err := service.db.GetProjectGraphNode(ctx, items[0].IntentID, "project-tools")
+	if err != nil || intentNode == nil || intentNode.Status != "done" {
+		t.Fatalf("完成 Hypothesis 后 Graph Intent 应同步 done: %+v err=%v", intentNode, err)
+	}
+}
+
+func TestProjectPlanHypothesesLinksParentIDs(t *testing.T) {
+	service, ctx := openProjectToolService(t, true)
+	now := time.Now().UTC()
+	if err := service.db.CreateAsset(ctx, database.Asset{
+		ID: "asset-parent-hypothesis", ProjectID: "project-tools", OwnerUserID: "user-1",
+		Name: "父节点目标", Kind: "url", Value: "https://parent.example/upload",
+		Status: "active", Criticality: "high", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("创建资产失败: %v", err)
+	}
+	if err := service.db.CreateProjectGraphNode(ctx, database.GraphNode{
+		ID: "fact-parent-hypothesis", ProjectID: "project-tools",
+		Kind: "fact", Title: "上传入口事实", Status: "confirmed",
+		AssetID: "asset-parent-hypothesis", Confidence: 95,
+		CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("创建父事实失败: %v", err)
+	}
+	out, err := invokeProjectTool(t, service, ctx, "project_plan_hypotheses", map[string]interface{}{
+		"hypotheses_json": `[{
+			"asset_id":"asset-parent-hypothesis",
+			"parent_ids":["fact-parent-hypothesis"],
+			"dimension":"上传入口路径穿越复核",
+			"technique":"path-traversal",
+			"rationale":"父事实确认入口可达",
+			"expected_evidence":"目录外文件可读取",
+			"priority":90
+		}]`,
+	})
+	if err != nil || !strings.Contains(out, "写入 1 个") {
+		t.Fatalf("规划带父节点的假设失败: %q err=%v", out, err)
+	}
+	items, err := service.db.ListProjectHypotheses(ctx, "project-tools", "untested", 10)
+	if err != nil || len(items) != 1 {
+		t.Fatalf("读取假设失败: %+v err=%v", items, err)
+	}
+	edges, err := service.db.ListProjectGraphEdges(ctx, "project-tools")
+	if err != nil {
+		t.Fatalf("读取血缘边失败: %v", err)
+	}
+	found := false
+	for _, edge := range edges {
+		if edge.SrcID == "fact-parent-hypothesis" &&
+			edge.DstID == items[0].IntentID &&
+			edge.Rel == "derived_from" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("缺少父事实到假设的 derived_from 边: %+v", edges)
+	}
+}
+
+func TestProjectPlanHypothesesRejectsMoreThanFour(t *testing.T) {
+	service, ctx := openProjectToolService(t, true)
+	_, err := invokeProjectTool(t, service, ctx, "project_plan_hypotheses", map[string]interface{}{
+		"hypotheses_json": `[
+			{"dimension":"方向1"},
+			{"dimension":"方向2"},
+			{"dimension":"方向3"},
+			{"dimension":"方向4"},
+			{"dimension":"方向5"}
+		]`,
+	})
+	if err == nil || !strings.Contains(err.Error(), "1-4") {
+		t.Fatalf("超过 4 个假设应被拒绝: %v", err)
+	}
+}
+
+func TestProjectPlanHypothesesSkipsNormalizedDuplicateDimensions(t *testing.T) {
+	service, ctx := openProjectToolService(t, true)
+	now := time.Now().UTC()
+	if err := service.db.CreateAsset(ctx, database.Asset{
+		ID: "asset-plan-dedupe", ProjectID: "project-tools", OwnerUserID: "user-1",
+		Name: "去重目标", Kind: "url", Value: "https://dedupe.example/upload",
+		Status: "active", Criticality: "high", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("创建资产失败: %v", err)
+	}
+	out, err := invokeProjectTool(t, service, ctx, "project_plan_hypotheses", map[string]interface{}{
+		"hypotheses_json": `[
+			{"asset_id":"asset-plan-dedupe","dimension":"文件上传","technique":"upload-handler","priority":90},
+			{"asset_id":"asset-plan-dedupe","dimension":" 文件-上传 ","technique":"upload-extension","priority":80}
+		]`,
+	})
+	if err != nil || !strings.Contains(out, "写入 1 个") || !strings.Contains(out, "跳过 1 个") {
+		t.Fatalf("规范化重复假设应被跳过: %q err=%v", out, err)
+	}
+	out, err = invokeProjectTool(t, service, ctx, "project_plan_hypotheses", map[string]interface{}{
+		"hypotheses_json": `[
+			{"asset_id":"asset-plan-dedupe","dimension":"文件 / 上传","technique":"another-upload-check","priority":95}
+		]`,
+	})
+	if err != nil || !strings.Contains(out, "写入 0 个") || !strings.Contains(out, "跳过 1 个") {
+		t.Fatalf("已有活跃假设应阻止再次规划: %q err=%v", out, err)
+	}
+	items, err := service.db.ListProjectHypotheses(ctx, "project-tools", "untested", 10)
+	if err != nil || len(items) != 1 {
+		t.Fatalf("重复假设数量错误: %+v err=%v", items, err)
+	}
+}
+
+func TestProjectRecordTestReusesCurrentWorkerHypothesis(t *testing.T) {
+	service, ctx := openProjectToolService(t, true)
+	now := time.Now().UTC()
+	if err := service.db.CreateAsset(ctx, database.Asset{
+		ID: "asset-record-current", ProjectID: "project-tools", OwnerUserID: "user-1",
+		Name: "上传目标", Kind: "url", Value: "https://record.example/upload",
+		Status: "active", Criticality: "high", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("创建资产失败: %v", err)
+	}
+	original, err := service.db.UpsertProjectTestResult(ctx, database.ProjectTestResult{
+		ProjectID: "project-tools", AssetID: "asset-record-current",
+		Dimension: "文件上传-ScpSupRegHandler 上传/写盘面单独闭环（事实清单漏项）",
+		Technique: "static-dataflow", Status: "untested", Priority: 90,
+	})
+	if err != nil {
+		t.Fatalf("创建原始假设失败: %v", err)
+	}
+	claimed, err := service.db.ClaimNextProjectHypothesis(ctx, "project-tools")
+	if err != nil || claimed == nil {
+		t.Fatalf("领取原始假设失败: %+v err=%v", claimed, err)
+	}
+	workerCtx := execctx.WithSubagent(ctx, execctx.SubagentInfo{
+		ID: "sub-record-current", Kind: "worker", HypothesisID: claimed.ID,
+	})
+	out, err := invokeProjectTool(t, service, workerCtx, "project_record_test", map[string]interface{}{
+		"asset_id":   "asset-record-current",
+		"dimension":  "文件上传-ScpSupRegHandler 上传/写盘面单独闭环",
+		"technique":  "shortened-copy",
+		"status":     "suspicious",
+		"result":     "需要继续确认落点",
+		"confidence": 70,
+	})
+	if err != nil || !strings.Contains(out, claimed.ID) {
+		t.Fatalf("当前 Worker 写回应复用原假设: %q err=%v", out, err)
+	}
+	items, err := service.db.ListProjectTestResults(ctx, "project-tools", 20)
+	if err != nil || len(items) != 1 {
+		t.Fatalf("当前 Worker 不应创建重复假设: %+v err=%v", items, err)
+	}
+	saved, err := service.db.GetProjectTestResultByID(ctx, "project-tools", original.ID)
+	if err != nil || saved == nil || saved.Status != "suspicious" ||
+		saved.Dimension != original.Dimension {
+		t.Fatalf("原假设写回错误: %+v err=%v", saved, err)
+	}
+}
+
+func TestProjectRecordTestRejectsOverlappingActiveHypothesis(t *testing.T) {
+	service, ctx := openProjectToolService(t, true)
+	now := time.Now().UTC()
+	if err := service.db.CreateAsset(ctx, database.Asset{
+		ID: "asset-record-overlap", ProjectID: "project-tools", OwnerUserID: "user-1",
+		Name: "上传目标", Kind: "url", Value: "https://record-overlap.example/upload",
+		Status: "active", Criticality: "high", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("创建资产失败: %v", err)
+	}
+	active, err := service.db.UpsertProjectTestResult(ctx, database.ProjectTestResult{
+		ProjectID: "project-tools", AssetID: "asset-record-overlap",
+		Dimension: "文件上传-ScpSupRegHandler 上传/写盘面单独闭环（事实清单漏项）",
+		Technique: "static-dataflow", Status: "untested", Priority: 90,
+	})
+	if err != nil {
+		t.Fatalf("创建活跃假设失败: %v", err)
+	}
+	if _, err := invokeProjectTool(t, service, ctx, "project_record_test", map[string]interface{}{
+		"asset_id":  "asset-record-overlap",
+		"dimension": "文件上传-ScpSupRegHandler 上传/写盘面单独闭环",
+		"technique": "shortened-copy",
+		"status":    "suspicious",
+		"result":    "重复测试",
+	}); err == nil || !strings.Contains(err.Error(), active.ID) {
+		t.Fatalf("重叠活跃假设应阻止新建测试结果: %v", err)
+	}
+	items, err := service.db.ListProjectTestResults(ctx, "project-tools", 20)
+	if err != nil || len(items) != 1 {
+		t.Fatalf("拒绝重复后假设数量错误: %+v err=%v", items, err)
+	}
+}
+
+func TestProjectPlanHypothesesAllowsSourceAuditWithoutAsset(t *testing.T) {
+	service, ctx := openProjectToolService(t, true)
+	if err := service.db.AddAttachment(ctx, database.Attachment{
+		ID:             "source-audit-attachment",
+		ConversationID: "conv-tools",
+		FileName:       "WebSite.zip",
+		StoragePath:    "conv-tools/source-audit-attachment_WebSite.zip",
+		CreatedAt:      time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("创建源码附件失败: %v", err)
+	}
+	out, err := invokeProjectTool(t, service, ctx, "project_plan_hypotheses", map[string]interface{}{
+		"hypotheses_json": `[
+			{"dimension":"源码命令执行审计","technique":"source-review","rationale":"已上传源码但项目没有网络资产","expected_evidence":"入口到命令执行 Sink 的代码链","priority":90}
+		]`,
+	})
+	if err != nil {
+		t.Fatalf("源码审计不应因缺少网络资产而失败: %v", err)
+	}
+	if !strings.Contains(out, "写入 1 个") {
+		t.Fatalf("源码假设未写入: %q", out)
+	}
+	items, err := service.db.ListProjectHypotheses(ctx, "project-tools", "untested", 10)
+	if err != nil || len(items) != 1 || items[0].AssetID != "" {
+		t.Fatalf("源码假设资产范围错误: %+v err=%v", items, err)
+	}
+}
+
+func TestProjectPlanHypothesesRejectsUnscopedAuditWhenAssetsExist(t *testing.T) {
+	service, ctx := openProjectToolService(t, true)
+	now := time.Now().UTC()
+	if err := service.db.CreateAsset(ctx, database.Asset{
+		ID: "asset-plan-existing", ProjectID: "project-tools", OwnerUserID: "user-1",
+		Name: "已有目标", Kind: "url", Value: "https://planned.example",
+		Status: "active", Criticality: "medium", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("创建已有资产失败: %v", err)
+	}
+	if _, err := invokeProjectTool(t, service, ctx, "project_plan_hypotheses", map[string]interface{}{
+		"hypotheses_json": `[{"dimension":"无归属审计","technique":"source-review"}]`,
+	}); err == nil || !strings.Contains(err.Error(), "asset_id 不能为空") {
+		t.Fatalf("已有资产时不应接受无归属假设: %v", err)
 	}
 }
 
@@ -88,6 +333,37 @@ func TestProjectFindingSeedsFollowUpHypotheses(t *testing.T) {
 	}
 	if !foundParent || !foundTechnique {
 		t.Fatalf("后续假设缺少父漏洞或技术变体: %+v", items)
+	}
+}
+
+func TestMainAddGoalAndIntentCreateWorkerQueueEntries(t *testing.T) {
+	service, ctx := openProjectToolService(t, true)
+	if _, err := invokeProjectTool(t, service, ctx, "project_add_goal", map[string]interface{}{
+		"title":  "获取服务器权限",
+		"detail": "取得可复现的命令执行证据",
+	}); err != nil {
+		t.Fatalf("新增 Goal 失败: %v", err)
+	}
+	if _, err := invokeProjectTool(t, service, ctx, "project_add_intent", map[string]interface{}{
+		"title":    "验证上传链",
+		"detail":   "检查上传入口与落盘路径",
+		"priority": 90,
+	}); err != nil {
+		t.Fatalf("新增 Intent 失败: %v", err)
+	}
+	items, err := service.db.ListProjectHypotheses(ctx, "project-tools", "untested", 20)
+	if err != nil {
+		t.Fatalf("读取 Worker 队列失败: %v", err)
+	}
+	found := false
+	for _, item := range items {
+		if item.Dimension == "验证上传链" && item.IntentID != "" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("Main 新增 Intent 未进入 Worker 队列: %+v", items)
 	}
 }
 

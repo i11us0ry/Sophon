@@ -277,6 +277,34 @@ func TestStartProjectsBatchBindsAgentRole(t *testing.T) {
 		t.Fatalf("批量会话角色绑定异常: %+v", conversation)
 	}
 
+	seedProjectForBatchStart(t, db, "project-role-empty", true)
+	recorder = performProjectBatchStartRequest(
+		t,
+		handler,
+		projectBatchStartRequest{ProjectIDs: []string{"project-role-empty"}},
+		true,
+	)
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("不选择 Task Profile 的批量启动失败: %d %s", recorder.Code, recorder.Body.String())
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &result); err != nil {
+		t.Fatalf("解析无 Task Profile 响应失败: %v", err)
+	}
+	if len(result.Items) != 1 || result.Items[0].ConversationID == "" {
+		t.Fatalf("无 Task Profile 批量启动条目异常: %+v", result)
+	}
+	conversation, err = db.GetConversation(
+		context.Background(),
+		result.Items[0].ConversationID,
+		"user-1",
+	)
+	if err != nil {
+		t.Fatalf("读取无 Task Profile 批量会话失败: %v", err)
+	}
+	if conversation.AgentRoleID != "" {
+		t.Fatalf("未选择 Task Profile 时不应绑定角色: %+v", conversation)
+	}
+
 	recorder = performProjectBatchStartRequest(
 		t,
 		handler,

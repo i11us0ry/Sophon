@@ -8,13 +8,39 @@ metadata:
 
 # .NET / NuGet 依赖安全审计
 
-## 输入
+## 适用场景
 
-- `.csproj`、`.fsproj`、`.vbproj`。
-- `.sln`、`Directory.Build.props`、`Directory.Packages.props`。
-- `packages.lock.json`、`project.assets.json`。
-- `NuGet.Config`、私有源配置。
-- 已发布的程序和程序集目录。
+适合分析 `.csproj`、`packages.lock.json`、`project.assets.json`、中央包管理文件或已发布程序集，需要确定实际解析版本、依赖关系及受影响组件是否被使用。
+
+## 不适用场景
+
+`PackageReference` 版本范围或包名命中 advisory 不能直接证明应用漏洞。缺少 lock/assets、组件未被加载、目标功能未启用，或没有可达调用时，只能标记组件风险或待验证。
+
+## 核心判断
+
+结论应分为三层：锁定版本是否受影响、组件是否被项目和代码实际加载、漏洞对应功能能否由真实入口触达。还需要考虑目标框架、传递依赖、私有包和运行时缓解。
+
+## 证据标准
+
+- 可确认：解析版本、直接/传递关系、代码或配置引用和可达触发点证据闭合。
+- 待验证：版本或包元数据命中，但缺少加载、调用、配置或路由证据。
+- 判为否：锁定版本不在影响区间、包未解析或未加载、功能被禁用且无可达入口。
+
+## 决策树
+
+- 优先读取 lock/assets：确定实际解析包和版本。
+- 匹配 advisory：核对包 ID、影响区间、目标框架和修复版本。
+- 搜索项目引用：确认直接依赖、传递依赖、私有替换或本地 DLL。
+- 关联代码和入口：判断受影响功能是否实际使用并可触发。
+- 只有版本命中：输出待验证组件风险，不直接确认漏洞。
+
+## 常见误判
+
+- 用 `.csproj` 的版本范围代替实际锁定版本。
+- 忽略中央包管理、传递依赖、fork、私有源和本地 DLL。
+- 假设包被加载，却没有代码引用或运行时依赖证据。
+- 把同一 advisory 的影响范围直接等同当前项目影响。
+- 自动 restore、build 或联网查询来补结果。
 
 ## 分析步骤
 
@@ -45,24 +71,3 @@ metadata:
 - 是否启用相关功能。
 - 是否有运行时或配置缓解。
 
-仅凭包名和版本命中不得直接写 `CONFIRMED`。没有入口和调用证据时最多 `NEEDS_VALIDATION`。
-
-## 命令约束
-
-默认不执行：
-
-- `dotnet restore`
-- `dotnet build`
-- `dotnet list package --vulnerable`
-- `dotnet nuget` 网络查询
-- `NuGet.exe restore`
-
-这些命令可能联网、写缓存或执行 MSBuild。只有用户明确授权且不修改项目时才可使用。
-
-## 输出
-
-```text
-| package | resolved_version | direct | target | advisory | call_site | status | confidence |
-```
-
-报告必须包含未解析包、私有源、静态 DLL 和传递依赖盲区。

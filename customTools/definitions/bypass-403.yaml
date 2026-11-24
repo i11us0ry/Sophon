@@ -1,6 +1,6 @@
 name: "bypass-403"
 command: "python3"
-args: ["/opt/sophon/thirdTools/bypass403.py"]
+args: ["/opt/sophon/customTools/scripts/bypass403.py"]
 enabled: true
 timeout_seconds: 900
 short_description: "检测HTTP 403的Header与路径绕过差异"

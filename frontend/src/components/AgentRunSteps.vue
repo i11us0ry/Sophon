@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 
 import { useI18n } from '../i18n'
 import type { AgentStep, AgentTraceSummary } from '../stores/chat'
@@ -15,6 +15,7 @@ const props = defineProps<{
 }>()
 const emit = defineEmits<{ 'load-more': [] }>()
 const { t } = useI18n()
+const expanded = ref(false)
 
 interface ToolGroup {
   key: string
@@ -50,16 +51,24 @@ interface AgentGroup {
 }
 
 function stepAgent(step: AgentStep): AgentIdentity {
+  const workerFocus = step.workerFocus || ''
   return {
     id: step.agentId || 'mainagent',
-    name: step.agentName || 'Sophon',
+    name: workerFocus || step.agentName || 'Sophon',
     kind: step.agentKind || 'mainagent',
     intentId: step.intentId || '',
     hypothesisId: step.hypothesisId || '',
     capabilityMode: step.capabilityMode || '',
-    workerFocus: step.workerFocus || '',
+    workerFocus,
     allowedSkills: Array.isArray(step.allowedSkills) ? step.allowedSkills : [],
   }
+}
+
+function agentGroupKey(agent: AgentIdentity): string {
+  if (agent.kind === 'worker' && agent.hypothesisId) {
+    return `worker:${agent.hypothesisId}`
+  }
+  return `${agent.kind}:${agent.id}`
 }
 
 function agentName(agent: AgentIdentity): string {
@@ -76,6 +85,8 @@ function agentKindLabel(agent: AgentIdentity): string {
       return t('chat.agentPlanner')
     case 'worker':
       return t('chat.agentWorker')
+    case 'system':
+      return t('chat.agentSystem')
     case 'subagent':
       return t('chat.agentSubagent')
     default:
@@ -87,8 +98,12 @@ function agentColor(agent: AgentIdentity): string {
   if (agent.id === 'mainagent') {
     return 'var(--accent)'
   }
+  const colorKey =
+    agent.kind === 'worker' && agent.hypothesisId
+      ? `worker:${agent.hypothesisId}`
+      : agent.id
   let hash = 0
-  for (const character of agent.id) {
+  for (const character of colorKey) {
     hash = (hash * 31 + character.charCodeAt(0)) >>> 0
   }
   return `hsl(${hash % 360} 88% 68%)`
@@ -102,6 +117,7 @@ function agentStyle(agent: AgentIdentity): Record<string, string> {
 const items = computed<StepItem[]>(() => {
   const output: StepItem[] = []
   const groups = new Map<string, ToolGroup>()
+  const workerAttempts = new Map<string, number>()
   for (const step of props.steps) {
     const agent = stepAgent(step)
     if (step.type === 'tool_call') {
@@ -128,7 +144,25 @@ const items = computed<StepItem[]>(() => {
       step.type === 'agent_completed' ||
       step.type === 'agent_failed'
     ) {
-      output.push({ kind: step.type, step, agent })
+      let lifecycleStep = step
+      if (agent.kind === 'worker' && agent.hypothesisId) {
+        const key = agent.hypothesisId
+        let attempt = Number(step.attempt || 0)
+        if (step.type === 'agent_started') {
+          if (attempt <= 0) {
+            attempt = (workerAttempts.get(key) || 0) + 1
+          }
+          workerAttempts.set(key, attempt)
+        } else if (attempt <= 0) {
+          attempt = workerAttempts.get(key) || 1
+        }
+        lifecycleStep = { ...step, attempt }
+      }
+      output.push({
+        kind: lifecycleStep.type as 'agent_started' | 'agent_completed' | 'agent_failed',
+        step: lifecycleStep,
+        agent: stepAgent(lifecycleStep),
+      })
       continue
     }
     output.push({
@@ -146,12 +180,12 @@ const groups = computed<AgentGroup[]>(() => {
   for (const item of items.value) {
     const agent = item.kind === 'tool' ? item.group.agent : item.agent
     const current = output.at(-1)
-    if (current && current.agent.id === agent.id) {
+    if (current && agentGroupKey(current.agent) === agentGroupKey(agent)) {
       current.items.push(item)
       continue
     }
     output.push({
-      key: `${agent.id}-${output.length}`,
+      key: `${agentGroupKey(agent)}-${output.length}`,
       agent,
       items: [item],
     })
@@ -163,7 +197,7 @@ const fallbackAgentCounts = computed(() => {
   const agents = new Map<string, AgentIdentity>()
   for (const item of items.value) {
     const agent = item.kind === 'tool' ? item.group.agent : item.agent
-    agents.set(agent.id, agent)
+    agents.set(agentGroupKey(agent), agent)
   }
   const counts = { main: 0, planner: 0, worker: 0, subagent: 0 }
   for (const agent of agents.values()) {
@@ -192,7 +226,9 @@ const agentCounts = computed(() => {
   return fallbackAgentCounts.value
 })
 
-const displayStepCount = computed(() => Math.max(props.totalCount || 0, items.value.length))
+const displayStepCount = computed(() =>
+  Math.max(props.totalCount || 0, props.steps.length),
+)
 
 function itemKey(item: StepItem, index: number) {
   if (item.kind === 'tool') {
@@ -201,7 +237,62 @@ function itemKey(item: StepItem, index: number) {
   return `${item.kind}-${item.step.id || index}`
 }
 
-function lifecycleLabel(kind: string) {
+function lifecycleLabel(
+  kind: string,
+  step: AgentStep,
+) {
+  if (step.agentKind === 'system') {
+    if (kind === 'agent_failed') return t('chat.policyIntercepted')
+    return kind === 'agent_started' ? t('chat.agentStarted') : t('chat.agentCompleted')
+  }
+  const attempt = Number(step.attempt || 0)
+  const maxAttempts = Number(step.maxAttempts || 0)
+  const streamAttempt = Number(step.streamAttempt || 0)
+  const maxStreamAttempts = Number(step.maxStreamAttempts || 0)
+  const recoveryReason = String(step.recoveryReason || '')
+  if (kind === 'agent_started') {
+    if (streamAttempt > 1) {
+      return t('chat.workerStreamRetry', {
+        attempt: streamAttempt,
+        max: maxStreamAttempts,
+        execution: attempt,
+        maxExecution: maxAttempts,
+      })
+    }
+    if (
+      recoveryReason.startsWith('worker_service_restart_retry') ||
+      recoveryReason.includes('服务重启导致 Worker 中断')
+    ) {
+      return t('chat.workerExecutionRecovered', {
+        attempt,
+        max: maxAttempts,
+      })
+    }
+    if (recoveryReason.startsWith('worker_transient_failure_retry')) {
+      return t('chat.workerExecutionRecoveredTransient', {
+        attempt,
+        max: maxAttempts,
+      })
+    }
+    if (attempt > 1) {
+      return t('chat.workerExecutionRetry', {
+        attempt,
+        max: maxAttempts,
+      })
+    }
+  }
+  if (attempt > 1) {
+    if (kind === 'agent_failed') {
+      if (step.status === 'paused') {
+        return t('chat.workerAttemptPaused', { attempt })
+      }
+      if (step.status === 'stopped') {
+        return t('chat.workerAttemptStopped', { attempt })
+      }
+      return t('chat.workerAttemptFailed', { attempt })
+    }
+    return t('chat.workerAttemptCompleted', { attempt })
+  }
   switch (kind) {
     case 'agent_started':
       return t('chat.workerStarted')
@@ -210,6 +301,26 @@ function lifecycleLabel(kind: string) {
     default:
       return t('chat.workerCompleted')
   }
+}
+
+function workerAttemptCount(group: AgentGroup): number {
+  if (group.agent.kind !== 'worker') {
+    return 0
+  }
+  const attempts = new Set<number>()
+  for (const item of group.items) {
+    if (
+      item.kind === 'agent_started' ||
+      item.kind === 'agent_completed' ||
+      item.kind === 'agent_failed'
+    ) {
+      const attempt = Number(item.step.attempt || 0)
+      if (attempt > 0) {
+        attempts.add(attempt)
+      }
+    }
+  }
+  return attempts.size
 }
 
 function formatDuration(value?: number) {
@@ -230,11 +341,9 @@ function formatDuration(value?: number) {
 }
 
 function onToggle(event: Event) {
-  if (props.live || props.loaded) {
-    return
-  }
-  const details = event.target as HTMLDetailsElement
-  if (details.open) {
+  const details = event.currentTarget as HTMLDetailsElement
+  expanded.value = details.open
+  if (details.open && !props.live && !props.loaded) {
     emit('load-more')
   }
 }
@@ -243,9 +352,9 @@ function onToggle(event: Event) {
 
 <template>
   <details
-    v-if="live || items.length || (totalCount || 0) > 0"
+    v-if="live || steps.length || (totalCount || 0) > 0"
     class="agent-run"
-    :open="live"
+    :open="live || expanded"
     @toggle="onToggle"
   >
     <summary v-if="!live" class="agent-run-summary">
@@ -254,7 +363,7 @@ function onToggle(event: Event) {
         <path d="m6 9 6 6 6-6" />
       </svg>
     </summary>
-    <div class="agent-steps" :class="{ live }">
+    <div v-if="live || expanded" class="agent-steps" :class="{ live }">
       <div
         v-if="
           agentCounts.main ||
@@ -303,6 +412,12 @@ function onToggle(event: Event) {
             <span v-if="group.agent.intentId">I:{{ group.agent.intentId }}</span>
             <span v-if="group.agent.hypothesisId">H:{{ group.agent.hypothesisId }}</span>
           </span>
+          <span
+            v-if="workerAttemptCount(group) > 1"
+            class="agent-capability"
+          >
+            {{ t('chat.workerAttemptCount', { count: workerAttemptCount(group) }) }}
+          </span>
         </header>
         <div class="agent-message-body">
           <article
@@ -319,12 +434,19 @@ function onToggle(event: Event) {
               "
             >
               <div class="step-tool-head">
-                <span class="step-badge">{{ lifecycleLabel(item.kind) }}</span>
+                <span class="step-badge">{{ lifecycleLabel(item.kind, item.step) }}</span>
                 <strong>{{ item.step.workerFocus || item.agent.name }}</strong>
               </div>
               <div v-if="item.step.task" class="step-block">
                 <small class="step-label">{{ t('chat.workerTask') }}</small>
                 <pre>{{ item.step.task }}</pre>
+              </div>
+              <div
+                v-if="item.kind === 'agent_started' && (item.step.retryReason || item.step.recoveryReason)"
+                class="step-block"
+              >
+                <small class="step-label">{{ t('chat.workerRetryReason') }}</small>
+                <pre>{{ item.step.retryReason || item.step.recoveryReason }}</pre>
               </div>
               <div v-if="item.step.allowedSkills?.length" class="step-block">
                 <small class="step-label">{{ t('chat.workerSkills') }}</small>
@@ -489,6 +611,8 @@ function onToggle(event: Event) {
   border-top: 1px solid var(--border);
   border-radius: var(--radius);
   background: transparent;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 72px;
   font-size: 12px;
 }
 

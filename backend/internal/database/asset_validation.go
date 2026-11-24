@@ -41,6 +41,7 @@ var supportedAssetKinds = map[string]bool{
 	"url":    true,
 	"port":   true,
 	"host":   true,
+	"source": true,
 }
 
 const (
@@ -74,8 +75,10 @@ func NormalizeAssetValue(kind string, value string) (string, error) {
 		return strconv.Itoa(port), nil
 	case "host":
 		return normalizeHostAssetValue(value)
+	case "source":
+		return normalizeSourceAssetValue(value)
 	default:
-		return "", fmt.Errorf("资产类型只能是 ip、domain、url、port 或 host")
+		return "", fmt.Errorf("资产类型只能是 ip、domain、url、port、host 或 source")
 	}
 }
 
@@ -184,6 +187,14 @@ func normalizeHostAssetValue(value string) (string, error) {
 	return host, nil
 }
 
+func normalizeSourceAssetValue(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" || strings.ContainsAny(value, "\r\n\t") {
+		return "", fmt.Errorf("源码或制品资产值格式不合法")
+	}
+	return value, nil
+}
+
 func splitAssetHostPort(value string) (string, string, error) {
 	if strings.Count(value, ":") == 0 {
 		return value, "", nil
@@ -249,7 +260,7 @@ func normalizeAssetRecord(item *Asset) error {
 		return fmt.Errorf("%w: 资产名称不能为空且不能超过 %d 个字符", ErrInvalidAsset, assetNameMaxRunes)
 	}
 	if !IsSupportedAssetKind(item.Kind) {
-		return fmt.Errorf("%w: 资产类型只能是 ip、domain、url、port 或 host", ErrInvalidAsset)
+		return fmt.Errorf("%w: 资产类型只能是 ip、domain、url、port、host 或 source", ErrInvalidAsset)
 	}
 	if item.Value == "" || len([]rune(item.Value)) > assetValueMaxRunes {
 		return fmt.Errorf("%w: 资产值不能为空且不能超过 %d 个字符", ErrInvalidAsset, assetValueMaxRunes)

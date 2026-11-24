@@ -46,7 +46,9 @@ type Config struct {
 	AgentContextMaxTokens      int
 	AgentMaxTurnTokens         int
 	AgentMaxIterations         int
+	AgentMaxToolCalls          int
 	AgentMaxHypotheses         int
+	AgentMaxDurationSeconds    int
 	AgentMaxConcurrentSessions int
 	AgentSubagentConcurrency   int
 	AgentSubagentMaxToolCalls  int
@@ -121,7 +123,9 @@ type agentSection struct {
 	ContextMaxTokens       *int       `yaml:"context_max_tokens"`
 	MaxTurnTokens          *int       `yaml:"max_turn_tokens"`
 	MaxIterations          *int       `yaml:"max_iterations"`
+	MaxToolCalls           *int       `yaml:"max_tool_calls"`
 	MaxHypotheses          *int       `yaml:"max_hypotheses"`
+	MaxDurationSeconds     *int       `yaml:"max_duration_seconds"`
 	MaxConcurrentSessions  *int       `yaml:"max_concurrent_sessions"`
 	SubagentMaxConcurrency *int       `yaml:"subagent_max_concurrency"`
 	SubagentMaxToolCalls   *int       `yaml:"subagent_max_tool_calls"`
@@ -259,10 +263,12 @@ func Load() (Config, error) {
 		AgentContextMaxTokens:      pickIntAllowZero("SOPHON_AGENT_CONTEXT_MAX_TOKENS", file.Agent.ContextMaxTokens, 0),
 		AgentMaxTurnTokens:         pickIntAllowZero("SOPHON_AGENT_MAX_TURN_TOKENS", file.Agent.MaxTurnTokens, 0),
 		AgentMaxIterations:         pickIntAllowZero("SOPHON_AGENT_MAX_ITERATIONS", file.Agent.MaxIterations, 40),
+		AgentMaxToolCalls:          pickIntAllowZero("SOPHON_AGENT_MAX_TOOL_CALLS", file.Agent.MaxToolCalls, 0),
 		AgentMaxHypotheses:         normalizeAgentMaxHypotheses(pickIntAllowZero("SOPHON_AGENT_MAX_HYPOTHESES", file.Agent.MaxHypotheses, 200)),
+		AgentMaxDurationSeconds:    pickIntAllowZero("SOPHON_AGENT_MAX_DURATION_SECONDS", file.Agent.MaxDurationSeconds, 0),
 		AgentMaxConcurrentSessions: normalizeAgentMaxConcurrentSessions(pickInt("SOPHON_AGENT_MAX_CONCURRENT_SESSIONS", file.Agent.MaxConcurrentSessions, 5)),
 		AgentSubagentConcurrency:   normalizeSubagentMaxConcurrency(pickInt("SOPHON_AGENT_SUBAGENT_MAX_CONCURRENCY", file.Agent.SubagentMaxConcurrency, 2)),
-		AgentSubagentMaxToolCalls:  normalizeSubagentMaxToolCalls(pickInt("SOPHON_AGENT_SUBAGENT_MAX_TOOL_CALLS", file.Agent.SubagentMaxToolCalls, 80)),
+		AgentSubagentMaxToolCalls:  normalizeSubagentMaxToolCalls(pickIntAllowZero("SOPHON_AGENT_SUBAGENT_MAX_TOOL_CALLS", file.Agent.SubagentMaxToolCalls, 80)),
 		AgentSubagentMaxDuration:   normalizeSubagentMaxDuration(pickInt("SOPHON_AGENT_SUBAGENT_MAX_DURATION_SECONDS", file.Agent.SubagentMaxDuration, 1800)),
 		AgentSubagentMaxCPUSeconds: normalizeSubagentMaxCPUSeconds(pickInt("SOPHON_AGENT_SUBAGENT_MAX_CPU_SECONDS", file.Agent.SubagentMaxCPUSeconds, 900)),
 		AgentSubagentMaxProcesses:  normalizeSubagentMaxProcesses(pickInt("SOPHON_AGENT_SUBAGENT_MAX_PROCESSES", file.Agent.SubagentMaxProcesses, 8)),
@@ -524,8 +530,6 @@ var defaultHITLTools = []string{
 	"exec",
 	"execute-python-script",
 	"install-python-package",
-	"metasploit",
-	"msfvenom",
 	"impacket",
 	"netexec",
 	"hydra",
@@ -628,11 +632,11 @@ func normalizeSubagentMaxConcurrency(value int) int {
 }
 
 func normalizeSubagentMaxToolCalls(value int) int {
-	if value <= 0 {
+	if value < 0 {
 		return 80
 	}
-	if value > 500 {
-		return 500
+	if value > 100000000 {
+		return 100000000
 	}
 	return value
 }

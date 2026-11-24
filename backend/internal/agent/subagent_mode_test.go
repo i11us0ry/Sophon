@@ -80,6 +80,48 @@ func TestSubagentToolDecisionEnforcesModes(t *testing.T) {
 			want: true,
 		},
 		{
+			name: "可写允许读取 Planner Todo",
+			mode: subagentModeReadWrite,
+			tool: plannerTodoListToolName,
+			args: map[string]interface{}{},
+			want: true,
+		},
+		{
+			name: "可写允许更新 Planner Todo",
+			mode: subagentModeReadWrite,
+			tool: plannerTodoUpdateToolName,
+			args: map[string]interface{}{"todos": []interface{}{}},
+			want: true,
+		},
+		{
+			name: "只读拒绝更新 Planner Todo",
+			mode: subagentModeReadOnly,
+			tool: plannerTodoUpdateToolName,
+			args: map[string]interface{}{"todos": []interface{}{}},
+			want: false,
+		},
+		{
+			name: "可写允许查询编排状态",
+			mode: subagentModeReadWrite,
+			tool: orchestratorControlToolName,
+			args: map[string]interface{}{"action": "status"},
+			want: true,
+		},
+		{
+			name: "可写允许 Planner 纠偏 Worker",
+			mode: subagentModeReadWrite,
+			tool: orchestratorControlToolName,
+			args: map[string]interface{}{"action": "steer_worker", "hypothesisId": "h1", "message": "缩小范围"},
+			want: true,
+		},
+		{
+			name: "可写拒绝未知编排操作",
+			mode: subagentModeReadWrite,
+			tool: orchestratorControlToolName,
+			args: map[string]interface{}{"action": "reboot_everything"},
+			want: false,
+		},
+		{
 			name: "可写拒绝主动测试",
 			mode: subagentModeReadWrite,
 			tool: "exec",
@@ -209,6 +251,7 @@ func TestSubagentWorkspaceIsolation(t *testing.T) {
 	}
 	args := map[string]interface{}{}
 	ctx := subagentContext(subagentModeReadOnly)
+	ctx = execctx.WithProjectID(ctx, "project-isolation")
 	if err := service.injectToolRunnerWorkspace(
 		ctx,
 		"sophon-tool-runner",
@@ -217,8 +260,16 @@ func TestSubagentWorkspaceIsolation(t *testing.T) {
 	); err != nil {
 		t.Fatalf("注入子 Agent 工作区失败: %v", err)
 	}
-	want := filepath.Join(root, "tmp", "workspace", "conversation-1", "subagents", "sub-test")
-	wantConversation := filepath.Join(root, "tmp", "workspace", "conversation-1")
+	wantConversation := filepath.Join(
+		root,
+		"tmp",
+		"workspace",
+		"projects",
+		"project-isolation",
+		"conversations",
+		"conversation-1",
+	)
+	want := filepath.Join(wantConversation, "subagents", "sub-test")
 	if args[toolRunnerWorkspaceArg] != want {
 		t.Fatalf("子 Agent 工作区错误: %#v", args[toolRunnerWorkspaceArg])
 	}
@@ -230,8 +281,9 @@ func TestSubagentWorkspaceIsolation(t *testing.T) {
 	}
 
 	mainArgs := map[string]interface{}{}
+	mainCtx := execctx.WithProjectID(context.Background(), "project-isolation")
 	if err := service.injectToolRunnerWorkspace(
-		context.Background(),
+		mainCtx,
 		"sophon-tool-runner",
 		"conversation-1",
 		mainArgs,
@@ -244,6 +296,15 @@ func TestSubagentWorkspaceIsolation(t *testing.T) {
 	if mainArgs[toolRunnerWorkspaceArg] != wantConversation ||
 		mainArgs[toolRunnerConversationArg] != wantConversation {
 		t.Fatalf("主 Agent 工作区与共享工作区应一致: %#v", mainArgs)
+	}
+	if mainArgs[toolRunnerProjectArg] != filepath.Join(
+		root,
+		"tmp",
+		"workspace",
+		"projects",
+		"project-isolation",
+	) {
+		t.Fatalf("主 Agent 项目工作区错误: %#v", mainArgs[toolRunnerProjectArg])
 	}
 }
 

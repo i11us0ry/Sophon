@@ -78,7 +78,9 @@ func (h *SettingsHandler) AIStatus(c *gin.Context) {
 		"agent.mock":                  "SOPHON_AGENT_MOCK",
 		"agent.contextMaxChars":       "SOPHON_AGENT_CONTEXT_MAX_CHARS",
 		"agent.maxIterations":         "SOPHON_AGENT_MAX_ITERATIONS",
+		"agent.maxDurationSeconds":    "SOPHON_AGENT_MAX_DURATION_SECONDS",
 		"agent.maxConcurrentSessions": "SOPHON_AGENT_MAX_CONCURRENT_SESSIONS",
+		"agent.subagentMaxToolCalls":  "SOPHON_AGENT_SUBAGENT_MAX_TOOL_CALLS",
 		"hitl.enabled":                "SOPHON_HITL_ENABLED",
 		"hitl.tools":                  "SOPHON_HITL_TOOLS",
 		"hitl.timeoutSeconds":         "SOPHON_HITL_TIMEOUT_SECONDS",
@@ -134,6 +136,9 @@ func (h *SettingsHandler) AIStatus(c *gin.Context) {
 				"contextMaxChars":       cfg.AgentContextMaxChars,
 				"maxTurnTokens":         cfg.AgentMaxTurnTokens,
 				"maxIterations":         cfg.AgentMaxIterations,
+				"maxDurationSeconds":    cfg.AgentMaxDurationSeconds,
+				"maxToolCalls":          cfg.AgentMaxToolCalls,
+				"subagentMaxToolCalls":  cfg.AgentSubagentMaxToolCalls,
 				"maxHypotheses":         cfg.AgentMaxHypotheses,
 				"maxConcurrentSessions": cfg.AgentMaxConcurrentSessions,
 			},
@@ -183,6 +188,9 @@ type settingsAgentRequest struct {
 	ContextMaxChars       *int  `json:"contextMaxChars"`
 	MaxTurnTokens         *int  `json:"maxTurnTokens"`
 	MaxIterations         *int  `json:"maxIterations"`
+	MaxDurationSeconds    *int  `json:"maxDurationSeconds"`
+	MaxToolCalls          *int  `json:"maxToolCalls"`
+	SubagentMaxToolCalls  *int  `json:"subagentMaxToolCalls"`
 	MaxHypotheses         *int  `json:"maxHypotheses"`
 	MaxConcurrentSessions *int  `json:"maxConcurrentSessions"`
 }
@@ -405,6 +413,21 @@ func (h *SettingsHandler) Update(c *gin.Context) {
 				updates = append(updates, config.FieldUpdate{Path: []string{"agent", "max_iterations"}, Value: value})
 			}
 		}
+		if request.Agent.MaxDurationSeconds != nil {
+			value := *request.Agent.MaxDurationSeconds
+			if value < 0 || value > 100000000 {
+				badRequest(c, "invalid_settings", "整轮最长运行时间需在 0-100000000 秒之间，0 表示不限")
+				return
+			}
+			apply, abort := lockState("agent.maxDurationSeconds", "SOPHON_AGENT_MAX_DURATION_SECONDS", value != next.AgentMaxDurationSeconds)
+			if abort {
+				return
+			}
+			if apply {
+				next.AgentMaxDurationSeconds = value
+				updates = append(updates, config.FieldUpdate{Path: []string{"agent", "max_duration_seconds"}, Value: value})
+			}
+		}
 		if request.Agent.MaxTurnTokens != nil {
 			value := *request.Agent.MaxTurnTokens
 			if value < 0 || value > 100000000 {
@@ -418,6 +441,43 @@ func (h *SettingsHandler) Update(c *gin.Context) {
 			if apply {
 				next.AgentMaxTurnTokens = value
 				updates = append(updates, config.FieldUpdate{Path: []string{"agent", "max_turn_tokens"}, Value: value})
+			}
+		}
+		if request.Agent.MaxToolCalls != nil {
+			value := *request.Agent.MaxToolCalls
+			if value < 0 || value > 100000000 {
+				badRequest(c, "invalid_settings", "工具调用上限需在 0-100000000 之间，0 表示不限")
+				return
+			}
+			apply, abort := lockState("agent.maxToolCalls", "SOPHON_AGENT_MAX_TOOL_CALLS", value != next.AgentMaxToolCalls)
+			if abort {
+				return
+			}
+			if apply {
+				next.AgentMaxToolCalls = value
+				updates = append(updates, config.FieldUpdate{Path: []string{"agent", "max_tool_calls"}, Value: value})
+			}
+		}
+		if request.Agent.SubagentMaxToolCalls != nil {
+			value := *request.Agent.SubagentMaxToolCalls
+			if value < 0 || value > 100000000 {
+				badRequest(c, "invalid_settings", "Worker 工具调用预算需在 0-100000000 之间，0 表示不限")
+				return
+			}
+			apply, abort := lockState(
+				"agent.subagentMaxToolCalls",
+				"SOPHON_AGENT_SUBAGENT_MAX_TOOL_CALLS",
+				value != next.AgentSubagentMaxToolCalls,
+			)
+			if abort {
+				return
+			}
+			if apply {
+				next.AgentSubagentMaxToolCalls = value
+				updates = append(updates, config.FieldUpdate{
+					Path:  []string{"agent", "subagent_max_tool_calls"},
+					Value: value,
+				})
 			}
 		}
 		if request.Agent.MaxHypotheses != nil {

@@ -48,6 +48,7 @@ func defaultCapability(toolName string) (Capability, bool) {
 		name == "job":
 		return CapabilityDestructive, true
 	case name == "read_artifact", name == "read_skill", name == "project_situation",
+		name == "planner_todo_list",
 		strings.HasPrefix(name, "project_"),
 		strings.HasPrefix(name, "list_"),
 		strings.HasPrefix(name, "get_"),
@@ -63,10 +64,10 @@ func defaultCapability(toolName string) (Capability, bool) {
 func isKnownIntrusiveTool(name string) bool {
 	switch name {
 	case "nmap", "masscan", "nikto", "wpscan", "ffuf", "dirsearch",
-		"nuclei", "sqlmap", "hydra", "john", "hashcat", "metasploit",
-		"msfconsole", "xsser", "dotdotpwn", "commix", "dalfox",
+		"nuclei", "sqlmap", "hydra", "john", "hashcat",
+		"xsser", "dotdotpwn", "commix", "dalfox",
 		"subfinder", "amass", "gobuster", "feroxbuster", "whatweb",
-		"wafw00f", "impacket", "responder":
+		"wafw00f", "impacket":
 		return true
 	default:
 		return false

@@ -1,5 +1,5 @@
 name: "ksubdomain"
-command: "/opt/sophon/thirdTools/ksubdomain"
+command: "ksubdomain"
 args: ["enum", "--silent"]
 enabled: true
 timeout_seconds: 900

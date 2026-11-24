@@ -1,0 +1,51 @@
+name: "ddddocr"
+command: "/opt/sophon/venv/bin/python"
+args: ["/opt/sophon/tools/ddddocr_client.py"]
+enabled: true
+timeout_seconds: 120
+requires_python: ["ddddocr"]
+short_description: "ddddocr 验证码识别、目标检测和滑块匹配"
+description: |
+  使用 ddddocr 对授权测试中的验证码图片执行识别。
+
+  支持普通字符验证码识别、目标框检测和滑块验证码匹配。图片只从当前会话
+  可访问的文件读取，也可以传入 Base64 图片；不会将识别结果写入项目事实。
+parameters:
+  - name: "operation"
+    type: "string"
+    description: "操作：help、recognize、detect、slide_match"
+    required: true
+    position: 0
+    format: "positional"
+    options: ["help", "recognize", "detect", "slide_match"]
+  - name: "image_path"
+    type: "string"
+    description: "recognize/detect 的图片路径"
+    required: false
+    flag: "--image"
+    format: "flag"
+  - name: "image_base64"
+    type: "string"
+    description: "recognize/detect 的 Base64 图片，可使用 data URL"
+    required: false
+    flag: "--image-base64"
+    format: "flag"
+  - name: "target_path"
+    type: "string"
+    description: "slide_match 的滑块图片路径"
+    required: false
+    flag: "--target"
+    format: "flag"
+  - name: "background_path"
+    type: "string"
+    description: "slide_match 的背景图片路径"
+    required: false
+    flag: "--background"
+    format: "flag"
+  - name: "simple_target"
+    type: "bool"
+    description: "滑块图片是否为简单小图"
+    required: false
+    default: true
+    flag: "--simple-target"
+    format: "flag"

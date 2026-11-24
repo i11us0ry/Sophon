@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import fcntl
 import json
 import os
@@ -23,9 +24,11 @@ STATE_DIR_NAME = ".suo5"
 STATE_FILE_NAME = "state.json"
 LOG_FILE_NAME = "suo5.log"
 DEFAULT_PORT = 1111
-START_READY_SECONDS = 3.0
+START_READY_SECONDS = 5.0
+START_READY_MIN_SECONDS = 15.0
+START_READY_MAX_SECONDS = 60.0
 STOP_READY_SECONDS = 3.0
-ALLOWED_OPERATIONS = {"start", "status", "stop"}
+ALLOWED_OPERATIONS = {"start", "status", "stop", "help"}
 ALLOWED_OPTIONS = {
     "target",
     "port",
@@ -42,6 +45,33 @@ ALLOWED_OPTIONS = {
     "no_browser_headers",
 }
 ALLOWED_MODES = {"auto", "full", "half", "classic"}
+
+HELP_PAYLOAD = {
+    "status": "help",
+    "operations": ["start", "status", "stop"],
+    "parameters": {
+        "target": "start 时必填，远端 suo5 Shell URL，仅允许 http/https",
+        "port": "本地 SOCKS5 端口，默认 1111",
+        "method": "HTTP 方法，GET 或 POST，默认 POST",
+        "mode": "传输模式：auto/full/half/classic，默认 auto",
+        "auth": "本地 SOCKS5 认证 username:password；留空自动生成",
+        "proxy": "可选上游 http/https/socks5/socks5h 代理",
+        "header_json": "可选 Header 字符串或 JSON 字符串数组",
+        "ua": "可选 User-Agent",
+        "timeout": "请求超时秒数，默认 5",
+        "retry": "请求重试次数，默认 1",
+        "debug": "可选布尔值，启用调试输出",
+        "no_gzip": "可选布尔值，禁用压缩",
+        "no_browser_headers": "可选布尔值，禁用浏览器请求头",
+    },
+    "example": {
+        "operation": "start",
+        "target": "http://authorized.example/suo5.jsp",
+        "port": 1111,
+        "method": "POST",
+        "mode": "auto",
+    },
+}
 
 
 class ManagerError(RuntimeError):
@@ -336,7 +366,19 @@ def build_command(binary: Path, options: dict[str, Any]) -> tuple[list[str], dic
         "mode": mode,
         "auth": auth,
         "proxy": proxy,
+        "timeout": timeout,
+        "retry": retry,
     }
+
+
+def startup_ready_seconds(values: dict[str, Any]) -> float:
+    request_timeout = max(1, int(values.get("timeout", 5)))
+    retries = max(0, int(values.get("retry", 1)))
+    estimated = request_timeout * (retries + 1) + 5.0
+    return min(
+        START_READY_MAX_SECONDS,
+        max(START_READY_MIN_SECONDS, START_READY_SECONDS, estimated),
+    )
 
 
 def read_log_tail(path: Path, limit: int = 4000) -> str:
@@ -385,6 +427,7 @@ def start_tunnel(options: dict[str, Any]) -> dict[str, Any]:
 
     binary = binary_path()
     command, values = build_command(binary, options)
+    ready_seconds = startup_ready_seconds(values)
     directory = state_dir()
     log_path = directory / LOG_FILE_NAME
     fd = os.open(log_path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
@@ -408,10 +451,11 @@ def start_tunnel(options: dict[str, Any]) -> dict[str, Any]:
         "pid_start": process_start_ticks(process.pid),
         "started_at": int(time.time()),
         "log_path": str(log_path),
+        "ready_timeout_seconds": ready_seconds,
     }
     write_state(state)
 
-    deadline = time.monotonic() + START_READY_SECONDS
+    deadline = time.monotonic() + ready_seconds
     while time.monotonic() < deadline:
         if process.poll() is not None:
             tail = read_log_tail(log_path)
@@ -425,7 +469,7 @@ def start_tunnel(options: dict[str, Any]) -> dict[str, Any]:
     terminate_process(state)
     clear_state()
     tail = read_log_tail(log_path)
-    raise ManagerError(f"suo5 未在 {START_READY_SECONDS:.0f} 秒内监听本地端口: {tail}")
+    raise ManagerError(f"suo5 未在 {ready_seconds:.0f} 秒内监听本地端口: {tail}")
 
 
 def safe_status(state: dict[str, Any]) -> dict[str, Any]:
@@ -440,6 +484,7 @@ def safe_status(state: dict[str, Any]) -> dict[str, Any]:
         "proxy": state.get("proxy") or "",
         "started_at": state.get("started_at"),
         "log_path": state.get("log_path"),
+        "ready_timeout_seconds": state.get("ready_timeout_seconds"),
     }
 
 
@@ -471,7 +516,9 @@ def stop_tunnel() -> dict[str, Any]:
 def dispatch(operation: str, raw_options: str) -> dict[str, Any]:
     operation = str(operation or "").strip().lower()
     if operation not in ALLOWED_OPERATIONS:
-        raise ManagerError("operation 必须是 start、status 或 stop")
+        raise ManagerError("operation 必须是 start、status、stop 或 help")
+    if operation == "help":
+        return HELP_PAYLOAD
     options = parse_options(raw_options)
     if operation == "start":
         return start_tunnel(options)
@@ -480,15 +527,92 @@ def dispatch(operation: str, raw_options: str) -> dict[str, Any]:
     return stop_tunnel()
 
 
+def parse_cli(argv: list[str]) -> tuple[str, str, dict[str, Any]]:
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("operation", nargs="?")
+    parser.add_argument("options_json", nargs="?")
+    parser.add_argument("--target")
+    parser.add_argument("--port")
+    parser.add_argument("--method")
+    parser.add_argument("--mode")
+    parser.add_argument("--auth")
+    parser.add_argument("--proxy")
+    parser.add_argument("--header-json")
+    parser.add_argument("--ua")
+    parser.add_argument("--timeout")
+    parser.add_argument("--retry")
+    parser.add_argument("--debug", action="store_true")
+    parser.add_argument("--no-gzip", action="store_true")
+    parser.add_argument("--no-browser-headers", action="store_true")
+    args = parser.parse_args(argv[1:])
+
+    operation = str(args.operation or "help").strip().lower()
+    if operation == "help":
+        return operation, "{}", {}
+    if operation not in ALLOWED_OPERATIONS:
+        raise ManagerError("operation 必须是 start、status、stop 或 help")
+
+    if args.options_json:
+        flag_values = [
+            args.target,
+            args.port,
+            args.method,
+            args.mode,
+            args.auth,
+            args.proxy,
+            args.header_json,
+            args.ua,
+            args.timeout,
+            args.retry,
+        ]
+        if any(value not in {None, ""} for value in flag_values) or args.debug or \
+                args.no_gzip or args.no_browser_headers:
+            raise ManagerError("options_json 与独立参数不能同时使用")
+        return operation, args.options_json, {}
+
+    options: dict[str, Any] = {}
+    for key, value in {
+        "target": args.target,
+        "port": args.port,
+        "method": args.method,
+        "mode": args.mode,
+        "auth": args.auth,
+        "proxy": args.proxy,
+        "ua": args.ua,
+        "timeout": args.timeout,
+        "retry": args.retry,
+    }.items():
+        if value not in {None, ""}:
+            options[key] = value
+    if args.header_json:
+        raw = args.header_json.strip()
+        if raw.startswith("["):
+            try:
+                options["header"] = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                raise ManagerError(f"header_json 不是有效 JSON: {exc}") from exc
+        else:
+            options["header"] = raw
+    if args.debug:
+        options["debug"] = True
+    if args.no_gzip:
+        options["no_gzip"] = True
+    if args.no_browser_headers:
+        options["no_browser_headers"] = True
+    return operation, "{}", options
+
+
 def main() -> int:
     os.umask(0o077)
-    if len(sys.argv) < 2 or len(sys.argv) > 3:
-        print("usage: suo5_manager.py <start|status|stop> [options_json]", file=sys.stderr)
-        return 2
-    raw_options = sys.argv[2] if len(sys.argv) == 3 else "{}"
     try:
+        operation, raw_options, cli_options = parse_cli(sys.argv)
+        if operation == "help":
+            print(json.dumps(HELP_PAYLOAD, ensure_ascii=False, indent=2))
+            return 0
+        if raw_options == "{}" and cli_options:
+            raw_options = json.dumps(cli_options, ensure_ascii=False)
         with manager_lock():
-            result = dispatch(sys.argv[1], raw_options)
+            result = dispatch(operation, raw_options)
     except ManagerError as exc:
         print(f"错误: {exc}", file=sys.stderr)
         return 2

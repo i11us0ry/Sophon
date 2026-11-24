@@ -9,6 +9,40 @@ description: Java Web 源码 SQL 注入漏洞审计工具。从源码中定位�
 
 扫描 Java Web 项目源码，定位所有 SQL 执行入口，检测 SQL 注入漏洞。
 
+## 适用场景
+
+适合 JDBC、MyBatis、Hibernate、JPA 或项目 SQL 构造器接收动态值、动态列名、排序字段，需要判断请求输入能否改变 SQL 语法。
+
+## 不适用场景
+
+看到 SQL API、字符串拼接或 `${}` 不能直接确认注入。固定 SQL、绑定参数、可靠标识符白名单，以及不可达分支应继续核实，不能只按代码形态定级。
+
+## 核心判断
+
+SQL 注入必须区分普通值与数据库标识符：普通值应由占位符绑定，表名、列名、排序方向和原生表达式只能来自严格白名单。还需确认输入能到达最终执行分支，并存在错误、布尔、时间或数据回显通道。
+
+## 证据标准
+
+- 可确认：真实路由、输入到 SQL 片段映射、参数绑定缺口和执行结果证据闭合。
+- 待验证：发现动态拼接，但输入实际不可控、数据库分支不执行、白名单未核实或缺少回显通道。
+- 判为否：使用可靠参数绑定、动态标识符受固定 allowlist 约束，或危险分支在目标环境不可达。
+
+## 决策树
+
+- 找到 SQL sink：确认最终 SQL 字符串和绑定参数。
+- 值是可控：检查占位符与 ORM 参数绑定。
+- 标识符或 SQL 片段可控：检查是否只能选择固定 allowlist。
+- 存在数据库类型或配置分支：确认目标环境实际执行的分支。
+- 形成差异：用基线、对照和最小只读查询证明影响。
+
+## 常见误判
+
+- 所有字符串拼接都按 SQL 注入处理，包括安全的标识符映射。
+- 使用 `PreparedStatement` 就认为 SQL 全安全，忽略拼接的表名和排序。
+- 看到 `${}` 就确认可利用，未追踪其值是否受固定配置控制。
+- 把数据库语法错误或普通 500 当成注入成功。
+- 为验证注入执行写操作、拖库或影响真实业务数据。
+
 > **审计边界（本技能仅检测以下内容，不得超出此范围）：**
 > - ✅ SQL 注入漏洞（参数拼接、动态 SQL、ORDER BY 注入等）
 > - ✅ 参数化查询缺失
@@ -16,129 +50,11 @@ description: Java Web 源码 SQL 注入漏洞审计工具。从源码中定位�
 
 ---
 
-## 漏洞分级标准
+## 与路由分析协作（可选）
 
-**详见 [SEVERITY_RATING.md](../java-shared/SEVERITY_RATING.md)**
+已有路由映射结果时，可用于定位入口和参数；没有时直接从源码、字节码和当前审计目标开始，不要求检查或生成任何上游文件。
 
-- 漏洞编号格式: `{C/H/M/L}-SQL-{序号}`
-- 严重等级 = f(可达性 R, 影响范围 I, 利用复杂度 C)
-- Score = R × 0.40 + I × 0.35 + C × 0.25，映射 CVSS 3.1
-
----
-
-## 核心要求
-
-**此技能必须完整分析所有 SQL 相关代码，不允许省略。**
-
-- ✅ 识别所有 SQL 执行入口点（JDBC/MyBatis/Hibernate）
-- ✅ 分析每个 SQL 操作的参数化情况
-- ✅ 检测所有潜在的 SQL 注入模式
-- ✅ 为每个风险点提供验证 PoC
-- ❌ 禁止省略任何 SQL 操作
-- ❌ 禁止跳过反编译步骤
-
-### 禁止省略规则（强制）
-
-**报告中的所有列表和表格必须完整输出，禁止使用任何形式的省略：**
-
-| 禁止写法 | 正确做法 |
-|:---------|:---------|
-| `{...省略...}` | 完整列出所有条目 |
-| `... (其他N个)` | 完整列出所有条目 |
-| `等等` / `etc.` | 完整列出所有条目 |
-| `以此类推` | 完整列出所有条目 |
-| `更多见xxx` | 在当前位置完整列出 |
-
-**示例 - 错误写法：**
-```markdown
-| # | 方法名 | 说明 |
-|---|--------|------|
-| 1 | getCommonQuery | 通用查询 |
-| 2 | getCollisionQuery | 碰撞查询 |
-|{...省略...}| ... | ... |    ← ❌ 禁止
-```
-
-**示例 - 正确写法：**
-```markdown
-| # | 方法名 | 说明 |
-|---|--------|------|
-| 1 | getCommonQuery | 通用查询 |
-| 2 | getCollisionQuery | 碰撞查询 |
-| 3 | getIntervalQuery | 区间查询 |
-| ... | ... | ... |
-| 23 | getNewStaypointQuery | 新停留点查询 |    ← ✅ 完整列出
-```
-
-**必须完整列出的内容：**
-- 受影响的方法列表
-- SQL 操作映射表
-- 漏洞详情列表
-- 参数列表
-- 验证 Payload 列表
-
----
-
-## 技能协作流程（CRITICAL）
-
-**java-sql-audit 应在 java-route-mapper 之后执行，基于已梳理的路由信息进行审计。**
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    完整审计流程                                  │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  [步骤1] java-route-mapper                                      │
-│     │                                                           │
-│     │ 输出：                                                    │
-│     │ ├─ 所有 HTTP 路由列表                                     │
-│     │ ├─ 每个路由的参数定义                                     │
-│     │ │   ├─ 参数名、类型                                       │
-│     │ │   └─ JSON 内部字段（如 pageJson.orderBy）               │
-│     │ └─ Burp Suite 请求模板                                    │
-│     │                                                           │
-│     ↓                                                           │
-│  [步骤2] java-sql-audit（本技能）                               │
-│     │                                                           │
-│     │ 输入：java-route-mapper 的输出                            │
-│     │                                                           │
-│     │ 执行：                                                    │
-│     │ ├─ 快速扫描高危文件                                       │
-│     │ ├─ 参数-SQL 映射分析                                      │
-│     │ ├─ 检查每个 String 参数是否进入 SQL                       │
-│     │ └─ 执行条件分析                                           │
-│     │                                                           │
-│     ├─── 需要深入追踪 ───→ java-route-tracer                    │
-│     │                           │                               │
-│     │    ←── 返回调用链信息 ────┘                               │
-│     │                                                           │
-│     ↓                                                           │
-│  [步骤3] 输出综合审计报告                                       │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-### 输入依赖（来自 java-route-mapper）
-
-**在开始审计前，必须检查是否已有 java-route-mapper 的输出文件：**
-
-```
-{project_name}_audit/
-├── route_mapper/
-│   ├── {project_name}_route_mapper_{timestamp}.md    ← 主索引（先读此文件定位模块详情）
-│   ├── {module_name}/
-│   │   └── {project_name}_module_{module_name}_{timestamp}.md  ← 模块详情
-│   └── webservice/
-│       └── {project_name}_ws_{service_name}_{timestamp}.md
-└── sql_audit/
-    └── {project_name}_sql_audit_{timestamp}.md  ← 本技能输出
-```
-
-**如果 route_mapper 输出不存在，必须先运行（未运行则停止审计，返回错误提示）：**
-```python
-Skill(skill="java-route-mapper", args="--project {project_path}")
-```
-
-### 从 route_mapper 获取的关键信息
+### 已有路由结果时可利用的信息
 
 | 信息 | 用途 |
 |:-----|:-----|
@@ -265,22 +181,13 @@ sql.append(" order by ").append(page.getOrderBy())  ← SQL 拼接点
 
 ### 3. 反编译阶段（CRITICAL）
 
-**当源码不可用时，必须使用 CFR 反编译器反编译 SQL 相关类。**
+**当源码不可用时，按运行环境中可用的反编译能力处理 SQL 相关类。**
 
 详细策略参见 [DECOMPILE_STRATEGY.md](references/DECOMPILE_STRATEGY.md)
 
 #### 3.1 反编译工具调用
 
-```bash
-# 反编译单个 DAO/Mapper 类
-java -jar {CFR_JAR} /path/to/UserMapper.class --outputdir {output_path}/decompiled
-
-# 反编译 DAO 相关目录
-find /path/to/WEB-INF/classes/com/example/dao -name "*.class" | xargs java -jar {CFR_JAR} --outputdir {output_path}/decompiled
-
-# 反编译多个指定文件
-java -jar {CFR_JAR} /path/to/UserDao.class /path/to/OrderService.class /path/to/BaseMapper.class --outputdir {output_path}/decompiled
-```
+可使用运行环境中可用的反编译工具。内置 `java_decompile`、CFR、`javap` 等均可作为候选，按实际能力和结果选择。
 
 #### 3.2 必须反编译的类
 
@@ -362,7 +269,7 @@ public String getSql(QueryBean bean, List<Object> params) {
 
 ### 5. 报告输出要求
 
-**发现 SQL 拼接时，必须在报告中包含：**
+**发现 SQL 拼接时，可在报告中包含：**
 
 ```markdown
 ### 执行条件分析
@@ -463,9 +370,9 @@ grep -ri "limit\s|offset\s|rownum|row_number" --include="*.java"
 
 ## 审计检查清单（防遗漏）
 
-### 必须搜索的危险模式
+### 可参考的危险模式搜索
 
-**在审计开始时，必须执行以下搜索：**
+**需要快速定位时，可参考以下搜索；是否执行由当前证据缺口决定：**
 
 ```bash
 # ORDER BY 注入检测
@@ -490,7 +397,7 @@ find . -name "Abstract*Dao*.java" -o -name "Base*Support*.java"
 
 ### 何时需要参数追踪
 
-当发现以下情况时，**必须调用 java-route-tracer 技能进行深度追踪**：
+当发现以下情况时，**可考虑调用 java-route-tracer 技能进行深度追踪**；是否调用由当前证据缺口和审计收益决定：
 
 | 场景 | 说明 | 操作 |
 |------|------|------|
@@ -499,9 +406,7 @@ find . -name "Abstract*Dao*.java" -o -name "Base*Support*.java"
 | 父类/基类 SQL 执行 | SQL 执行在父类 AbstractDao 等基类中 | 加载 java-route-tracer |
 | 变量名多次变化 | 同一参数在不同层使用不同变量名 | 加载 java-route-tracer |
 
-### 自动触发 java-route-tracer（Claude Code 规范）
-
-当发现以下场景时，**必须自动调用 java-route-tracer 技能**：
+当发现以下场景时，**可考虑调用 java-route-tracer 技能**：
 
 ```python
 # 当需要追踪参数流向时，自动调用 java-route-tracer
@@ -515,7 +420,7 @@ Skill(
 
 ### 基于 tracer 输出的漏洞判定（CRITICAL - 防止误判）
 
-**java-sql-audit 必须基于 java-route-tracer 的"参数实际使用分析"输出进行漏洞判定。**
+**java-sql-audit 可优先参考 java-route-tracer 的“参数实际使用分析”输出；没有 tracer 输出时也可直接基于源码证据判断。**
 
 #### 判定流程
 
@@ -569,7 +474,7 @@ Skill(
 | **结论** | ✅ **确认漏洞** - 参数直接拼接到 SQL |
 ```
 
-#### 必须检查的 tracer 输出字段
+#### 可参考的 tracer 输出字段
 
 | tracer 输出字段 | 用途 |
 |:----------------|:-----|
@@ -622,62 +527,3 @@ java-sql-audit                    java-route-tracer
 
 ---
 
-## 报告生成
-
-**输出单个综合审计报告文件：**
-
-```
-{project_name}_audit/sql_audit/
-└── {route_name}/
-    └── {project_name}_sql_audit_{timestamp}.md      # 综合审计报告
-```
-
-**路由名说明：**
-- 路由名从路由路径提取，去掉前缀斜杠和特殊字符
-- 例如：`/biz/ws/userService` → `biz_ws_userService`
-- 例如：`/api/user/login.action` → `api_user_login`
-
----
-
-## 输出格式
-
-**严格按照 [references/OUTPUT_TEMPLATE.md](references/OUTPUT_TEMPLATE.md) 中的填充式模板生成输出文件。**
-
-- 文件名格式: `{project_name}_sql_audit_{YYYYMMDD_HHMMSS}.md`
-- 不得修改模板结构、不得增删章节、不得调整顺序
-- 所有【填写】占位符必须替换为实际内容
-- 通用规范参考: [java-shared/OUTPUT_STANDARD.md](../java-shared/OUTPUT_STANDARD.md)
-
----
-
-## 验证检查清单
-
-**在标记审计完成前，必须执行以下检查：**
-
-### 代码分析检查
-- [ ] 所有 DAO/Mapper 类已分析
-- [ ] 所有 SQL 配置文件（*Mapper.xml）已解析
-- [ ] 每个 SQL 操作都有参数化状态标注
-
-### 执行条件检查（CRITICAL）
-- [ ] 检查了数据库类型分支（isOracle/isMySQL）
-- [ ] 分析了代码路径可达性
-- [ ] 标注了每个漏洞的可利用性状态
-
-### 漏洞检测检查
-- [ ] 所有 JDBC 拼接模式已检测
-- [ ] 所有 MyBatis ${} 使用已检测
-- [ ] 所有 Hibernate HQL 拼接已检测
-
-### 报告完整性检查
-- [ ] **综合审计报告已生成，且通过 OUTPUT_TEMPLATE.md 末尾的自检清单**
-
----
-
-## 参考资料
-
-- [OUTPUT_TEMPLATE.md](references/OUTPUT_TEMPLATE.md) - 输出报告填充式模板
-- [JDBC.md](references/JDBC.md) - JDBC SQL 注入审计详解
-- [MYBATIS.md](references/MYBATIS.md) - MyBatis SQL 注入审计详解
-- [HIBERNATE.md](references/HIBERNATE.md) - Hibernate SQL 注入审计详解
-- [DECOMPILE_STRATEGY.md](references/DECOMPILE_STRATEGY.md) - 反编译策略指南

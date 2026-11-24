@@ -13,6 +13,8 @@ func TestToolInventorySplitsDirectAndSearchable(t *testing.T) {
 	service, err := NewService(nil, config.Config{AgentMock: true}, []tool.BaseTool{
 		newFakeMCPTool("sophon-tool-runner", "exec", "执行命令", "command"),
 		newFakeMCPTool("sophon-tool-runner", "execute-python-script", "执行脚本", "script"),
+		newFakeMCPTool("sophon-tool-runner", "install-python-package", "安装 Python 依赖", "package"),
+		newFakeMCPTool("sophon-tool-runner", "java_decompile", "反编译 Java 产物", "artifact_path"),
 		newFakeMCPTool("sophon-tool-runner", "nmap", "端口扫描", "target"),
 	}, nil)
 	if err != nil {
@@ -68,6 +70,16 @@ func TestToolInventorySplitsDirectAndSearchable(t *testing.T) {
 	}
 	if exec.Capability != "destructive" {
 		t.Fatalf("exec 默认能力标签应为 destructive: %s", exec.Capability)
+	}
+	if decompile, ok := direct["java_decompile"]; !ok ||
+		decompile.ServerName != "sophon-tool-runner" ||
+		decompile.QualifiedName != "sophon-tool-runner__java_decompile" {
+		t.Fatalf("Java 反编译工具应直接暴露: %#v", decompile)
+	}
+	if install, ok := direct["install-python-package"]; !ok ||
+		install.ServerName != "sophon-tool-runner" ||
+		install.Capability != "destructive" {
+		t.Fatalf("Python 依赖安装工具应直接暴露: %#v", install)
 	}
 	if _, ok := direct["nmap"]; ok {
 		t.Fatalf("可搜索的 MCP 工具不应出现在直连清单")

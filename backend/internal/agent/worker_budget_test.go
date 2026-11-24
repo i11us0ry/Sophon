@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -73,9 +74,13 @@ func TestWorkerBudgetAccumulatesCPUUsage(t *testing.T) {
 	if ctx.Err() != nil {
 		t.Fatalf("CPU 预算耗尽后不应取消 Worker: %v", ctx.Err())
 	}
-	if _, err := invokable.InvokableRun(ctx, `{"command":"echo three"}`); err == nil ||
-		!strings.Contains(err.Error(), "CPU 预算已耗尽") {
-		t.Fatalf("CPU 预算耗尽后应拒绝调用，实际 err=%v", err)
+	result, err := invokable.InvokableRun(ctx, `{"command":"echo three"}`)
+	if err != nil {
+		t.Fatalf("CPU 预算耗尽不应中断工具流: %v", err)
+	}
+	header, body, ok := parseToolResult(result)
+	if !ok || header.Status != toolResultStatusBlocked || !strings.Contains(body, "CPU 预算已耗尽") {
+		t.Fatalf("CPU 预算耗尽应返回 blocked 结果: %+v body=%q", header, body)
 	}
 }
 
@@ -84,6 +89,7 @@ func TestWorkerToolRunnerUsesRemainingCPUBudget(t *testing.T) {
 	defer cancel()
 	ctx := execctx.WithConversationID(base, "conv-cpu-inject")
 	ctx = execctx.WithUserID(ctx, "user-1")
+	ctx = execctx.WithProjectID(ctx, "project-cpu-inject")
 	ctx = execctx.WithSubagent(ctx, execctx.SubagentInfo{
 		ID:           "sub-cpu-inject",
 		Kind:         "worker",
@@ -152,12 +158,97 @@ func TestWorkerBudgetRejectsAfterToolLimitWithoutCancelling(t *testing.T) {
 	if _, err := invokable.InvokableRun(ctx, `{"command":"echo one"}`); err != nil {
 		t.Fatalf("第一次调用应成功: %v", err)
 	}
-	if _, err := invokable.InvokableRun(ctx, `{"command":"echo two"}`); err == nil ||
-		!strings.Contains(err.Error(), "预算已耗尽") {
-		t.Fatalf("第二次调用应触发预算错误，实际 err=%v", err)
+	result, err := invokable.InvokableRun(ctx, `{"command":"echo two"}`)
+	if err != nil {
+		t.Fatalf("预算超限不应中断工具流: %v", err)
+	}
+	header, body, ok := parseToolResult(result)
+	if !ok || header.Status != toolResultStatusBlocked || !strings.Contains(body, "预算已耗尽") {
+		t.Fatalf("第二次调用应触发非致命预算阻断: %+v body=%q", header, body)
 	}
 	if ctx.Err() != nil {
 		t.Fatalf("预算超限后不应取消 Worker context: %v", ctx.Err())
+	}
+}
+
+func TestWorkerStateQueryCircuitBreaksAfterNoProgress(t *testing.T) {
+	fake := newFakeMCPTool("sophon-tool-runner", "project_list", "读取项目列表", "resource")
+	fake.result = "当前项目没有匹配的资产。"
+	base, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ctx := execctx.WithSubagent(base, execctx.SubagentInfo{
+		ID:   "sub-state-circuit",
+		Kind: "worker",
+	})
+	ctx = withWorkerBudget(ctx, config.Config{AgentSubagentMaxToolCalls: 10}, cancel)
+	wrapped := wrapWorkerBudgetTools(ctx, []tool.BaseTool{fake})
+	invokable := wrapped[0].(tool.InvokableTool)
+	if _, err := invokable.InvokableRun(ctx, `{"resource":"assets"}`); err != nil {
+		t.Fatalf("第一次状态查询失败: %v", err)
+	}
+	result, err := invokable.InvokableRun(ctx, `{"resource":"assets"}`)
+	if err != nil {
+		t.Fatalf("熔断不应中断工具流: %v", err)
+	}
+	header, body, ok := parseToolResult(result)
+	if !ok || header.Status != toolResultStatusBlocked ||
+		!strings.Contains(body, "已返回无进展结果") {
+		t.Fatalf("重复无进展查询应被熔断: %+v body=%q", header, body)
+	}
+	if len(fake.calls) != 1 {
+		t.Fatalf("熔断后不应再次执行底层工具: %+v", fake.calls)
+	}
+}
+
+func TestWorkerStateCircuitIsScopedByProjectListResource(t *testing.T) {
+	fake := newFakeMCPTool("sophon-tool-runner", "project_list", "读取项目列表", "resource")
+	fake.result = "当前项目没有匹配的资产。"
+	base, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ctx := execctx.WithSubagent(base, execctx.SubagentInfo{ID: "sub-state-scope", Kind: "worker"})
+	ctx = withWorkerBudget(ctx, config.Config{AgentSubagentMaxToolCalls: 10}, cancel)
+	wrapped := wrapWorkerBudgetTools(ctx, []tool.BaseTool{fake})
+	invokable := wrapped[0].(tool.InvokableTool)
+	if _, err := invokable.InvokableRun(ctx, `{"resource":"assets"}`); err != nil {
+		t.Fatalf("资产查询失败: %v", err)
+	}
+	fake.result = "假设列表正常"
+	result, err := invokable.InvokableRun(ctx, `{"resource":"hypotheses"}`)
+	if err != nil || !strings.Contains(result, "假设列表正常") {
+		t.Fatalf("其他 resource 不应被资产查询熔断: result=%q err=%v", result, err)
+	}
+	if len(fake.calls) != 2 {
+		t.Fatalf("不同 resource 应正常执行底层工具: %+v", fake.calls)
+	}
+}
+
+func TestWorkerBlockedCallsReachBoundedStop(t *testing.T) {
+	fake := newFakeMCPTool("sophon-tool-runner", "exec", "执行命令", "command")
+	base, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ctx := execctx.WithSubagent(base, execctx.SubagentInfo{ID: "sub-budget-stop", Kind: "worker"})
+	ctx = withWorkerBudget(ctx, config.Config{AgentSubagentMaxToolCalls: 1}, cancel)
+	wrapped := wrapWorkerBudgetTools(ctx, []tool.BaseTool{fake})
+	invokable := wrapped[0].(tool.InvokableTool)
+	if _, err := invokable.InvokableRun(ctx, `{"command":"echo one"}`); err != nil {
+		t.Fatalf("首次调用失败: %v", err)
+	}
+	for attempt := 1; attempt < workerBlockedCallLimit; attempt++ {
+		if _, err := invokable.InvokableRun(ctx, `{"command":"echo blocked"}`); err != nil {
+			t.Fatalf("第 %d 次超预算调用应为非致命 blocked: %v", attempt, err)
+		}
+	}
+	if _, err := invokable.InvokableRun(ctx, `{"command":"echo hard-stop"}`); !errors.Is(err, context.Canceled) {
+		t.Fatalf("连续超预算调用应强制结束 Worker，实际: %v", err)
+	}
+}
+
+func TestWorkerBudgetGuidanceShowsUnlimited(t *testing.T) {
+	service := &Service{cfg: config.Config{AgentSubagentMaxToolCalls: 0}}
+	guidance := service.workerBudgetGuidance()
+	if !strings.Contains(guidance, "工具调用上限：不限") ||
+		strings.Contains(guidance, "工具调用上限：80 次") {
+		t.Fatalf("Worker 工具预算应显示为不限: %s", guidance)
 	}
 }
 
@@ -175,7 +266,7 @@ func TestControlledJobCompletesAndPersistsCheckpoint(t *testing.T) {
 			AgentSubagentMaxToolCalls: 20,
 		},
 		tools: []tool.BaseTool{fake},
-		jobs:  map[string]context.CancelFunc{},
+		jobs:  map[string]toolJobHandle{},
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -235,7 +326,7 @@ func TestControlledJobResumesFromCheckpoint(t *testing.T) {
 		db:    db,
 		cfg:   config.Config{AgentSubagentMaxToolCalls: 20},
 		tools: []tool.BaseTool{fake},
-		jobs:  map[string]context.CancelFunc{},
+		jobs:  map[string]toolJobHandle{},
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -262,7 +353,7 @@ func TestControlledJobResumesFromCheckpoint(t *testing.T) {
 	}
 }
 
-func TestControlledJobCancelsWithConversationContext(t *testing.T) {
+func TestConversationStopCancelsControlledJob(t *testing.T) {
 	db, err := database.Open(filepath.Join(t.TempDir(), "job-cancel.db"))
 	if err != nil {
 		t.Fatalf("打开数据库失败: %v", err)
@@ -272,9 +363,9 @@ func TestControlledJobCancelsWithConversationContext(t *testing.T) {
 	service := &Service{
 		db:    db,
 		tools: []tool.BaseTool{blocking},
-		jobs:  map[string]context.CancelFunc{},
+		jobs:  map[string]toolJobHandle{},
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx := context.Background()
 	ctx = execctx.WithConversationID(ctx, "conv-job-cancel")
 	ctx = execctx.WithUserID(ctx, "user-1")
 	ctx = execctx.WithSubagent(ctx, execctx.SubagentInfo{ID: "sub-job-cancel", Kind: "worker"})
@@ -287,7 +378,9 @@ func TestControlledJobCancelsWithConversationContext(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatalf("Job 未开始执行")
 	}
-	cancel()
+	if cancelled := service.CancelConversationJobs("conv-job-cancel", "user-1"); cancelled != 1 {
+		t.Fatalf("应取消 1 个会话 Job，实际 %d", cancelled)
+	}
 	dedupKey := jobDedupKey("sub-job-cancel", "cancel", []string{"blocking"})
 	var job *database.ToolJob
 	deadline := time.Now().Add(time.Second)
@@ -324,9 +417,9 @@ func TestConcurrentJobResumeStartsOnlyOnce(t *testing.T) {
 	service := &Service{
 		db:    db,
 		tools: []tool.BaseTool{blocking},
-		jobs:  map[string]context.CancelFunc{},
+		jobs:  map[string]toolJobHandle{},
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx := context.Background()
 	ctx = execctx.WithConversationID(ctx, "conv-job-race")
 	ctx = execctx.WithUserID(ctx, "user-1")
 	ctx = execctx.WithSubagent(ctx, execctx.SubagentInfo{ID: "sub-job-race", Kind: "worker"})
@@ -352,7 +445,9 @@ func TestConcurrentJobResumeStartsOnlyOnce(t *testing.T) {
 			t.Fatalf("Resume 返回错误: %v", err)
 		}
 	}
-	cancel()
+	if cancelled := service.CancelConversationJobs("conv-job-race", "user-1"); cancelled != 1 {
+		t.Fatalf("应取消 1 个并发恢复 Job，实际 %d", cancelled)
+	}
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
 		job, err = db.GetToolJob(context.Background(), job.ID, "user-1")

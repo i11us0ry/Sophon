@@ -33,6 +33,41 @@ func missionTestAssets() []database.Asset {
 	}
 }
 
+func TestCoordinatedMainInstructionUsesOperatorRole(t *testing.T) {
+	ctx := withCoordinatedBackgroundActive(context.Background())
+	instruction := agentInstructionForMission(
+		ctx,
+		agentModeDeep,
+		missionPlan{
+			Mode:        missionModeAgent,
+			Coordinated: true,
+			Objective:   "testxc.xmfactory.com\n不限手段挖掘可用漏洞",
+			PentestTargets: []string{
+				"testxc.xmfactory.com",
+			},
+		},
+		missionPhaseGeneral,
+	)
+	for _, want := range []string{
+		"人类操作员与 Planner/Worker 之间的接口",
+		"你不亲自探索目标",
+		"orchestrator_control(action=\"worker_output\"",
+		"当前任务目标：testxc.xmfactory.com",
+	} {
+		if !strings.Contains(instruction, want) {
+			t.Fatalf("协调模式主 Agent 指令缺少 %q: %s", want, instruction)
+		}
+	}
+	for _, forbidden := range []string{
+		"执行流程由你决定",
+		"你可以直接执行",
+	} {
+		if strings.Contains(instruction, forbidden) {
+			t.Fatalf("协调模式主 Agent 不应包含直接执行说明 %q: %s", forbidden, instruction)
+		}
+	}
+}
+
 type fixedRouterModel struct {
 	content     string
 	routerCalls int
@@ -438,7 +473,7 @@ func TestScopedSubagentHandoffAllowsUnresolvedTarget(t *testing.T) {
 	}
 }
 
-func TestProjectWriteIntentUsesOnlyProjectTools(t *testing.T) {
+func TestProjectWriteIntentKeepsNormalToolsAvailable(t *testing.T) {
 	plan := normalizeMissionPlan(missionPlan{
 		Mode:       missionModeProjectWrite,
 		WriteTools: []string{"project_update_finding"},
@@ -463,12 +498,12 @@ func TestProjectWriteIntentUsesOnlyProjectTools(t *testing.T) {
 		plan,
 		missionPhaseGeneral,
 	))
-	if !names["project_update_finding"] || names["exec"] {
-		t.Fatalf("项目写模式工具白名单错误: %+v", names)
+	if !names["project_update_finding"] || !names["exec"] {
+		t.Fatalf("主 Agent 应保留工具选择权: %+v", names)
 	}
 }
 
-func TestProjectWriteFinalizationRequiresMutation(t *testing.T) {
+func TestProjectWriteFinalizationDoesNotRequireSpecificMutation(t *testing.T) {
 	service, ctx := openProjectToolService(t, true)
 	ctx = withMissionExecution(ctx, missionExecution{
 		Plan: missionPlan{
@@ -489,22 +524,8 @@ func TestProjectWriteFinalizationRequiresMutation(t *testing.T) {
 		capture,
 		"已经完成更新。",
 	)
-	if decision.Allowed {
-		t.Fatalf("没有实际项目写操作时不应最终化")
-	}
-	capture.recordToolCall("write-call", "project_update_finding")
-	capture.recordToolResult("write-call")
-	decision = service.checkFinalization(
-		ctx,
-		"conv-tools",
-		"project-tools",
-		"user-1",
-		time.Now().UTC().Add(-time.Second),
-		capture,
-		"已经完成更新。",
-	)
 	if !decision.Allowed {
-		t.Fatalf("实际执行项目写操作后应允许最终化: %+v", decision.Reasons)
+		t.Fatalf("收尾不应要求某个特定项目写工具: %+v", decision.Reasons)
 	}
 }
 
@@ -651,8 +672,8 @@ func TestSpecificFindingAuditBindsUniqueFindingAndLocksBudget(t *testing.T) {
 		plan.AllowFollowUps {
 		t.Fatalf("单漏洞核验应绑定唯一漏洞并锁定预算: %+v", plan)
 	}
-	if mode := resolveAgentMode(agentModeDeep, agentModeDeep, plan); mode != agentModeFast {
-		t.Fatalf("单漏洞核验应强制 Fast Path，实际 %s", mode)
+	if mode := resolveAgentMode(agentModeDeep, agentModeDeep, plan); mode != agentModeDeep {
+		t.Fatalf("单漏洞核验也应使用多 Agent，实际 %s", mode)
 	}
 	boundedCtx := withMissionExecution(ctx, missionExecution{
 		Plan:      plan,
@@ -872,6 +893,58 @@ func TestResumeCodeAuditRehydratesProjectSourceAttachment(t *testing.T) {
 	}
 }
 
+func TestResumeLegacyAgentPlanKeepsMainAgentAutonomy(t *testing.T) {
+	service, ctx := openProjectToolService(t, true)
+	root := t.TempDir()
+	service.cfg.Storage.ArtifactRoot = root
+	now := time.Now().UTC()
+	if err := service.db.CreateConversation(ctx, database.Conversation{
+		ID: "conv-resume-legacy-agent", OwnerUserID: "user-1", ProjectID: "project-tools",
+		Title: "恢复旧主 Agent 计划", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("创建恢复会话失败: %v", err)
+	}
+	sourcePath := filepath.Join(root, "chat_uploads", "conv-resume-legacy-agent", "WebSite.zip")
+	if err := os.MkdirAll(filepath.Dir(sourcePath), 0o700); err != nil {
+		t.Fatalf("创建源码目录失败: %v", err)
+	}
+	if err := os.WriteFile(sourcePath, []byte("source"), 0o600); err != nil {
+		t.Fatalf("写入源码附件失败: %v", err)
+	}
+	if err := service.db.AddAttachment(ctx, database.Attachment{
+		ID: "att-resume-legacy-agent", ConversationID: "conv-resume-legacy-agent",
+		FileName: "WebSite.zip", StoragePath: "conv-resume-legacy-agent/WebSite.zip",
+		CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("写入项目附件失败: %v", err)
+	}
+	state := &missionProgressState{
+		IntentPlan: &missionPlan{
+			Mode:       missionModeAgent,
+			Objective:  "请对上传源码进行代码审计",
+			Confidence: 100,
+		},
+		MissionPhase: missionPhaseGeneral,
+	}
+	plan := service.resolveMissionPlan(
+		ctx,
+		"conv-resume-legacy-agent",
+		"user-1",
+		"assistant-resume-legacy-agent",
+		missionTestProject(),
+		database.Conversation{
+			ID: "conv-resume-legacy-agent", OwnerUserID: "user-1", ProjectID: "project-tools",
+		},
+		nil,
+		"继续",
+		state,
+		RunOptions{ResumeOf: "run-resume-legacy-agent"},
+	)
+	if plan.Coordinated || plan.Mode != missionModeAgent {
+		t.Fatalf("恢复主 Agent 计划时不应自动升级为强制编排: %+v", plan)
+	}
+}
+
 func TestEnsureMissionSourceRootsUsesProjectUploads(t *testing.T) {
 	service, ctx := openProjectToolService(t, true)
 	root := t.TempDir()
@@ -909,27 +982,108 @@ func TestEnsureMissionSourceRootsUsesProjectUploads(t *testing.T) {
 	}
 }
 
-func TestMissionInputPathBoundary(t *testing.T) {
+func TestDirectPlanDoesNotAutoCoordinateForProjectSource(t *testing.T) {
+	service, ctx := openProjectToolService(t, true)
 	root := t.TempDir()
-	sourceDir := filepath.Join(root, "tmp", "workspace", "conv-path", "src")
+	service.cfg.Storage.ArtifactRoot = root
+	now := time.Now().UTC()
+	if err := service.db.CreateConversation(ctx, database.Conversation{
+		ID: "conv-coordinated-source", OwnerUserID: "user-1", ProjectID: "project-tools",
+		Title: "强制编排源码", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("创建源码会话失败: %v", err)
+	}
+	sourcePath := filepath.Join(root, "chat_uploads", "conv-coordinated-source", "WebSite.zip")
+	if err := os.MkdirAll(filepath.Dir(sourcePath), 0o700); err != nil {
+		t.Fatalf("创建源码目录失败: %v", err)
+	}
+	if err := os.WriteFile(sourcePath, []byte("source"), 0o600); err != nil {
+		t.Fatalf("写入源码附件失败: %v", err)
+	}
+	if err := service.db.AddAttachment(ctx, database.Attachment{
+		ID: "att-coordinated-source", ConversationID: "conv-coordinated-source",
+		FileName: "WebSite.zip", StoragePath: "conv-coordinated-source/WebSite.zip",
+		CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("写入项目附件失败: %v", err)
+	}
+	plan := service.coordinatedDirectMainAgentPlan(
+		ctx,
+		"user-1",
+		"project-tools",
+		missionTestProject(),
+		database.Conversation{ID: "conv-coordinated-source", ProjectID: "project-tools"},
+		nil,
+		"请对所有已上传源码做代码审计，寻找命令执行和反序列化漏洞",
+	)
+	if plan.Coordinated || plan.Mode != missionModeAgent {
+		t.Fatalf("源码附件不应自动启用强制编排: %+v", plan)
+	}
+}
+
+func TestDirectPlanCoordinatesExplicitTarget(t *testing.T) {
+	service := &Service{}
+	message := "falcon.example.com"
+	plan := directMainAgentPlan(
+		missionTestProject(),
+		database.Conversation{},
+		nil,
+		message,
+	)
+	plan = service.coordinateMainAgentPlan(
+		context.Background(),
+		"user-1",
+		"project-tools",
+		"conv-target",
+		plan,
+		message,
+	)
+	if !plan.Coordinated {
+		t.Fatalf("明确测试目标应启用 Planner/Worker 协调: %+v", plan)
+	}
+	if !strings.Contains(plan.Reason, "Planner/Worker") {
+		t.Fatalf("应记录自动协调原因: %s", plan.Reason)
+	}
+}
+
+func TestDirectPlanDoesNotAutoCoordinateForExtractedSource(t *testing.T) {
+	service, ctx := openProjectToolService(t, true)
+	root := t.TempDir()
+	service.cfg.Storage.ArtifactRoot = root
+	sourceDir := filepath.Join(root, "tmp", "workspace", "conv-tools", "src")
 	if err := os.MkdirAll(sourceDir, 0o700); err != nil {
 		t.Fatalf("创建源码目录失败: %v", err)
 	}
-	service := &Service{cfg: config.Config{Storage: config.StorageConfig{ArtifactRoot: root}}}
-	valid := service.validateMissionInputPaths(context.Background(), "conv-path", missionPlan{
-		Mode:        missionModeCodeAudit,
-		SourceRoots: []string{sourceDir},
-	})
-	if valid.Mode == missionModeClarify {
-		t.Fatalf("合法源码目录不应被拒绝: %+v", valid)
+	if err := os.WriteFile(filepath.Join(sourceDir, "Login.java"), []byte("class Login {}"), 0o600); err != nil {
+		t.Fatalf("写入源码文件失败: %v", err)
 	}
-	outside := t.TempDir()
-	invalid := service.validateMissionInputPaths(context.Background(), "conv-path", missionPlan{
-		Mode:        missionModeCodeAudit,
-		SourceRoots: []string{outside},
-	})
-	if invalid.Mode != missionModeClarify {
-		t.Fatalf("存储根目录外路径必须拒绝: %+v", invalid)
+	plan := service.coordinatedDirectMainAgentPlan(
+		ctx,
+		"user-1",
+		"project-tools",
+		missionTestProject(),
+		database.Conversation{ID: "conv-tools", ProjectID: "project-tools"},
+		nil,
+		"看看这里有没有问题",
+	)
+	if plan.Coordinated || plan.Mode != missionModeAgent {
+		t.Fatalf("工作区源码不应自动启用强制编排: %+v", plan)
+	}
+}
+
+func TestDirectMainAgentPlanKeepsPathWithoutPrevalidation(t *testing.T) {
+	path := "/opt/sophon/tmp/workspace/old-conversation/x.png_a_x_00001_2_.aspx"
+	plan := directMainAgentPlan(
+		missionTestProject(),
+		database.Conversation{},
+		nil,
+		"审计源码 "+path,
+	)
+	if plan.Mode != missionModeAgent {
+		t.Fatalf("普通请求应直接交给主 Agent: %+v", plan)
+	}
+	if !strings.Contains(plan.Objective, path) {
+		t.Fatalf("路径应原样作为主 Agent 上下文，而不是提前拒绝: %+v", plan)
 	}
 }
 
@@ -995,102 +1149,6 @@ func containsString(values []string, target string) bool {
 	return false
 }
 
-func TestMissionInputPathAllowsRegisteredSameProjectConversationUpload(t *testing.T) {
-	root := t.TempDir()
-	db, err := database.Open(filepath.Join(t.TempDir(), "source-root.db"))
-	if err != nil {
-		t.Fatalf("打开数据库失败: %v", err)
-	}
-	defer db.Close()
-	ctx := execctx.WithUserID(context.Background(), "user-1")
-	now := time.Now().UTC()
-	createProject := func(id string) {
-		if err := db.CreateProject(ctx, database.Project{
-			ID: id, OwnerUserID: "user-1", Name: id, Status: "active",
-			CreatedAt: now, UpdatedAt: now,
-		}); err != nil {
-			t.Fatalf("创建项目失败: %v", err)
-		}
-	}
-	createConversation := func(id, projectID string) {
-		if err := db.CreateConversation(ctx, database.Conversation{
-			ID: id, OwnerUserID: "user-1", ProjectID: projectID, Kind: "normal",
-			Title: id, CreatedAt: now, UpdatedAt: now,
-		}); err != nil {
-			t.Fatalf("创建会话失败: %v", err)
-		}
-	}
-	createProject("project-a")
-	createProject("project-b")
-	createConversation("current-conv", "project-a")
-	createConversation("source-conv", "project-a")
-	createConversation("other-project-conv", "project-b")
-	targetUploads := filepath.Join(root, "chat_uploads", "source-conv")
-	if err := os.MkdirAll(targetUploads, 0o700); err != nil {
-		t.Fatalf("创建上传目录失败: %v", err)
-	}
-	sourcePath := filepath.Join(targetUploads, "WebSite.zip")
-	if err := os.WriteFile(sourcePath, []byte("zip"), 0o600); err != nil {
-		t.Fatalf("写入源码包失败: %v", err)
-	}
-	if err := db.AddAttachment(ctx, database.Attachment{
-		ID: "att-source", ConversationID: "source-conv", FileName: "WebSite.zip",
-		StoragePath: "source-conv/WebSite.zip", SizeBytes: 3, CreatedAt: now,
-	}); err != nil {
-		t.Fatalf("添加上传记录失败: %v", err)
-	}
-	service := &Service{
-		db:  db,
-		cfg: config.Config{Storage: config.StorageConfig{ArtifactRoot: root}},
-	}
-	valid := service.validateMissionInputPaths(ctx, "current-conv", missionPlan{
-		Mode:        missionModeCodeAudit,
-		SourceRoots: []string{"source-conv/WebSite.zip", "./x.png_a_x_00001_2_.aspx"},
-	})
-	if valid.Mode == missionModeClarify {
-		t.Fatalf("同项目已登记跨会话源码应允许: %+v", valid)
-	}
-	resolvedSourcePath, err := filepath.EvalSymlinks(sourcePath)
-	if err != nil {
-		t.Fatalf("解析源码路径失败: %v", err)
-	}
-	if len(valid.SourceRoots) != 1 || valid.SourceRoots[0] != resolvedSourcePath {
-		t.Fatalf("应忽略误提取路径并保留合法源码: %v", valid.SourceRoots)
-	}
-	unregistered := filepath.Join(targetUploads, "project-common.zip")
-	if err := os.WriteFile(unregistered, []byte("zip"), 0o600); err != nil {
-		t.Fatalf("写入项目公共源码失败: %v", err)
-	}
-	common := service.validateMissionInputPaths(ctx, "current-conv", missionPlan{
-		Mode:        missionModeCodeAudit,
-		SourceRoots: []string{"source-conv/project-common.zip"},
-	})
-	if common.Mode == missionModeClarify {
-		t.Fatalf("同项目对话上传文件应可直接读取: %+v", common)
-	}
-
-	otherUploads := filepath.Join(root, "chat_uploads", "other-project-conv")
-	if err := os.MkdirAll(otherUploads, 0o700); err != nil {
-		t.Fatalf("创建跨项目上传目录失败: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(otherUploads, "WebSite.zip"), []byte("zip"), 0o600); err != nil {
-		t.Fatalf("写入跨项目源码失败: %v", err)
-	}
-	if err := db.AddAttachment(ctx, database.Attachment{
-		ID: "att-other", ConversationID: "other-project-conv", FileName: "WebSite.zip",
-		StoragePath: "other-project-conv/WebSite.zip", SizeBytes: 3, CreatedAt: now,
-	}); err != nil {
-		t.Fatalf("添加跨项目上传记录失败: %v", err)
-	}
-	invalid := service.validateMissionInputPaths(ctx, "current-conv", missionPlan{
-		Mode:        missionModeCodeAudit,
-		SourceRoots: []string{"other-project-conv/WebSite.zip"},
-	})
-	if invalid.Mode != missionModeClarify {
-		t.Fatalf("跨项目源码必须拒绝: %+v", invalid)
-	}
-}
-
 func TestCodeValidateUsesActiveProjectScopeAsRuntimeTarget(t *testing.T) {
 	project := database.Project{
 		ID: "project-target-fallback", OwnerUserID: "user-1", Name: "目标回退",
@@ -1112,98 +1170,6 @@ func TestCodeValidateUsesActiveProjectScopeAsRuntimeTarget(t *testing.T) {
 		len(plan.PentestTargets) != 1 ||
 		plan.PentestTargets[0] != "10.8.0.61" {
 		t.Fatalf("活动项目 Scope 应作为运行时验证目标: %+v", plan)
-	}
-}
-
-func TestMissionPolicyRejectsConfiguredDeniedPaths(t *testing.T) {
-	service := &Service{}
-	ctx := withMissionExecution(context.Background(), missionExecution{
-		Plan:  missionPlan{Mode: missionModeCodeAudit},
-		Phase: missionPhaseSourceAudit,
-	})
-	commands := []string{
-		"cat /opt/sophon/config.yml",
-		"cat /opt/sophon/config.yml.bak.20261113",
-		"cat /opt/sophon/.env",
-		"cat /opt/sophon/deploy/.env.production",
-		"cat /opt/sophon/data/.sophon-job-key",
-		"cat /opt/sophon/data/sophon.db",
-		"cat /opt/sophon/data/sophon.db-wal",
-		"find /opt/sophon/data/observability -type f",
-		"ls /opt/sophon/backend/internal",
-		"ls /opt/sophon/deploy/container",
-		"ls /opt/sophon/roles",
-		"ls /opt/sophon/roles.bak.20261109-audit-fix",
-		"ls /opt/sophon/skills",
-		"ls /opt/sophon/skills.bak.20261109-audit-fix",
-		"ls /opt/sophon/tools",
-		"ls /opt/sophon/tools.bak.20261016-tool-prune",
-		"ls /opt/sophon/scripts",
-		"ls /opt/sophon/thirdTools",
-		"ls /opt/sophon/mcp-servers",
-	}
-	for _, command := range commands {
-		if allowed, reason := service.missionToolDecision(ctx, "exec", map[string]interface{}{
-			"command": command,
-		}); allowed || !strings.Contains(reason, "命中敏感路径拒绝清单") {
-			t.Fatalf("拒绝清单路径应阻止执行: %s\nallowed=%v reason=%s", command, allowed, reason)
-		}
-	}
-}
-
-func TestMissionPolicyExecSkillFileRedirectsToReadSkill(t *testing.T) {
-	service := &Service{}
-	ctx := withMissionExecution(context.Background(), missionExecution{
-		Plan:  missionPlan{Mode: missionModeCodeAudit},
-		Phase: missionPhaseSourceAudit,
-	})
-	allowed, reason := service.missionToolDecision(ctx, "exec", map[string]interface{}{
-		"command": "cat /opt/sophon/skills/pentest-output-standards/SKILL.md",
-	})
-	if allowed {
-		t.Fatal("技能文件不应允许通过 exec 读取")
-	}
-	if !strings.Contains(reason, `read_skill(name="pentest-output-standards")`) {
-		t.Fatalf("拒绝提示应引导使用 read_skill: %s", reason)
-	}
-}
-
-func TestMissionPolicyAllowsPathsOutsideConfiguredDenyList(t *testing.T) {
-	service := &Service{}
-	ctx := withMissionExecution(context.Background(), missionExecution{
-		Plan:  missionPlan{Mode: missionModeCodeAudit},
-		Phase: missionPhaseSourceAudit,
-	})
-	commands := []string{
-		`cd "$SOPHON_WORKSPACE/kkgai" && grep -oE '"/[a-zA-Z0-9_\\-/{}]*admin[a-zA-Z0-9_\\-/{}]*"' app.js | sort -u`,
-		"cat /etc/passwd",
-		"cat /root/secret",
-		"cat /tmp/outside",
-		"cat /opt/sophon/tmp/workspace/2aaa0c34b46229caa8ec4aa7596b6027/api/session.json",
-		"echo blocked > /opt/sophon/tmp/workspace/2aaa0c34b46229caa8ec4aa7596b6027/result.txt",
-		"cat /opt/sophon/data/conversation_artifacts/2aaa0c34b46229caa8ec4aa7596b6027/result.txt",
-		"cat /opt/sophon/config.example.yml",
-	}
-	for _, command := range commands {
-		if allowed, reason := service.missionToolDecision(ctx, "exec", map[string]interface{}{
-			"command": command,
-		}); !allowed {
-			t.Fatalf("未命中拒绝清单的路径不应被拒绝: %s\n%s", command, reason)
-		}
-	}
-}
-
-func TestMissionPolicyDeniedPathFollowsSymlinkTarget(t *testing.T) {
-	target := "/opt/sophon/config.yml"
-	if _, err := os.Stat(target); err != nil {
-		t.Skip("当前测试环境不存在容器敏感路径")
-	}
-	link := filepath.Join(t.TempDir(), "config-link")
-	if err := os.Symlink(target, link); err != nil {
-		t.Skipf("无法创建符号链接: %v", err)
-	}
-	if !missionPathDenied(link) {
-		t.Fatalf("指向拒绝清单路径的符号链接必须拒绝: %s", link)
 	}
 }
 
@@ -1256,7 +1222,33 @@ func TestCodeAuditStageRespectsAssetRestriction(t *testing.T) {
 	}
 }
 
-func TestDeepCodeAuditMainAgentIsCoordinatorOnly(t *testing.T) {
+func TestRetestConversationInjectsRetestAgentPrompt(t *testing.T) {
+	service, ctx := openProjectToolService(t, true)
+	if err := EnsureSystemAgentRoles(context.Background(), service.db); err != nil {
+		t.Fatalf("初始化系统 Agent 失败: %v", err)
+	}
+	if err := service.db.SetConversationAgentRole(
+		ctx,
+		"conv-tools",
+		"user-1",
+		SystemRetestAgentID,
+	); err != nil {
+		t.Fatalf("设置复测会话角色失败: %v", err)
+	}
+	instruction := service.mainAgentInstruction(ctx)
+	for _, phrase := range []string{
+		"漏洞复测",
+		"Burp 格式数据包",
+		"Python 复现脚本",
+		"project_retest_finding",
+	} {
+		if !strings.Contains(instruction, phrase) {
+			t.Fatalf("复测会话未注入专用 Prompt，缺少 %q", phrase)
+		}
+	}
+}
+
+func TestDeepCodeAuditMainAgentKeepsExecutionTools(t *testing.T) {
 	root := t.TempDir()
 	source := filepath.Join(root, "tmp", "workspace", "conv-coordinator", "src")
 	if err := os.MkdirAll(source, 0o700); err != nil {
@@ -1266,28 +1258,34 @@ func TestDeepCodeAuditMainAgentIsCoordinatorOnly(t *testing.T) {
 	ctx := execctx.WithConversationID(context.Background(), "conv-coordinator")
 	ctx = withMissionExecution(ctx, missionExecution{
 		Plan: missionPlan{
-			Mode:        missionModeCodeAudit,
+			Mode:        missionModeAgent,
+			Coordinated: true,
 			SourceRoots: []string{source},
 		},
 		Phase:     missionPhaseSourceAudit,
 		AgentMode: agentModeDeep,
 	})
-	for _, toolName := range []string{"exec", "execute-python-script", readSkillToolName, mcpUseToolName, pentToolExecute} {
+	for _, toolName := range []string{
+		mcpUseToolName,
+		pentToolExecute, "project_plan_hypotheses", "project_start_hypothesis",
+		"project_complete_hypothesis", "project_report_finding", "project_record_test",
+	} {
 		allowed, reason := service.missionToolDecision(ctx, toolName, map[string]interface{}{
 			"command": "ls", "script": "print('x')", "name": "dotnet-code-audit",
 		})
-		if allowed {
-			t.Fatalf("代码审计主 Agent 不应直接执行 %s", toolName)
-		}
-		if !strings.Contains(reason, "只负责规划和调度") {
-			t.Fatalf("%s 拒绝原因不正确: %s", toolName, reason)
+		if !allowed {
+			t.Fatalf("代码审计主 Agent 应可直接使用 %s: %s", toolName, reason)
 		}
 	}
 	for _, toolName := range []string{
 		pentToolPlanHypotheses,
 		pentToolExecuteHypothesis,
+		"exec",
+		"execute-python-script",
 		"project_list_hypotheses",
 		"read_artifact",
+		"project_next_targets",
+		"project_update_goal",
 	} {
 		allowed, reason := service.missionToolDecision(ctx, toolName, map[string]interface{}{})
 		if !allowed {
@@ -1305,12 +1303,48 @@ func TestDeepCodeAuditMainAgentIsCoordinatorOnly(t *testing.T) {
 	}
 }
 
-func TestCodeAuditFinalizationRequiresLocalAnalysis(t *testing.T) {
+func TestCoordinatedModeAllowsPlannerAndWorkerRoles(t *testing.T) {
+	if !plannerRoleToolAllowed("project_plan_hypotheses") ||
+		!plannerRoleToolAllowed("project_plan_frontier") ||
+		!plannerRoleToolAllowed("project_list_assets") ||
+		!plannerRoleToolAllowed("project_prove_goal") ||
+		plannerRoleToolAllowed("exec") ||
+		plannerRoleToolAllowed(mcpUseToolName) ||
+		plannerRoleToolAllowed("project_add_intent") ||
+		plannerRoleToolAllowed("project_update_intent") ||
+		plannerRoleToolAllowed("project_update_goal") ||
+		plannerRoleToolAllowed("project_add_goal") {
+		t.Fatal("Planner 工具边界错误")
+	}
+	if coordinatedMainToolAllowed("project_plan_frontier") ||
+		coordinatedMainToolAllowed("project_record_link") ||
+		coordinatedMainToolAllowed(pentToolPlanHypotheses) ||
+		coordinatedMainToolAllowed(pentToolExecuteHypothesis) ||
+		coordinatedMainToolAllowed("exec") ||
+		coordinatedMainToolAllowed("execute-python-script") ||
+		coordinatedMainToolAllowed(mcpUseToolName) ||
+		coordinatedMainToolAllowed("install-python-package") ||
+		!coordinatedMainToolAllowed("project_add_hint") ||
+		!coordinatedMainToolAllowed("project_update_goal") {
+		t.Fatal("Main 工具边界错误")
+	}
+	if !workerRoleToolAllowed("exec") ||
+		!workerRoleToolAllowed("project_complete_hypothesis") ||
+		!workerRoleToolAllowed("project_insert_assets") ||
+		!workerRoleToolAllowed("project_record_link") ||
+		workerRoleToolAllowed("project_plan_frontier") ||
+		workerRoleToolAllowed("project_plan_hypotheses") {
+		t.Fatal("Worker 工具边界错误")
+	}
+}
+
+func TestCodeAuditFinalizationDoesNotRequireWorkerAnalysis(t *testing.T) {
 	service, ctx := openProjectToolService(t, true)
 	ctx = withMissionExecution(ctx, missionExecution{
-		Plan:  missionPlan{Mode: missionModeCodeAudit},
+		Plan:  missionPlan{Mode: missionModeCodeAudit, Coordinated: true},
 		Phase: missionPhaseSourceAudit,
 	})
+	ctx = withCoordinatedRunState(ctx)
 	capture := &runCapture{}
 	capture.recordToolCall("memory-call", "project_query_memory")
 	capture.recordToolResult("memory-call")
@@ -1323,22 +1357,8 @@ func TestCodeAuditFinalizationRequiresLocalAnalysis(t *testing.T) {
 		capture,
 		"代码审计完成。",
 	)
-	if decision.Allowed {
-		t.Fatalf("没有执行本地源码分析时不应最终化")
-	}
-	capture.recordToolCall("local-analysis", "exec")
-	capture.recordToolResult("local-analysis")
-	decision = service.checkFinalization(
-		ctx,
-		"conv-tools",
-		"project-tools",
-		"user-1",
-		time.Now().UTC().Add(-time.Second),
-		capture,
-		"代码审计完成。",
-	)
 	if !decision.Allowed {
-		t.Fatalf("本地源码分析后应允许代码审计最终化: %+v", decision.Reasons)
+		t.Fatalf("普通代码审计不应被 Worker 分析门槛阻塞: %+v", decision.Reasons)
 	}
 	plannerOnly := &runCapture{}
 	plannerOnly.recordToolCall("planner-call", pentToolPlanHypotheses)
@@ -1352,12 +1372,14 @@ func TestCodeAuditFinalizationRequiresLocalAnalysis(t *testing.T) {
 		plannerOnly,
 		"代码审计完成。",
 	)
-	if decision.Allowed {
-		t.Fatalf("只有 Planner、没有 Worker 执行时不应允许代码审计最终化")
+	if !decision.Allowed {
+		t.Fatalf("只有 Planner 调用时也不应强制追加 Worker: %+v", decision.Reasons)
 	}
 	delegated := &runCapture{}
 	delegated.recordToolCall("delegated-analysis", pentToolExecuteHypothesis)
 	delegated.recordToolResult("delegated-analysis")
+	coordinatedStateFromContext(ctx).markPlannerReady()
+	coordinatedStateFromContext(ctx).markWorkerCompleted()
 	decision = service.checkFinalization(
 		ctx,
 		"conv-tools",
@@ -1369,6 +1391,46 @@ func TestCodeAuditFinalizationRequiresLocalAnalysis(t *testing.T) {
 	)
 	if !decision.Allowed {
 		t.Fatalf("通过 Worker 执行源码分析后应允许代码审计最终化: %+v", decision.Reasons)
+	}
+
+	attemptOnlyCtx := withCoordinatedRunState(context.Background())
+	attemptOnlyCtx = withMissionExecution(attemptOnlyCtx, missionExecution{
+		Plan:  missionPlan{Mode: missionModeCodeAudit, Coordinated: true},
+		Phase: missionPhaseSourceAudit,
+	})
+	coordinatedStateFromContext(attemptOnlyCtx).markPlannerReady()
+	attemptOnly := &runCapture{}
+	attemptOnly.recordToolCall("failed-worker", pentToolExecuteHypothesis)
+	attemptOnly.recordToolResult("failed-worker")
+	decision = service.checkFinalization(
+		attemptOnlyCtx,
+		"conv-tools",
+		"project-tools",
+		"user-1",
+		time.Now().UTC().Add(-time.Second),
+		attemptOnly,
+		"代码审计完成。",
+	)
+	if !decision.Allowed {
+		t.Fatalf("Worker 返回后不应再要求平台级成功终态: %+v", decision.Reasons)
+	}
+
+	backgroundService := &Service{}
+	backgroundHandle := newBackgroundOrchestration(func() {})
+	backgroundService.orchestrations = map[string]*backgroundOrchestration{
+		"conv-tools": backgroundHandle,
+	}
+	decision = backgroundService.checkFinalization(
+		ctx,
+		"conv-tools",
+		"project-tools",
+		"user-1",
+		time.Now().UTC().Add(-time.Second),
+		&runCapture{},
+		"后台继续执行，我先回答当前状态。",
+	)
+	if !decision.Allowed {
+		t.Fatalf("后台编排运行时主 Agent 应能正常回复: %+v", decision.Reasons)
 	}
 }
 
@@ -1601,7 +1663,7 @@ func TestRetestFinalizationRequiresEvidenceAndWriteback(t *testing.T) {
 	}
 }
 
-func TestMissionToolAllowlistPreventsAssetPhaseProbes(t *testing.T) {
+func TestMissionToolsStayAvailableAcrossPhases(t *testing.T) {
 	service := &Service{tools: []tool.BaseTool{
 		&jsonTool{name: "project_list_assets"},
 		&jsonTool{name: "project_insert_assets"},
@@ -1618,18 +1680,17 @@ func TestMissionToolAllowlistPreventsAssetPhaseProbes(t *testing.T) {
 		missionPhaseAsset,
 	)
 	names := missionToolNames(t, assetTools)
-	if !names["project_list_assets"] || !names["project_insert_assets"] {
-		t.Fatalf("资产工具应保留: %+v", names)
-	}
-	for _, forbidden := range []string{
+	for _, expected := range []string{
+		"project_list_assets",
+		"project_insert_assets",
 		"exec",
 		"execute-python-script",
 		pentToolExecute,
 		"project_record_test",
 		internetSearchToolName,
 	} {
-		if names[forbidden] {
-			t.Fatalf("资产阶段不应暴露 %s: %+v", forbidden, names)
+		if !names[expected] {
+			t.Fatalf("主 Agent 应保留工具 %s: %+v", expected, names)
 		}
 	}
 
@@ -1640,8 +1701,8 @@ func TestMissionToolAllowlistPreventsAssetPhaseProbes(t *testing.T) {
 		missionPhasePentest,
 	)
 	deepNames := missionToolNames(t, deepPentestTools)
-	if deepNames["exec"] || !deepNames[pentToolExecute] || !deepNames[internetSearchToolName] {
-		t.Fatalf("Deep Path 应强制通过子 Agent 执行渗透: %+v", deepNames)
+	if !deepNames["exec"] || !deepNames[pentToolExecute] || !deepNames[internetSearchToolName] {
+		t.Fatalf("Deep Path 不应移除主 Agent 的直接执行工具: %+v", deepNames)
 	}
 }
 
@@ -1704,15 +1765,15 @@ func TestProjectListResourceHonorsMissionPhaseAllowlist(t *testing.T) {
 	}); !allowed {
 		t.Fatalf("源码分析阶段应允许查询 findings: %s", reason)
 	}
-	if allowed, _ := service.missionToolDecision(sourceCtx, "project_list", map[string]interface{}{
+	if allowed, reason := service.missionToolDecision(sourceCtx, "project_list", map[string]interface{}{
 		"resource": "chains",
-	}); allowed {
-		t.Fatal("源码分析阶段不应通过 project_list 查询 chains")
+	}); !allowed {
+		t.Fatalf("只读资源不应被任务阶段拒绝: %s", reason)
 	}
 	if _, err := invokeProjectTool(t, service, sourceCtx, "project_list", map[string]interface{}{
 		"resource": "chains",
-	}); err == nil || !strings.Contains(err.Error(), "Mission Policy 拒绝执行 project_list") {
-		t.Fatalf("源码分析阶段实际调用 project_list chains 应被拒绝: %v", err)
+	}); err != nil {
+		t.Fatalf("源码分析阶段调用 project_list chains 应成功: %v", err)
 	}
 
 	retestCtx := withMissionExecution(ctx, missionExecution{
@@ -1728,19 +1789,19 @@ func TestProjectListResourceHonorsMissionPhaseAllowlist(t *testing.T) {
 	}); !allowed {
 		t.Fatalf("复测阶段应允许查询 findings: %s", reason)
 	}
-	if allowed, _ := service.missionToolDecision(retestCtx, "project_list", map[string]interface{}{
+	if allowed, reason := service.missionToolDecision(retestCtx, "project_list", map[string]interface{}{
 		"resource": "assets",
-	}); allowed {
-		t.Fatal("复测阶段不应通过 project_list 查询 assets")
+	}); !allowed {
+		t.Fatalf("复测阶段也应按需读取项目资产: %s", reason)
 	}
 	if _, err := invokeProjectTool(t, service, retestCtx, "project_list", map[string]interface{}{
 		"resource": "assets",
-	}); err == nil || !strings.Contains(err.Error(), "Mission Policy 拒绝执行 project_list") {
-		t.Fatalf("复测阶段实际调用 project_list assets 应被拒绝: %v", err)
+	}); err != nil {
+		t.Fatalf("复测阶段实际调用 project_list assets 应成功: %v", err)
 	}
 }
 
-func TestProjectGetResourceHonorsMissionPhaseAllowlist(t *testing.T) {
+func TestProjectGetResourceSupportsAllReadResources(t *testing.T) {
 	service, ctx := openProjectToolService(t, true)
 	service.cfg.Storage.ArtifactRoot = t.TempDir()
 	now := time.Now().UTC()
@@ -1784,16 +1845,16 @@ func TestProjectGetResourceHonorsMissionPhaseAllowlist(t *testing.T) {
 	}); !allowed {
 		t.Fatalf("复测阶段应允许读取 finding: %s", reason)
 	}
-	if allowed, _ := service.missionToolDecision(retestCtx, "project_get", map[string]interface{}{
+	if allowed, reason := service.missionToolDecision(retestCtx, "project_get", map[string]interface{}{
 		"resource": "asset",
-	}); allowed {
-		t.Fatal("复测阶段不应通过 project_get 读取资产卡片")
+	}); !allowed {
+		t.Fatalf("复测阶段应按需读取资产卡片: %s", reason)
 	}
-	if _, err := invokeProjectTool(t, service, retestCtx, "project_get", map[string]interface{}{
+	if output, err := invokeProjectTool(t, service, retestCtx, "project_get", map[string]interface{}{
 		"resource": "asset",
 		"id":       "asset-project-get-phase",
-	}); err == nil || !strings.Contains(err.Error(), "Mission Policy 拒绝执行 project_get") {
-		t.Fatalf("复测阶段实际调用 project_get asset 应被拒绝: %v", err)
+	}); err != nil || !strings.Contains(output, "阶段测试资产") {
+		t.Fatalf("复测阶段实际调用 project_get asset 应成功: %q %v", output, err)
 	}
 	if output, err := invokeProjectTool(t, service, retestCtx, "project_get", map[string]interface{}{
 		"resource": "finding",
@@ -1815,10 +1876,10 @@ func TestProjectGetResourceHonorsMissionPhaseAllowlist(t *testing.T) {
 	}); !allowed {
 		t.Fatalf("资产整理阶段应允许读取图谱节点: %s", reason)
 	}
-	if allowed, _ := service.missionToolDecision(assetCtx, "project_get", map[string]interface{}{
+	if _, err := invokeProjectTool(t, service, assetCtx, "project_get", map[string]interface{}{
 		"resource": "unknown",
-	}); allowed {
-		t.Fatal("未知 project_get resource 必须在权限检查阶段被拒绝")
+	}); err == nil {
+		t.Fatal("未知 project_get resource 应由工具 schema 拒绝")
 	}
 }
 
@@ -1990,7 +2051,7 @@ func TestMissionScopeAssetMappingUsesExactHost(t *testing.T) {
 	}
 }
 
-func TestMixedAssetPhaseDoesNotHandoffWhileAskingQuestion(t *testing.T) {
+func TestFinalizationDoesNotInjectPhaseQuestionPause(t *testing.T) {
 	service, ctx := openProjectToolService(t, true)
 	ctx = execctx.WithAutoContinue(ctx, false)
 	ctx = withMissionExecution(ctx, missionExecution{
@@ -2009,8 +2070,8 @@ func TestMixedAssetPhaseDoesNotHandoffWhileAskingQuestion(t *testing.T) {
 		capture,
 		"资产已整理。需要我继续渗透吗？",
 	)
-	if !decision.PauseOnQuestion {
-		t.Fatalf("资产阶段提问时应暂停，不应自动移交渗透: %+v", decision)
+	if !decision.Allowed || decision.PauseOnQuestion {
+		t.Fatalf("最终措辞不应由平台强制切换执行阶段或暂停: %+v", decision)
 	}
 }
 

@@ -9,96 +9,45 @@ description: Java Web 源码 XXE (XML External Entity) 漏洞审计工具。从�
 
 检查 Java Web 项目源码，识别 XML 解析实现，检测 XXE (XML External Entity) 注入漏洞。
 
-## 核心要求
+## 适用场景
 
-**此技能必须完整检查所有 XML 解析相关代码，不允许省略。**
+适合 XML、SOAP、SVG、Office 文档、RSS 或配置内容进入 SAX、DOM、JDOM、dom4j、StAX、JAXB 等解析器，需要判断外部实体是否可用及结果是否可观测。
 
-- ✅ 识别所有 XML 解析入口点（5 种解析器）
-- ✅ 检查每个解析器的外部实体防护配置
-- ✅ 追踪 XML 输入来源（用户可控性）
-- ✅ 检测回显点（数据是否返回给用户）
-- ✅ 为每个漏洞点提供验证 PoC
-- ❌ 禁止省略任何 XML 解析操作
-- ❌ 禁止跳过反编译步骤
+## 不适用场景
 
----
+只发现 XML 解析器或用户提交 XML 不能直接确认 XXE。DTD 被禁用、外部实体关闭、XML 输入不可控，或解析结果没有任何回显/OOB 通道时，应降级或判为否。
 
-## 漏洞分级标准
+## 核心判断
 
-**详见 [SEVERITY_RATING.md](../java-shared/SEVERITY_RATING.md)**
+XXE 需要同时确认解析器实例未安全配置、攻击者可控制包含 DOCTYPE 的 XML，以及存在文件读取、SSRF、错误型或 Blind OOB 效果。不同解析器的默认值和 feature 支持必须按实际实现判断。
 
-- 漏洞编号格式: `{C/H/M/L}-XXE-{序号}`
-- 严重等级 = f(可达性 R, 影响范围 I, 利用复杂度 C)
-- Score = R × 0.40 + I × 0.35 + C × 0.25，映射 CVSS 3.1
+## 证据标准
 
-| 前缀 | CVSS 3.1 | 含义 |
-|------|----------|------|
-| 🔴 **C** | 9.0-10.0 | 可直接导致系统沦陷 |
-| 🟠 **H** | 7.0-8.9 | 可造成重大损害 |
-| 🟡 **M** | 4.0-6.9 | 可造成一定损害 |
-| 🔵 **L** | 0.1-3.9 | 安全加固项 |
+- 可确认：真实入口、解析器调用、输入控制、实体配置缺口和读取/外联效果证据闭合。
+- 待验证：发现无防护解析器，但 XML 可塑性、实际 feature 生效、权限或输出通道尚未确认。
+- 判为否：DOCTYPE 或外部实体被可靠禁用、输入固定、解析器不展开实体，或没有可观测影响。
 
----
+## 决策树
 
-## 技能协作流程（CRITICAL）
+- 找到解析器实例：确认类型、版本和创建方式。
+- 检查安全配置：验证 feature 在解析前设置且未被后续工厂配置覆盖。
+- 追踪 XML 输入：确认请求体、文件或第三方内容是否可包含 DTD。
+- 检查输出：区分直接回显、错误型、Blind OOB 和完全不可观测。
+- 只有 XML 语法错误：先证明实体展开，不直接确认 XXE。
 
-**java-xxe-audit 必须在 java-route-mapper 之后执行，基于已梳理的路由信息进行审计。**
+## 常见误判
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    完整审计流程                                  │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  [步骤1] java-route-mapper                                      │
-│     │                                                           │
-│     │ 输出：                                                    │
-│     │ ├─ 所有 HTTP 路由列表                                     │
-│     │ ├─ 每个路由的参数定义                                     │
-│     │ └─ Content-Type 识别（application/xml, text/xml）         │
-│     │                                                           │
-│     ↓                                                           │
-│  [步骤2] java-xxe-audit（本技能）                               │
-│     │                                                           │
-│     │ 输入：java-route-mapper 的输出                            │
-│     │                                                           │
-│     │ 执行：                                                    │
-│     │ ├─ 快速扫描 XML 解析类                                    │
-│     │ ├─ 检查解析器安全配置                                     │
-│     │ ├─ 追踪 XML 输入来源                                      │
-│     │ └─ 检查回显路径                                           │
-│     │                                                           │
-│     ├─── 需要深入追踪 ───→ java-route-tracer                    │
-│     │                           │                               │
-│     │    ←── 返回调用链信息 ────┘                               │
-│     │                                                           │
-│     ↓                                                           │
-│  [步骤3] 输出综合审计报告                                       │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
-```
+- 搜索到 `DocumentBuilderFactory` 就认为外部实体已启用。
+- 设置了部分 feature 就认为完整安全，忽略实体展开和 DTD 加载组合。
+- 把 XML 解析失败、500 或延迟当成文件读取成功。
+- 忽略应用服务器、JDK 和第三方解析库对默认行为的影响。
+- 为验证读取真实系统文件、凭据或生产配置。
 
-### 输入依赖（来自 java-route-mapper）
+## 与路由分析协作（可选）
 
-**在开始审计前，必须先检查是否已有 java-route-mapper 的输出文件：**
+已有路由映射结果时，可用于定位入口和参数；没有时直接从源码、字节码和当前审计目标开始，不要求检查或生成任何上游文件。
 
-```
-{project_name}_audit/
-├── route_mapper/
-│   ├── {project_name}_route_mapper_{timestamp}.md    ← 主索引（先读此文件定位模块详情）
-│   ├── {module_name}/
-│   │   └── {project_name}_module_{module_name}_{timestamp}.md  ← 模块详情
-│   └── webservice/
-│       └── {project_name}_ws_{service_name}_{timestamp}.md
-└── xxe_audit/
-    └── {project_name}_xxe_audit_{timestamp}.md  ← 本技能输出
-```
-
-**如果 route_mapper 输出不存在，必须先运行：**
-```python
-Skill(skill="java-route-mapper", args="--project {project_path}")
-```
-
-### 从 route_mapper 获取的关键信息
+### 已有路由结果时可利用的信息
 
 | 信息 | 用途 |
 |:-----|:-----|
@@ -259,22 +208,13 @@ XXE 利用方式取决于是否有回显：
 
 ## 反编译阶段（CRITICAL）
 
-**当源码不可用时，必须使用 CFR 反编译器反编译 XML 解析相关类。**
+**当源码不可用时，按运行环境中可用的反编译能力处理 XML 解析相关类。**
 
 详细策略参见 [DECOMPILE_STRATEGY.md](references/DECOMPILE_STRATEGY.md)
 
 ### 反编译工具调用
 
-```bash
-# 反编译单个 XML 处理类
-java -jar {CFR_JAR} /path/to/XmlParser.class --outputdir {output_path}/decompiled
-
-# 反编译 XML 处理相关目录
-find /path/to/WEB-INF/classes/com/example/util -name "*.class" | xargs java -jar {CFR_JAR} --outputdir {output_path}/decompiled
-
-# 反编译多个指定文件
-java -jar {CFR_JAR} /path/to/XmlUtil.class /path/to/XmlParser.class /path/to/SoapHandler.class --outputdir {output_path}/decompiled
-```
+可使用运行环境中可用的反编译工具。内置 `java_decompile`、CFR、`javap` 等均可作为候选，按实际能力和结果选择。
 
 ### 必须反编译的类
 
@@ -360,60 +300,3 @@ Skill(
 
 ---
 
-## 报告生成
-
-**输出单个综合审计报告文件：**
-
-```
-{project_name}_audit/xxe_audit/
-└── {route_name}/
-    └── {project_name}_xxe_audit_{timestamp}.md      # 综合审计报告
-```
-
-**路由名说明：**
-- 路由名从路由路径提取，去掉前缀斜杠和特殊字符
-- 例如：`/api/xml/parse` → `api_xml_parse`
-- 例如：`/ws/soap/endpoint` → `ws_soap_endpoint`
-
----
-
-## 输出格式
-
-**严格按照 [references/OUTPUT_TEMPLATE.md](references/OUTPUT_TEMPLATE.md) 中的填充式模板生成输出文件。**
-
-- 文件名格式: `{project_name}_xxe_audit_{YYYYMMDD_HHMMSS}.md`
-- 不得修改模板结构、不得增删章节、不得调整顺序
-- 所有【填写】占位符必须替换为实际内容
-- 通用规范参考: [java-shared/OUTPUT_STANDARD.md](../java-shared/OUTPUT_STANDARD.md)
-
----
-
-## 验证检查清单
-
-**在标记审计完成前，必须执行以下检查：**
-
-### 代码检测检查
-- [ ] 所有 XML 解析类已检查
-- [ ] 所有 5 种解析器类型均已搜索
-- [ ] 每个解析器实例的安全配置已检查
-
-### 输入来源检查
-- [ ] 追踪了每个解析器的 XML 输入来源
-- [ ] 确认了输入是否用户可控
-- [ ] 检查了回显路径
-
-### 漏洞检测检查
-- [ ] 所有无防护的解析器已标记
-- [ ] 所有用户可控输入已追踪
-- [ ] 区分了有回显 XXE 和 Blind XXE
-
-### 报告完整性检查
-- [ ] **综合审计报告已生成，且通过 OUTPUT_TEMPLATE.md 末尾的自检清单**
-
----
-
-## 参考资料
-
-- [OUTPUT_TEMPLATE.md](references/OUTPUT_TEMPLATE.md) - 输出报告填充式模板
-- [PARSERS.md](references/PARSERS.md) - 五种 XML 解析器详细检测规则
-- [DECOMPILE_STRATEGY.md](references/DECOMPILE_STRATEGY.md) - 反编译策略指南

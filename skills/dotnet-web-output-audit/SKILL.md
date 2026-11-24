@@ -8,6 +8,40 @@ metadata:
 
 # .NET Web 输出审计
 
+## 适用场景
+
+适合 Razor、Blazor、MVC、响应头、Cookie、重定向和文件响应中，用户可控值进入浏览器解释上下文，需要判断输出编码和安全影响。
+
+## 不适用场景
+
+看到 `Html.Raw`、`MarkupString`、`Redirect` 或响应头 API 不能直接确认漏洞。固定内容、正确上下文编码、可靠净化、本地 URL 限制，或浏览器不会解释的输出应降级或判为否。
+
+## 核心判断
+
+Web 输出风险取决于 source、sink 和解释上下文是否同时闭合。HTML、属性、JavaScript、JSON、CSS、URL、Header 和文件 MIME 需要不同处理，编码函数必须与其上下文匹配。
+
+## 证据标准
+
+- 可确认：用户控制映射、输出 sink、编码/净化缺口和浏览器或客户端解释效果证据闭合。
+- 待验证：发现 raw 输出或响应头写入，但 source、上下文、净化、CSP 或实际响应尚未确认。
+- 判为否：输出为固定值、编码与上下文匹配、本地 URL 校验可靠，或浏览器不会执行/导航到危险目标。
+
+## 决策树
+
+- 找到输出 sink：确认 HTML 编码、Markup、Header、Cookie、Redirect 或文件响应类型。
+- 追踪 source：判断用户输入是否保留危险字符和结构。
+- 判断上下文：核对同一值在 HTML、JS、URL、CSS 和属性中的编码路径。
+- 检查浏览器条件：评估 CSP、nosniff、Content-Type 和导航行为。
+- 只有静态 raw API：保留候选，不发送 payload 或执行 JavaScript。
+
+## 常见误判
+
+- `Html.Raw` 或 `MarkupString` 存在就认定 XSS。
+- 使用 HTML 编码处理 JavaScript 字符串或 URL 上下文。
+- 只检查参数名就确认开放重定向，忽略最终 Location。
+- 只过滤 `%0d%0a`，不检查实际 Header 解析后的控制字符。
+- 文件可下载就认定 MIME 嗅探或脚本执行，忽略 Content-Type 与 nosniff。
+
 ## XSS
 
 检查：
@@ -53,18 +87,3 @@ metadata:
 - 是否设置 `X-Content-Type-Options: nosniff`。
 - CSP、frame-ancestors 和 origin 隔离。
 
-## 输出
-
-每条发现必须包含：
-
-- 输出 Sink。
-- 编码/净化逻辑。
-- 上下文类型。
-- Source 到 Output 的数据流。
-- 浏览器侧利用条件。
-- 文件、行号、类和方法。
-- 状态、置信度和修复。
-
-## 禁止
-
-不向浏览器发送 payload，不启动前端、不执行 JavaScript。

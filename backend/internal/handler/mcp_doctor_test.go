@@ -10,17 +10,17 @@ import (
 
 func TestRequiredBinariesMergesWrapperScriptAndDeclaration(t *testing.T) {
 	def := toolrunner.Tool{
-		Name:             "rpcclient",
+		Name:             "smbclient",
 		Command:          "python3",
-		RequiresBinaries: []string{"smbclient", "rpcclient"},
+		RequiresBinaries: []string{"smbclient", "net"},
 		Args: []string{"-c", `
 import subprocess
-cmd = ["rpcclient", "-U", "user%pass", target]
+cmd = ["smbclient", "-L", target]
 subprocess.run(cmd, capture_output=True)
 `},
 	}
 	got := requiredBinaries(def)
-	want := []string{"rpcclient", "smbclient"}
+	want := []string{"net", "smbclient"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("外部命令提取错误: %#v", got)
 	}
@@ -76,7 +76,7 @@ func TestClassifyDoctorToolStatuses(t *testing.T) {
 		{"未注册", true, false, true, "", nil, nil, nil, doctorStatusDisabled},
 		{"配置停用", true, true, false, "", nil, nil, nil, doctorStatusDisabled},
 		{"命令缺失", true, true, true, "exec: sqlmap: executable file not found in $PATH", nil, nil, nil, doctorStatusMissingBinary},
-		{"外部命令缺失", true, true, true, "", []string{"rpcclient"}, nil, nil, doctorStatusMissingDependency},
+		{"外部命令缺失", true, true, true, "", []string{"smbclient"}, nil, nil, doctorStatusMissingDependency},
 		{"能力缺失", true, true, true, "", nil, []string{"cap_net_raw"}, nil, doctorStatusMissingDependency},
 		{"依赖缺失", true, true, true, "", nil, nil, []string{"httpx"}, doctorStatusMissingDependency},
 		{"可用", true, true, true, "", nil, nil, nil, doctorStatusAvailable},

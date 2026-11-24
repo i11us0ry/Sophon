@@ -24,6 +24,7 @@ import (
 	rbacpkg "sophon/internal/rbac"
 	storagepkg "sophon/internal/storage"
 	"sophon/internal/task"
+	"sophon/internal/toolcatalog"
 	zhizipkg "sophon/internal/zhizi"
 
 	"github.com/cloudwego/eino/components/tool"
@@ -38,6 +39,7 @@ type App struct {
 	storage *storagepkg.Service
 	tasks   *task.Manager
 	events  *observability.Emitter
+	agent   *agentpkg.Service
 }
 
 func New(cfg config.Config) (*App, error) {
@@ -85,11 +87,29 @@ func New(cfg config.Config) (*App, error) {
 	}
 	if affected, err := db.ResetRunningProjectHypotheses(
 		context.Background(),
-		"服务重启导致 Worker 中断，已释放为待重试",
+		database.ProjectHypothesisServiceRestartPrefix+": 服务重启导致 Worker 中断，已释放为待重试",
 	); err != nil {
 		log.Printf("project hypothesis recovery: %v", err)
 	} else if affected > 0 {
 		log.Printf("project hypothesis recovery: 已释放 %d 条遗留 running 假设", affected)
+	}
+	if affected, err := db.PauseRunningAgentSessionsOnStartup(
+		context.Background(),
+		"服务重启导致 Agent 会话中断",
+	); err != nil {
+		log.Printf("agent session recovery: %v", err)
+	} else if affected > 0 {
+		log.Printf("agent session recovery: 已暂停 %d 条遗留运行会话", affected)
+	}
+	if affected, err := db.RecoverProcessingAgentTriggers(context.Background()); err != nil {
+		log.Printf("agent trigger recovery: %v", err)
+	} else if affected > 0 {
+		log.Printf("agent trigger recovery: 已重新排队 %d 条未消费 Trigger", affected)
+	}
+	if affected, err := db.RecoverVulnerabilityReportDraftsOnStartup(context.Background()); err != nil {
+		log.Printf("vulnerability draft recovery: %v", err)
+	} else if affected > 0 {
+		log.Printf("vulnerability draft recovery: 已重新排队 %d 条中断草稿", affected)
 	}
 
 	authService := auth.NewService(
@@ -135,6 +155,9 @@ func New(cfg config.Config) (*App, error) {
 	)
 	mcpManager.SetExecutionRecorder(db)
 	mcpManager.SetProxyEnv(cfg.Proxy.Environment())
+	if workspaceRoot := toolWorkspaceRoot(cfg); workspaceRoot != "" {
+		mcpManager.SetRuntimeRoot(filepath.Join(workspaceRoot, "mcp-runtime"))
+	}
 	mcpTools, err := startMCPServers(context.Background(), db, mcpManager, cfg)
 	if err != nil {
 		_ = mcpManager.Close()
@@ -154,6 +177,18 @@ func New(cfg config.Config) (*App, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	catalogClient, err := cfg.Proxy.HTTPClient(5 * time.Minute)
+	if err != nil {
+		return nil, fmt.Errorf("create Tool Catalog HTTP client: %w", err)
+	}
+	toolCatalog := toolcatalog.New(
+		filepath.Join(toolsDirectory(cfg), "catalog"),
+		thirdToolsDirectory(cfg),
+		toolsDirectory(cfg),
+		catalogClient,
+	)
+	toolCatalog.SetProxyEnvironment(cfg.Proxy.Environment())
+	agentService.SetToolCatalog(toolCatalog)
 	// 运行事件流：默认写 <data_dir>/observability/events.jsonl，只记录元数据。
 	events, err := observability.New(observability.Config{
 		Enabled:    cfg.Observability.Enabled,
@@ -166,6 +201,19 @@ func New(cfg config.Config) (*App, error) {
 		events = nil
 	}
 	agentService.SetObservability(events)
+	orchestrationRecoveryCtx, orchestrationRecoveryCancel := context.WithTimeout(
+		context.Background(),
+		15*time.Second,
+	)
+	recoveredOrchestrations, orchestrationRecoveryErr :=
+		agentService.RecoverBackgroundOrchestrations(orchestrationRecoveryCtx)
+	orchestrationRecoveryCancel()
+	if recoveredOrchestrations > 0 {
+		log.Printf("agent orchestration recovery: 已恢复 %d 个后台编排", recoveredOrchestrations)
+	}
+	if orchestrationRecoveryErr != nil {
+		log.Printf("agent orchestration recovery: %v", orchestrationRecoveryErr)
+	}
 	requalifyCtx, requalifyCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	requalified, requalifyErr := agentService.RequalifyLegacyUploadCleanHypotheses(requalifyCtx)
 	requalifyCancel()
@@ -207,6 +255,8 @@ func New(cfg config.Config) (*App, error) {
 		taskManager,
 		storageService,
 		agentService,
+		agentService,
+		chatHandler,
 	)
 	settingsHandler := handler.NewSettingsHandler(cfg, knowledgeService, agentService, taskManager)
 	interceptHandler := handler.NewInterceptHandler(db)
@@ -219,8 +269,8 @@ func New(cfg config.Config) (*App, error) {
 		storageService.ArtifactRoot(),
 	)
 	agentRoleHandler := handler.NewAgentRoleHandler(db, cfg.SkillsDir)
-	mcpHandler := handler.NewMCPHandler(db, mcpManager, toolsDirectory(cfg), agentService)
-	projectHandler := handler.NewProjectHandler(db, taskManager, storageService)
+	mcpHandler := handler.NewMCPHandler(db, mcpManager, toolsDirectory(cfg), agentService, toolCatalog)
+	projectHandler := handler.NewProjectHandler(db, taskManager, storageService, agentService)
 	storageHandler := handler.NewStorageHandler(storageService, cfg.ConfigPath)
 	workspaceHandler := handler.NewWorkspaceHandler(storageService)
 	observabilityHandler := handler.NewObservabilityHandler(events)
@@ -284,6 +334,7 @@ func New(cfg config.Config) (*App, error) {
 	protected.DELETE("/rbac/users/:id", rbacHandler.DeleteUser)
 
 	protected.POST("/conversations", chatHandler.CreateConversation)
+	protected.PUT("/conversations/:id/project", chatHandler.UpdateConversationProject)
 	protected.POST("/conversation-batches/:id/start", chatHandler.StartCampaign)
 	protected.POST("/conversation-batches/:id/pause", chatHandler.PauseCampaign)
 	protected.POST("/conversation-batches/:id/resume", chatHandler.ResumeCampaign)
@@ -308,9 +359,13 @@ func New(cfg config.Config) (*App, error) {
 	protected.GET("/conversations/:id/children", chatHandler.ListConversationChildren)
 	protected.GET("/conversations/:id/resumable-run", chatHandler.GetResumableRun)
 	protected.POST("/conversations/:id/resume", chatHandler.Resume)
+	protected.POST("/conversations/:id/orchestration/resume", chatHandler.ResumeOrchestration)
 	protected.DELETE("/conversations/:id", chatHandler.DeleteConversation)
 	protected.GET("/conversations/:id/messages", chatHandler.ListMessages)
 	protected.GET("/conversations/:id/process-details", chatHandler.ListProcessDetails)
+	protected.GET("/conversations/:id/agent-sessions", chatHandler.ListAgentSessions)
+	protected.GET("/conversations/:id/agent-session-details", chatHandler.ListAgentSessionDetails)
+	protected.GET("/conversations/:id/agent-events", chatHandler.StreamAgentEvents)
 	protected.GET("/conversations/:id/hitl", chatHandler.GetConversationHITL)
 	protected.PUT("/conversations/:id/hitl", chatHandler.UpdateConversationHITL)
 	protected.POST("/conversations/:id/regenerate", chatHandler.Regenerate)
@@ -352,6 +407,8 @@ func New(cfg config.Config) (*App, error) {
 	protected.GET("/projects/:id/assets", projectHandler.ListAssets)
 	protected.GET("/projects/:id/conversations", projectHandler.ListConversations)
 	protected.GET("/projects/:id/vulnerabilities", projectHandler.ListVulnerabilities)
+	protected.GET("/projects/:id/vulnerability-drafts", projectHandler.ListVulnerabilityDrafts)
+	protected.POST("/projects/:id/vulnerability-drafts/:draftId/retry", projectHandler.RetryVulnerabilityDraft)
 	protected.GET("/projects/:id/attack-steps", projectHandler.ListAttackSteps)
 	protected.POST("/projects/:id/attack-steps", projectHandler.CreateAttackStep)
 	protected.POST("/projects/:id/attack-steps/reorder", projectHandler.ReorderAttackSteps)
@@ -410,6 +467,11 @@ func New(cfg config.Config) (*App, error) {
 	protected.GET("/mcp/agent-tools", mcpHandler.AgentTools)
 	protected.PUT("/mcp/tools", mcpHandler.UpdateTools)
 	protected.POST("/mcp/tools/doctor", mcpHandler.Doctor)
+	protected.GET("/mcp/tool-catalog", mcpHandler.CatalogStatus)
+	protected.POST("/mcp/tool-catalog/install", mcpHandler.CatalogInstall)
+	protected.POST("/mcp/tool-catalog/verify", mcpHandler.CatalogVerify)
+	protected.GET("/mcp/tool-registry", mcpHandler.ToolRegistry)
+	protected.DELETE("/mcp/tool-registry/:id", mcpHandler.DeleteToolRegistry)
 	protected.GET("/settings/ai", settingsHandler.AIStatus)
 	protected.GET("/settings/llm/keys", settingsHandler.ListLLMKeys)
 	protected.POST("/settings/llm/keys", settingsHandler.AddLLMKeys)
@@ -454,6 +516,7 @@ func New(cfg config.Config) (*App, error) {
 		storage: storageService,
 		tasks:   taskManager,
 		events:  events,
+		agent:   agentService,
 	}, nil
 }
 
@@ -552,6 +615,10 @@ func toolsDirectory(cfg config.Config) string {
 	return "/opt/sophon/tools"
 }
 
+func thirdToolsDirectory(cfg config.Config) string {
+	return filepath.Join(filepath.Dir(toolsDirectory(cfg)), "thirdTools")
+}
+
 func toolWorkspaceRoot(cfg config.Config) string {
 	root := strings.TrimSpace(cfg.Storage.ArtifactRoot)
 	if root == "" {
@@ -586,6 +653,9 @@ func (a *App) Run(ctx context.Context) error {
 	if a.storage != nil {
 		a.storage.Start(runCtx)
 	}
+	if a.agent != nil {
+		a.agent.StartVulnerabilityDraftWorker(runCtx)
+	}
 
 	server := &http.Server{
 		Addr:              fmt.Sprintf("%s:%d", a.config.Host, a.config.Port),
@@ -617,6 +687,13 @@ func (a *App) Run(ctx context.Context) error {
 	serveErr := server.ListenAndServe()
 	stop()
 	<-shutdownDone
+	if a.agent != nil {
+		waitCtx, cancelWait := context.WithTimeout(context.Background(), 10*time.Second)
+		if err := a.agent.WaitForVulnerabilityDraftWorker(waitCtx); err != nil {
+			log.Printf("shutdown: 漏洞草稿 Worker 等待超时: %v", err)
+		}
+		cancelWait()
+	}
 	if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
 		return serveErr
 	}

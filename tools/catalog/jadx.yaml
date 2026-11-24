@@ -1,0 +1,23 @@
+name: jadx_decompile
+version: 1.5.7
+description: JADX Android and Java decompiler CLI
+tool_definition: jadx-decompile.yaml
+verify_args:
+  - "--version"
+artifacts:
+  linux-amd64:
+    url: https://github.com/skylot/jadx/releases/download/v1.5.7/jadx-1.5.7.zip
+    sha256: 1755e4242ade71a077438723689f404079592ec7764a3a0572f98fef94ebcbf3
+    destination: jadx
+    archive: zip
+    directory: true
+    strip_components: 1
+    entry: bin/jadx
+  linux-arm64:
+    url: https://github.com/skylot/jadx/releases/download/v1.5.7/jadx-1.5.7.zip
+    sha256: 1755e4242ade71a077438723689f404079592ec7764a3a0572f98fef94ebcbf3
+    destination: jadx
+    archive: zip
+    directory: true
+    strip_components: 1
+    entry: bin/jadx

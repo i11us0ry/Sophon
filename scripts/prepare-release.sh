@@ -120,6 +120,7 @@ copy_release() {
   copy_tree "${ROOT_DIR}/roles" "${release}/roles"
   copy_tree "${ROOT_DIR}/skills" "${release}/skills"
   copy_tree "${ROOT_DIR}/tools" "${release}/tools"
+  copy_tree "${ROOT_DIR}/customTools" "${release}/customTools"
   copy_tree "${ROOT_DIR}/screenshots" "${release}/screenshots"
   copy_tree "${ROOT_DIR}/mcp-servers" "${release}/mcp-servers"
   copy_tree "${ROOT_DIR}/licenses" "${release}/licenses"

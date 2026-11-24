@@ -37,6 +37,30 @@ func TestRunBudgetClampsOversizedOptions(t *testing.T) {
 	}
 }
 
+func TestCoordinatedRunReservesPlannerAndWorkerBudget(t *testing.T) {
+	if got := resolveRunSubagentLimit(missionPlan{Coordinated: true}, 1); got != 2 {
+		t.Fatalf("协调任务至少应预留 Planner 和 Worker 两个子 Agent，实际 %d", got)
+	}
+	if got := resolveRunSubagentLimit(missionPlan{}, 1); got != 1 {
+		t.Fatalf("非协调任务不应扩大子 Agent 预算，实际 %d", got)
+	}
+}
+
+func TestResolveRunDurationSecondsAllowsUnlimited(t *testing.T) {
+	if got := resolveRunDurationSeconds(0, 0); got != 0 {
+		t.Fatalf("零配置和零请求应表示不限，实际 %d", got)
+	}
+	if got := resolveRunDurationSeconds(600, 0); got != 600 {
+		t.Fatalf("应使用配置的运行时长 600，实际 %d", got)
+	}
+	if got := resolveRunDurationSeconds(600, 120); got != 120 {
+		t.Fatalf("显式运行请求应覆盖配置，实际 %d", got)
+	}
+	if got := resolveRunDurationSeconds(-1, -1); got != 0 {
+		t.Fatalf("负值应归一为不限，实际 %d", got)
+	}
+}
+
 func TestRunTurnTokenSafetyBounds(t *testing.T) {
 	if maxRunMaxTurnTokens != 100_000_000 {
 		t.Fatalf("可配置单轮 Token 上限应为 100,000,000，实际 %d", maxRunMaxTurnTokens)
@@ -50,24 +74,31 @@ func TestRunBudgetUsesMissionPlanLimitsForBoundedTask(t *testing.T) {
 		MaxSegments:  2,
 		MaxToolCalls: 60,
 	}
-	segments, tools := resolveRunLimits(RunOptions{}, plan)
+	segments, tools := resolveRunLimits(500, RunOptions{}, plan)
 	if segments != 2 || tools != 60 {
 		t.Fatalf("有界任务应使用意图预算 2/60，实际 %d/%d", segments, tools)
 	}
-	segments, tools = resolveRunLimits(RunOptions{MaxSegments: 1, MaxToolCalls: 30}, plan)
+	segments, tools = resolveRunLimits(500, RunOptions{MaxSegments: 1, MaxToolCalls: 30}, plan)
 	if segments != 1 || tools != 30 {
 		t.Fatalf("显式运行预算应继续收紧，实际 %d/%d", segments, tools)
 	}
 }
 
 func TestRunBudgetIgnoresUnboundedMissionPlanCaps(t *testing.T) {
-	segments, tools := resolveRunLimits(RunOptions{}, missionPlan{
+	segments, tools := resolveRunLimits(0, RunOptions{}, missionPlan{
 		Mode:         missionModeCodeAudit,
 		MaxSegments:  2,
 		MaxToolCalls: 60,
 	})
-	if segments != defaultRunMaxSegments || tools != defaultRunMaxToolCalls {
+	if segments != defaultRunMaxSegments || tools != unlimitedRunIterations() {
 		t.Fatalf("非有界任务不应继承模型预算，实际 %d/%d", segments, tools)
+	}
+}
+
+func TestRunBudgetUsesConfiguredToolCallLimit(t *testing.T) {
+	_, tools := resolveRunLimits(321, RunOptions{}, missionPlan{Mode: missionModeCodeAudit})
+	if tools != 321 {
+		t.Fatalf("应使用配置的工具调用上限 321，实际 %d", tools)
 	}
 }
 

@@ -151,14 +151,24 @@ func (s *Service) discoverProjectFiles(
 	truncated := false
 	seen := map[string]bool{}
 	for _, conversation := range conversations {
-		for _, base := range []struct {
+		paths, pathErr := s.agentWorkspacePathsFor(projectID, conversation.ID)
+		if pathErr != nil {
+			continue
+		}
+		bases := []struct {
 			kind string
 			path string
 		}{
 			{"upload", filepath.Join(root, "chat_uploads", conversation.ID)},
-			{"workspace", filepath.Join(root, "tmp", "workspace", conversation.ID)},
 			{"artifact", filepath.Join(root, "data", "conversation_artifacts", conversation.ID)},
-		} {
+		}
+		for _, workspace := range paths.conversationDirs() {
+			bases = append(bases, struct {
+				kind string
+				path string
+			}{"workspace", workspace})
+		}
+		for _, base := range bases {
 			if info, statErr := os.Stat(base.path); statErr != nil || !info.IsDir() {
 				continue
 			}

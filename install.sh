@@ -336,8 +336,10 @@ ensure_apt() {
       run_apt apt-get install -y \
         ca-certificates curl unzip tar xz-utils git build-essential pkg-config \
         libsqlite3-dev sqlite3 libpcap-dev nginx python3 python3-venv python3-pip \
-        default-jre-headless libcap2-bin openssl
-      for package in nmap masscan whatweb sqlmap dirsearch; do
+        python3-dev ruby ruby-dev ruby-addressable autoconf automake libtool bison flex \
+        libssl-dev libssh-dev libidn11-dev libpcre2-dev libgtk-3-dev \
+        zlib1g-dev libbz2-dev libgmp-dev libgomp1 default-jdk-headless libcap2-bin openssl
+      for package in nmap masscan nbtscan; do
         if apt-cache show "$package" >/dev/null 2>&1; then
           run_apt apt-get install -y "$package" || \
             warn "可选依赖 $package 安装失败"
@@ -353,7 +355,9 @@ ensure_apt() {
       local -a rpm_required=(
         ca-certificates curl unzip tar xz git gcc gcc-c++ make
         sqlite-devel sqlite libpcap-devel nginx python3 python3-pip
-        libcap openssl
+        python3-devel ruby ruby-devel rubygem-addressable autoconf automake libtool
+        bison flex openssl-devel libssh-devel libidn-devel pcre2-devel
+        gtk3-devel zlib-devel bzip2-devel gmp-devel libcap openssl
       )
       if ((OS_MAJOR >= 8)); then
         rpm_required+=(pkgconf-pkg-config java-17-openjdk-headless)
@@ -362,7 +366,7 @@ ensure_apt() {
       fi
       run_pkg "$PKG_MANAGER" makecache
       run_pkg "$PKG_MANAGER" install -y "${rpm_required[@]}"
-      for package in nmap masscan whatweb sqlmap dirsearch; do
+      for package in nmap masscan nbtscan; do
         if run_root "$PKG_MANAGER" info "$package" >/dev/null 2>&1; then
           run_pkg "$PKG_MANAGER" install -y "$package" || \
             warn "可选依赖 $package 安装失败"
@@ -628,20 +632,21 @@ copy_release() {
   run_root mkdir -p \
     "${APP_ROOT}/backend" "${APP_ROOT}/frontend/dist" "${APP_ROOT}/data" \
     "${APP_ROOT}/deploy" "${APP_ROOT}/roles" "${APP_ROOT}/skills" \
-    "${APP_ROOT}/tools" "${APP_ROOT}/thirdTools" "${APP_ROOT}/licenses"
+    "${APP_ROOT}/tools" "${APP_ROOT}/customTools" "${APP_ROOT}/thirdTools" "${APP_ROOT}/licenses"
   run_root install -m 0755 "${BUILD_ROOT}/sophon-server" "${APP_ROOT}/backend/sophon-server"
   run_root install -m 0755 "${BUILD_ROOT}/sophon-mcp-tools" "${APP_ROOT}/backend/sophon-mcp-tools"
   run_root install -m 0755 "${BUILD_ROOT}/sophon-tool-runner" "${APP_ROOT}/backend/sophon-tool-runner"
   run_root cp -a "$ROOT_DIR/frontend/dist/." "${APP_ROOT}/frontend/dist/"
-  for name in deploy roles skills tools licenses; do
+  for name in deploy roles skills tools customTools licenses; do
     run_root cp -a "$ROOT_DIR/${name}/." "${APP_ROOT}/${name}/"
   done
+  run_root cp "${APP_ROOT}"/customTools/definitions/*.yaml "${APP_ROOT}/tools/"
   if [[ -d "$ROOT_DIR/thirdTools" ]] && [[ -n "$(find "$ROOT_DIR/thirdTools" -type f -print -quit)" ]]; then
     run_root cp -a "$ROOT_DIR/thirdTools/." "${APP_ROOT}/thirdTools/"
   else
     warn "未提供 thirdTools；平台将使用系统命令环境，用户可稍后上传工具"
   fi
-  run_root find "${APP_ROOT}/deploy" "${APP_ROOT}/tools" -type f -exec sed -i "s|/opt/sophon|${APP_ROOT}|g" {} +
+  run_root find "${APP_ROOT}/deploy" "${APP_ROOT}/tools" "${APP_ROOT}/customTools" -type f -exec sed -i "s|/opt/sophon|${APP_ROOT}|g" {} +
   run_root sed -i "s|listen 8080;|listen ${HTTP_PORT};|g" "${APP_ROOT}/deploy/nginx/nginx.conf"
 
   if [[ ! -f "${APP_ROOT}/config.yml" ]]; then
@@ -673,14 +678,14 @@ install_python_deps() {
   local attempt
   local selected_index=""
   info "创建 Python 虚拟环境..."
-  run_root python3 -m venv "${APP_ROOT}/venv"
+  run_root python3 -m venv --system-site-packages "${APP_ROOT}/venv"
   while IFS= read -r index; do
     [[ -n "$index" ]] || continue
     for ((attempt = 1; attempt <= PIP_RETRIES; attempt++)); do
       info "安装 Python 依赖，源 ${index}（${attempt}/${PIP_RETRIES}）..."
       if run_root env PIP_INDEX_URL="$index" PIP_DEFAULT_TIMEOUT=30 \
         "${APP_ROOT}/venv/bin/pip" install --disable-pip-version-check \
-        --no-cache-dir --retries 1 requests httpx h2 impacket; then
+        --no-cache-dir --retries 1 requests PySocks httpx h2 impacket ddddocr==1.6.1; then
         selected_index="$index"
         break
       fi
@@ -755,7 +760,7 @@ install_third_tools() {
     run_root mkdir -p "$target/jadx"
     run_root cp -a "$ROOT_DIR/thirdTools/jadx/." "$target/jadx/"
   fi
-  for script_name in decompile.py host_collision.py bypass403.py; do
+  for script_name in decompile.py; do
     if [[ -f "$ROOT_DIR/thirdTools/${script_name}" ]]; then
       run_root cp -a "$ROOT_DIR/thirdTools/${script_name}" "$target/"
     fi
@@ -813,7 +818,7 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-Environment=PATH=${APP_ROOT}/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${APP_ROOT}/thirdTools/bin:${APP_ROOT}/thirdTools:${APP_ROOT}/venv/bin:${APP_ROOT}/customTools/scripts
 Environment=SOPHON_APP_ROOT=${APP_ROOT}
 ExecStart=/bin/sh ${APP_ROOT}/deploy/container/start.sh
 ExecStop=/bin/sh ${APP_ROOT}/deploy/container/stop.sh

@@ -1,0 +1,95 @@
+name: "godzilla"
+command: "python3"
+args: ["/opt/sophon/tools/godzilla_client.py"]
+enabled: true
+timeout_seconds: 60
+requires_python:
+  - "cryptography"
+  - "requests"
+requires_binaries:
+  - "java"
+  - "javac"
+short_description: "Godzilla 官方协议目录与 WebShell 连接验证（gsl5.jar 驱动）"
+description: |
+  official 和 auto 模式直接使用项目内置 gsl5.jar 的官方 Payload 与 Cryption 实现，
+  Python 不重新实现官方密钥派生、marker 或请求体格式。失败时返回具体阶段、
+  Java 原始错误和派生 key 指纹，不会用固定“握手失败”覆盖真实原因。
+
+  operation=list 会从 gsl5.jar 动态列出全部 Payload 和 Cryption 组合。
+  protocol=simplified 仅用于明确指定的自定义 AES-ECB/XOR 简化马，
+  不再作为 official 失败后的自动回退。
+
+  operation=help 会返回参数说明、调用示例和当前官方 cryptor 清单。operation=test 时，
+  url、password、secret_key 必填。仅用于已授权测试。
+parameters:
+  - name: "operation"
+    type: "string"
+    description: "操作类型：help 查看参数，list 列出 gsl5.jar 官方协议，test 验证连接"
+    required: true
+    position: 0
+    format: "positional"
+    options: ["help", "list", "test"]
+  - name: "url"
+    type: "string"
+    description: "test 时必填，Godzilla WebShell URL，仅允许 http/https"
+    required: false
+    flag: "--url"
+    format: "flag"
+  - name: "password"
+    type: "string"
+    description: "test 时必填，WebShell 密码参数名，例如 sophon"
+    required: false
+    flag: "--password"
+    format: "flag"
+  - name: "secret_key"
+    type: "string"
+    description: "test 时必填，Godzilla 通信密钥"
+    required: false
+    flag: "--secret-key"
+    format: "flag"
+  - name: "payload"
+    type: "string"
+    description: "可选载荷名；省略时由 gsl5.jar 根据 cryptor 自动选择，指定不匹配会返回错误"
+    required: false
+    flag: "--payload"
+    format: "flag"
+  - name: "cryptor"
+    type: "string"
+    description: "加密器，默认 JavaAesBase64；支持 JavaAesRaw、CSharpAesBase64、PhpXor、AspXorBase64 等"
+    required: false
+    flag: "--cryptor"
+    format: "flag"
+  - name: "protocol"
+    type: "string"
+    description: "协议模式：auto/official 只走 gsl5.jar 官方实现；simplified 仅用于明确指定的自定义简化马"
+    required: false
+    flag: "--protocol"
+    format: "flag"
+    default: "auto"
+    options: ["auto", "official", "simplified"]
+  - name: "encoding"
+    type: "string"
+    description: "目标输出编码，默认 UTF-8"
+    required: false
+    flag: "--encoding"
+    format: "flag"
+  - name: "headers_json"
+    type: "object"
+    description: "可选 HTTP 请求头对象，例如 {\"Cookie\":\"sid=...\"}"
+    required: false
+    flag: "--headers-json"
+    format: "flag"
+  - name: "timeout"
+    type: "float"
+    description: "连接和读取超时秒数，范围 0.5-120，默认 10"
+    required: false
+    flag: "--timeout"
+    format: "flag"
+    default: 10
+  - name: "verify_tls"
+    type: "bool"
+    description: "HTTPS 是否校验证书，默认 false"
+    required: false
+    flag: "--verify-tls"
+    format: "flag"
+    default: false

@@ -88,3 +88,34 @@ func TestForcedCleanSkipsDisabledCategory(t *testing.T) {
 		t.Fatalf("禁用类别文件应保留: %v", err)
 	}
 }
+
+func TestRemoveConversationDirsCleansProjectScopedWorkspace(t *testing.T) {
+	root := t.TempDir()
+	service := NewService(nil, config.StorageConfig{
+		ArtifactRoot: root,
+		Categories: map[string]config.StorageCategoryConfig{
+			"workspace": {Enabled: true, Path: "tmp/workspace"},
+		},
+	}, "")
+	target := filepath.Join(
+		root,
+		"tmp",
+		"workspace",
+		"projects",
+		"project-a",
+		"conversations",
+		"conversation-a",
+	)
+	if err := os.MkdirAll(target, 0o700); err != nil {
+		t.Fatalf("创建工作区失败: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(target, "result.txt"), []byte("ok"), 0o600); err != nil {
+		t.Fatalf("写入工作区文件失败: %v", err)
+	}
+	if removed := service.RemoveConversationDirs([]string{"conversation-a"}); removed != 1 {
+		t.Fatalf("应清理一个隔离工作区，实际 %d", removed)
+	}
+	if _, err := os.Stat(target); !os.IsNotExist(err) {
+		t.Fatalf("项目隔离工作区未清理: %v", err)
+	}
+}

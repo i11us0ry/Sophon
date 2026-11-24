@@ -16,12 +16,15 @@ func TestEmitterWritesMetadataOnlyEvents(t *testing.T) {
 	t.Cleanup(func() { _ = emitter.Close() })
 
 	emitter.Emit(Event{
-		EventType:      TypeToolStarted,
-		UserID:         "user-1",
-		ProjectID:      "project-1",
-		ConversationID: "conversation-1",
-		ToolName:       "sqlmap",
-		ServerName:     "sophon-tool-runner",
+		EventType:       TypeToolStarted,
+		UserID:          "user-1",
+		ProjectID:       "project-1",
+		ConversationID:  "conversation-1",
+		TaskProfileID:   "profile-1",
+		TaskProfileName: "Java",
+		TaskProfileHash: "hash-1",
+		ToolName:        "sqlmap",
+		ServerName:      "sophon-tool-runner",
 	})
 	emitter.Emit(Event{
 		EventType:      TypeToolDecision,
@@ -43,7 +46,13 @@ func TestEmitterWritesMetadataOnlyEvents(t *testing.T) {
 		t.Fatalf("读取事件文件失败: %v", err)
 	}
 	content := string(raw)
-	for _, marker := range []string{`"event_type":"tool.started"`, `"tool_name":"sqlmap"`, `"policy_decision":"require_approval"`} {
+	for _, marker := range []string{
+		`"event_type":"tool.started"`,
+		`"task_profile_id":"profile-1"`,
+		`"task_profile_name":"Java"`,
+		`"tool_name":"sqlmap"`,
+		`"policy_decision":"require_approval"`,
+	} {
 		if !strings.Contains(content, marker) {
 			t.Fatalf("事件文件缺少 %s: %s", marker, content)
 		}

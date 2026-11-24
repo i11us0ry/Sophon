@@ -29,7 +29,10 @@ interface SettingsValues {
     maxConcurrentSessions: number
     contextMaxChars: number
     maxIterations: number
+    maxDurationSeconds: number
     maxTurnTokens: number
+    maxToolCalls: number
+    subagentMaxToolCalls: number
     maxHypotheses: number
   }
   hitl: {
@@ -170,7 +173,10 @@ const form = reactive({
   llmTimeout: 120,
   contextMaxChars: 24000,
   maxIterations: 40,
+  maxDurationSeconds: 0,
   maxTurnTokens: 0,
+  maxToolCalls: 0,
+  subagentMaxToolCalls: 80,
   maxHypotheses: 200,
   hitlEnabled: false,
   hitlTools: '',
@@ -317,7 +323,10 @@ async function load() {
     form.llmTimeout = values.llm.timeoutSeconds
     form.contextMaxChars = values.agent.contextMaxChars
     form.maxIterations = values.agent.maxIterations
+    form.maxDurationSeconds = values.agent.maxDurationSeconds ?? 0
     form.maxTurnTokens = values.agent.maxTurnTokens ?? 0
+    form.maxToolCalls = values.agent.maxToolCalls ?? 0
+    form.subagentMaxToolCalls = values.agent.subagentMaxToolCalls ?? 80
     form.maxHypotheses = values.agent.maxHypotheses
     form.hitlEnabled = values.hitl.enabled
     form.hitlTools = (values.hitl.tools ?? []).join(', ')
@@ -366,7 +375,10 @@ async function save() {
         maxConcurrentSessions: Number(form.maxConcurrentSessions),
         contextMaxChars: Number(form.contextMaxChars),
         maxIterations: Number(form.maxIterations),
+        maxDurationSeconds: Number(form.maxDurationSeconds),
         maxTurnTokens: Number(form.maxTurnTokens),
+        maxToolCalls: Number(form.maxToolCalls),
+        subagentMaxToolCalls: Number(form.subagentMaxToolCalls),
         maxHypotheses: Number(form.maxHypotheses),
       },
       hitl: {
@@ -1129,6 +1141,17 @@ onMounted(async () => {
           <small class="field-hint">{{ t('settings.maxIterationsHint') }}</small>
         </label>
         <label class="field">
+          <span>{{ t('settings.maxDurationSeconds') }}</span>
+          <input
+            v-model.number="form.maxDurationSeconds"
+            type="number"
+            min="0"
+            max="100000000"
+            :disabled="locked('agent.maxDurationSeconds') || !writable"
+          />
+          <small class="field-hint">{{ t('settings.maxDurationSecondsHint') }}</small>
+        </label>
+        <label class="field">
           <span>{{ t('settings.maxTurnTokens') }}</span>
           <input
             v-model.number="form.maxTurnTokens"
@@ -1138,6 +1161,28 @@ onMounted(async () => {
             :disabled="locked('agent.maxTurnTokens') || !writable"
           />
           <small class="field-hint">{{ t('settings.maxTurnTokensHint') }}</small>
+        </label>
+        <label class="field">
+          <span>{{ t('settings.maxToolCalls') }}</span>
+          <input
+            v-model.number="form.maxToolCalls"
+            type="number"
+            min="0"
+            max="100000000"
+            :disabled="locked('agent.maxToolCalls') || !writable"
+          />
+          <small class="field-hint">{{ t('settings.maxToolCallsHint') }}</small>
+        </label>
+        <label class="field">
+          <span>{{ t('settings.subagentMaxToolCalls') }}</span>
+          <input
+            v-model.number="form.subagentMaxToolCalls"
+            type="number"
+            min="0"
+            max="100000000"
+            :disabled="locked('agent.subagentMaxToolCalls') || !writable"
+          />
+          <small class="field-hint">{{ t('settings.subagentMaxToolCallsHint') }}</small>
         </label>
         <label class="field">
           <span>{{ t('settings.maxHypotheses') }}</span>

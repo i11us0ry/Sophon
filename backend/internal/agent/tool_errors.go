@@ -11,7 +11,7 @@ import (
 
 const tolerantToolErrorRunes = 6000
 
-// tolerantTool 把工具执行错误转成普通工具结果回传模型，让模型自行重试或向用户解释；
+// tolerantTool 把工具结果转成统一协议，并把执行错误回传模型；
 // 只有上下文取消（用户停止/超时）仍然中断整轮。
 type tolerantTool struct {
 	inner tool.BaseTool
@@ -40,7 +40,7 @@ func (t *tolerantTool) InvokableRun(
 	}
 	result, err := invokable.InvokableRun(ctx, argumentsInJSON, opts...)
 	if err == nil {
-		return result, nil
+		return renderToolSuccess(t.toolName(ctx), result), nil
 	}
 	if ctx.Err() != nil {
 		return result, err
@@ -52,14 +52,13 @@ func (t *tolerantTool) InvokableRun(
 	}
 	// 工具错误通常写在输出末尾（命令回显、日志在前），超长时保留尾部。
 	detail = truncateToolErrorTail(detail, tolerantToolErrorRunes)
-	return fmt.Sprintf(
-		"[工具 %s 执行失败。先分析错误类型：命令语法、引号、路径、参数、"+
-			"Shell兼容、临时网络或超时等可修复问题，必须修改命令、参数或执行方式后重试，"+
-			"禁止原样重复失败命令；连续两次相同错误后停止重试。"+
-			"策略拒绝、权限或凭据缺失、目标持续不可达、用户取消等情况不得绕过，"+
-			"说明原因后再跳过。]\n%s",
+	classification := classifyToolResultError(ctx, err, detail)
+	return renderToolError(
 		t.toolName(ctx),
+		classification.Class,
 		detail,
+		classification.Retryable,
+		classification.NextActions,
 	), nil
 }
 

@@ -17,11 +17,12 @@ interface AgentRole {
   description: string
   prompt: string
   icon: string
-  defaultMode?: 'auto' | 'fast' | 'deep'
   skills: string[]
   builtin: boolean
   enabled: boolean
   internal?: boolean
+  system?: boolean
+  kind?: 'system_agent' | 'task_profile'
   mandatory?: boolean
   editable?: boolean
 }
@@ -43,7 +44,6 @@ const createDraft = reactive({
   name: '',
   description: '',
   prompt: '',
-  defaultMode: 'auto' as 'auto' | 'fast' | 'deep',
   skills: [] as string[],
   enabled: true,
 })
@@ -57,16 +57,15 @@ const filteredRoles = computed(() => {
     return roles.value
   }
   return roles.value.filter((role) => {
-    const kind = role.internal
+    const kind = isSystemRole(role)
       ? t('role.systemAgent')
       : role.builtin
-        ? t('role.builtin')
-        : t('role.custom')
+        ? t('role.builtinTaskProfile')
+        : t('role.customTaskProfile')
     return [
       role.name,
       role.description,
       kind,
-      roleModeLabel(role.defaultMode),
       ...(role.skills ?? []),
     ]
       .join(' ')
@@ -74,6 +73,27 @@ const filteredRoles = computed(() => {
       .includes(keyword)
   })
 })
+const systemAgents = computed(() => filteredRoles.value.filter(isSystemRole))
+const taskProfiles = computed(() => filteredRoles.value.filter((role) => !isSystemRole(role)))
+const roleGroups = computed(() => [
+  {
+    key: 'system',
+    title: t('role.systemAgentsTitle'),
+    hint: t('role.systemAgentsHint'),
+    items: systemAgents.value,
+  },
+  {
+    key: 'task-profile',
+    title: t('role.taskProfilesTitle'),
+    hint: t('role.taskProfilesHint'),
+    items: taskProfiles.value,
+  },
+])
+const draftIsSystem = computed(() => (draft.value ? isSystemRole(draft.value) : false))
+
+function isSystemRole(role: AgentRole) {
+  return Boolean(role.internal || role.system || role.kind === 'system_agent')
+}
 
 async function load() {
   loading.value = true
@@ -111,7 +131,7 @@ async function run(action: () => Promise<void>, successText: string) {
   }
 }
 
-function createRole() {
+function createTaskProfile() {
   if (!createDraft.name.trim()) {
     error.value = t('role.nameRequired')
     return
@@ -123,7 +143,6 @@ function createRole() {
       icon: '',
       description: createDraft.description.trim(),
       prompt: createDraft.prompt.trim() || t('role.defaultPrompt', { name }),
-      defaultMode: createDraft.defaultMode,
       skills: [...createDraft.skills],
       enabled: createDraft.enabled,
     })
@@ -137,7 +156,6 @@ function resetCreateDraft() {
   createDraft.name = ''
   createDraft.description = ''
   createDraft.prompt = ''
-  createDraft.defaultMode = 'auto'
   createDraft.skills = []
   createDraft.enabled = true
 }
@@ -153,7 +171,7 @@ function closeCreateRole() {
 }
 
 function toggleRole(role: AgentRole) {
-  if (role.mandatory || (role.internal && !role.editable)) {
+  if (role.mandatory || (isSystemRole(role) && !role.editable)) {
     return
   }
   void run(async () => {
@@ -162,7 +180,6 @@ function toggleRole(role: AgentRole) {
       description: role.description,
       prompt: role.prompt,
       icon: role.icon,
-      defaultMode: role.defaultMode || 'auto',
       skills: role.skills,
       enabled: !role.enabled,
     })
@@ -171,7 +188,7 @@ function toggleRole(role: AgentRole) {
 }
 
 function removeRole(role: AgentRole) {
-  if (role.internal || role.mandatory) {
+  if (isSystemRole(role) || role.mandatory) {
     return
   }
   if (!window.confirm(t('role.confirmDelete', { name: role.name }))) {
@@ -214,7 +231,6 @@ function saveRole() {
       description: current.description,
       prompt: current.prompt,
       icon: current.icon,
-      defaultMode: current.defaultMode || 'auto',
       skills: current.skills,
       enabled: current.enabled,
     })
@@ -223,18 +239,8 @@ function saveRole() {
   }, t('role.saved'))
 }
 
-function roleModeLabel(mode?: string) {
-  if (mode === 'fast') {
-    return t('role.modeFast')
-  }
-  if (mode === 'deep') {
-    return t('role.modeDeep')
-  }
-  return t('role.modeAuto')
-}
-
 function openRoleEditor(role: AgentRole) {
-  if ((role.internal || role.mandatory) && !role.editable) {
+  if ((isSystemRole(role) || role.mandatory) && !role.editable) {
     return
   }
   systemAgent.value = null
@@ -255,7 +261,7 @@ onMounted(load)
       <div class="page-heading-with-robot">
         <PageTitleRobot tone="violet" />
         <div>
-          <p class="eyebrow">AGENT ROLES</p>
+          <p class="eyebrow">AGENT CONTROL</p>
           <h1>{{ t('nav.roles') }}</h1>
           <p class="page-header-hint">{{ t('role.controlHint') }}</p>
         </div>
@@ -283,92 +289,107 @@ onMounted(load)
       <span class="role-filter-count">{{ filteredRoles.length }} / {{ roles.length }}</span>
     </div>
 
-    <div v-if="filteredRoles.length" class="role-grid">
-      <article v-for="role in filteredRoles" :key="role.id" class="role-card">
-        <div class="role-card-unit">
-          <div class="role-bot" :class="{ off: !role.enabled }" aria-hidden="true">
-            <span class="role-bot-antenna"></span>
-            <span class="role-bot-head"><i></i><i></i><b class="role-bot-mouth"></b></span>
-            <span class="role-bot-body">
-              <span class="role-bot-core"></span>
-            </span>
+    <template v-if="filteredRoles.length">
+      <section
+        v-for="group in roleGroups"
+        v-show="group.items.length"
+        :key="group.key"
+        class="role-section"
+      >
+        <header class="role-section-head">
+          <div>
+            <h2>{{ group.title }}</h2>
+            <p>{{ group.hint }}</p>
           </div>
-          <div class="role-card-content">
-            <div class="role-card-title">
-              <h2>{{ role.name }}</h2>
-              <span
-                class="role-state"
-                :class="{ off: !role.enabled, mandatory: role.mandatory }"
+          <span>{{ group.items.length }}</span>
+        </header>
+        <div class="role-grid">
+          <article v-for="role in group.items" :key="role.id" class="role-card">
+            <div class="role-card-unit">
+              <div class="role-bot" :class="{ off: !role.enabled }" aria-hidden="true">
+                <span class="role-bot-antenna"></span>
+                <span class="role-bot-head"><i></i><i></i><b class="role-bot-mouth"></b></span>
+                <span class="role-bot-body">
+                  <span class="role-bot-core"></span>
+                </span>
+              </div>
+              <div class="role-card-content">
+                <div class="role-card-title">
+                  <h2>{{ role.name }}</h2>
+                  <span
+                    class="role-state"
+                    :class="{ off: !role.enabled, mandatory: role.mandatory }"
+                  >
+                    {{
+                      role.mandatory
+                        ? t('role.mandatoryEnabled')
+                        : role.enabled
+                          ? t('common.enable')
+                          : t('common.disable')
+                    }}
+                  </span>
+                </div>
+                <div class="role-meta">
+                  <span>
+                    {{
+                      isSystemRole(role)
+                        ? t('role.systemAgent')
+                        : role.builtin
+                          ? t('role.builtinTaskProfile')
+                          : t('role.customTaskProfile')
+                    }}
+                  </span>
+                  <span>{{ t('role.skillCount', { count: role.skills.length }) }}</span>
+                </div>
+              </div>
+            </div>
+            <p class="role-description" :title="role.description || t('role.noDescription')">
+              {{ role.description || t('role.noDescription') }}
+            </p>
+            <footer>
+              <button
+                v-if="isSystemRole(role)"
+                class="button compact"
+                type="button"
+                @click="openSystemAgent(role)"
               >
-                {{
-                  role.mandatory
-                    ? t('role.mandatoryEnabled')
-                    : role.enabled
-                      ? t('common.enable')
-                      : t('common.disable')
-                }}
-              </span>
-            </div>
-            <div class="role-meta">
-              <span>
-                {{
-                  role.internal
-                    ? t('role.systemAgent')
-                    : role.builtin
-                      ? t('role.builtin')
-                      : t('role.custom')
-                }}
-              </span>
-              <span>{{ t('role.skillCount', { count: role.skills.length }) }}</span>
-              <span>{{ roleModeLabel(role.defaultMode) }}</span>
-            </div>
-          </div>
+                {{ t('role.viewResponsibilities') }}
+              </button>
+              <button
+                v-if="canManage && (!isSystemRole(role) || role.editable)"
+                class="button compact"
+                type="button"
+                @click="openRoleEditor(role)"
+              >
+                {{ t('common.edit') }}
+              </button>
+              <button
+                v-if="canManage && (!isSystemRole(role) || role.editable)"
+                class="button compact"
+                type="button"
+                @click="toggleRole(role)"
+              >
+                {{ role.enabled ? t('common.disable') : t('common.enable') }}
+              </button>
+              <button
+                v-if="canManage && !isSystemRole(role)"
+                class="button compact danger"
+                type="button"
+                :title="role.builtin ? t('role.builtinDeleteHint') : ''"
+                @click="removeRole(role)"
+              >
+                {{ t('common.delete') }}
+              </button>
+            </footer>
+          </article>
         </div>
-        <p class="role-description" :title="role.description || t('role.noDescription')">
-          {{ role.description || t('role.noDescription') }}
-        </p>
-        <footer>
-          <button
-            v-if="role.internal"
-            class="button compact"
-            type="button"
-            @click="openSystemAgent(role)"
-          >
-            {{ t('role.viewResponsibilities') }}
-          </button>
-          <button
-            v-if="canManage && (!role.internal || role.editable)"
-            class="button compact"
-            type="button"
-            @click="openRoleEditor(role)"
-          >
-            {{ t('common.edit') }}
-          </button>
-          <button
-            v-if="canManage && (!role.internal || role.editable)"
-            class="button compact"
-            type="button"
-            @click="toggleRole(role)"
-          >
-            {{ role.enabled ? t('common.disable') : t('common.enable') }}
-          </button>
-          <button
-            v-if="canManage && !role.internal"
-            class="button compact danger"
-            type="button"
-            :title="role.builtin ? t('role.builtinDeleteHint') : ''"
-            @click="removeRole(role)"
-          >
-            {{ t('common.delete') }}
-          </button>
-        </footer>
-      </article>
-    </div>
+      </section>
+    </template>
     <div v-else-if="!loading" class="role-empty">{{ t('role.searchEmpty') }}</div>
 
     <aside v-if="draft" class="role-drawer">
       <header class="drawer-header">
-        <h2>{{ t('role.editTitle') }}</h2>
+        <h2>{{ draftIsSystem ? t('role.editSystemAgent') : t('role.editTitle') }}</h2>
         <button class="text-button dark" type="button" @click="draft = null">{{ t('common.close') }}</button>
       </header>
       <div class="drawer-body">
@@ -381,22 +402,14 @@ onMounted(load)
           <input v-model="draft.description" />
         </label>
         <label>
-          <span>{{ t('role.prompt') }}</span>
+          <span>{{ draftIsSystem ? t('role.systemPrompt') : t('role.methodPrompt') }}</span>
           <textarea v-model="draft.prompt" rows="8"></textarea>
-        </label>
-        <label>
-          <span>{{ t('role.defaultMode') }}</span>
-          <select v-model="draft.defaultMode">
-            <option value="auto">{{ t('role.modeAuto') }}</option>
-            <option value="fast">{{ t('role.modeFast') }}</option>
-            <option value="deep">{{ t('role.modeDeep') }}</option>
-          </select>
         </label>
         <label class="checkbox-line">
           <input v-model="draft.enabled" type="checkbox" :disabled="draft.mandatory" />
-          <span>{{ t('role.enableLabel') }}</span>
+          <span>{{ draftIsSystem ? t('role.enableSystemAgent') : t('role.enableLabel') }}</span>
         </label>
-        <div v-if="canReadSkills" class="skill-picker">
+        <div v-if="canReadSkills && !draftIsSystem" class="skill-picker">
           <span>{{ t('role.bindSkills') }}</span>
           <div class="skill-options">
             <label v-for="skill in skills" :key="skill.name" class="checkbox-line">
@@ -505,14 +518,6 @@ onMounted(load)
             <span>{{ t('role.prompt') }}</span>
             <textarea v-model="createDraft.prompt" rows="8"></textarea>
           </label>
-          <label>
-            <span>{{ t('role.defaultMode') }}</span>
-            <select v-model="createDraft.defaultMode">
-              <option value="auto">{{ t('role.modeAuto') }}</option>
-              <option value="fast">{{ t('role.modeFast') }}</option>
-              <option value="deep">{{ t('role.modeDeep') }}</option>
-            </select>
-          </label>
           <label class="checkbox-line">
             <input v-model="createDraft.enabled" type="checkbox" />
             <span>{{ t('role.enableLabel') }}</span>
@@ -532,7 +537,7 @@ onMounted(load)
           </div>
         </div>
         <footer class="role-modal-foot">
-          <button class="button" type="button" @click="createRole">{{ t('role.create') }}</button>
+          <button class="button" type="button" @click="createTaskProfile">{{ t('role.create') }}</button>
           <button class="button compact" type="button" @click="closeCreateRole">
             {{ t('common.cancel') }}
           </button>
@@ -551,6 +556,43 @@ onMounted(load)
 .alert.ok {
   color: var(--success);
   background: color-mix(in srgb, var(--success) 10%, var(--surface));
+}
+
+.role-section {
+  display: grid;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.role-section-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 0 2px 8px;
+  border-bottom: 1px solid var(--line);
+}
+
+.role-section-head h2 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.role-section-head p {
+  margin: 4px 0 0;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.role-section-head > span {
+  min-width: 24px;
+  padding: 2px 6px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  color: var(--text-muted);
+  font-family: var(--mono);
+  font-size: 10px;
+  text-align: center;
 }
 
 .role-grid {

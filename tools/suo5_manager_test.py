@@ -88,6 +88,55 @@ class Suo5ManagerTest(unittest.TestCase):
         self.assertTrue(stopped["stopped"])
         self.assertFalse(self.manager.dispatch("status", "{}")["running"])
 
+    def test_start_waits_for_slow_handshake(self):
+        slow_binary = self.workspace / "slow-suo5"
+        slow_binary.write_text(
+            textwrap.dedent(
+                """\
+                #!/usr/bin/env python3
+                import socket, sys, time
+                args = sys.argv[1:]
+                listen = args[args.index("--listen") + 1]
+                host, port = listen.rsplit(":", 1)
+                time.sleep(3.2)
+                server = socket.socket()
+                server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                server.bind((host, int(port)))
+                server.listen()
+                while True:
+                    time.sleep(1)
+                """
+            ),
+            encoding="utf-8",
+        )
+        slow_binary.chmod(0o700)
+        port = free_port()
+        with mock.patch.dict(
+            os.environ,
+            {"SOPHON_SUO5_BINARY": str(slow_binary)},
+            clear=False,
+        ):
+            started = self.manager.dispatch(
+                "start",
+                json.dumps(
+                    {
+                        "target": "http://authorized.example/suo5.aspx",
+                        "port": port,
+                        "timeout": 5,
+                        "retry": 1,
+                    }
+                ),
+            )
+        self.assertTrue(started["running"])
+        self.assertGreaterEqual(started["ready_timeout_seconds"], 15)
+
+    def test_startup_timeout_adapts_to_request_settings(self):
+        fast = self.manager.startup_ready_seconds({"timeout": 5, "retry": 1})
+        slow = self.manager.startup_ready_seconds({"timeout": 20, "retry": 2})
+        self.assertGreaterEqual(fast, 15)
+        self.assertGreater(slow, fast)
+        self.assertLessEqual(slow, 60)
+
     def test_rejects_unsafe_inputs(self):
         for options in [
             {"target": "file:///etc/passwd"},

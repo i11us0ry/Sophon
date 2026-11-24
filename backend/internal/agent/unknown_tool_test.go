@@ -20,6 +20,10 @@ func TestUnknownToolHandlerRecoversDirectoryList(t *testing.T) {
 	if err != nil {
 		t.Fatalf("未知工具处理不应返回错误: %v", err)
 	}
+	header, body, ok := parseToolResult(result)
+	if !ok || header.Status != toolResultStatusError || header.ErrorClass != toolErrorInvalidArguments {
+		t.Fatalf("未知工具协议头异常: %+v body=%s", header, body)
+	}
 	for _, want := range []string{
 		"directory_list",
 		"不存在",
@@ -28,8 +32,8 @@ func TestUnknownToolHandlerRecoversDirectoryList(t *testing.T) {
 		"ls -la",
 		`/tmp`,
 	} {
-		if !strings.Contains(result, want) {
-			t.Fatalf("未知工具提示缺少 %q：%s", want, result)
+		if !strings.Contains(body, want) {
+			t.Fatalf("未知工具提示缺少 %q：%s", want, body)
 		}
 	}
 }
@@ -59,7 +63,11 @@ func TestUnknownToolHandlerReportsDisabledTool(t *testing.T) {
 	if err != nil {
 		t.Fatalf("停用工具处理不应返回错误: %v", err)
 	}
-	if !strings.Contains(result, "停用") || !strings.Contains(result, "未执行") {
-		t.Fatalf("停用工具提示异常: %s", result)
+	header, body, ok := parseToolResult(result)
+	if !ok || header.Status != toolResultStatusBlocked || header.ErrorClass != toolErrorPolicy {
+		t.Fatalf("停用工具协议头异常: %+v body=%s", header, body)
+	}
+	if !strings.Contains(body, "停用") || !strings.Contains(body, "未执行") {
+		t.Fatalf("停用工具提示异常: %s", body)
 	}
 }

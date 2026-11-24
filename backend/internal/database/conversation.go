@@ -13,6 +13,11 @@ import (
 // ErrNotLastUserMessage 表示待编辑的消息不是会话最后一条用户消息。
 var ErrNotLastUserMessage = errors.New("不是最后一条用户消息")
 
+var (
+	ErrConversationNotEmpty    = errors.New("conversation already has messages")
+	ErrConversationNotEditable = errors.New("conversation is not editable")
+)
+
 type Conversation struct {
 	ID                   string
 	OwnerUserID          string
@@ -42,6 +47,8 @@ type ProcessDetail struct {
 	ID             string
 	ConversationID string
 	MessageID      string
+	SessionID      string
+	Sequence       int64
 	EventType      string
 	Message        string
 	Data           map[string]interface{}
@@ -207,6 +214,105 @@ func (db *DB) GetConversation(ctx context.Context, id, ownerUserID string) (*Con
 	item.CreatedAt = time.Unix(createdAt, 0)
 	item.UpdatedAt = time.Unix(updatedAt, 0)
 	return &item, nil
+}
+
+func (db *DB) UpdateConversationProjectIfEmpty(
+	ctx context.Context,
+	id string,
+	ownerUserID string,
+	projectID string,
+) (*Conversation, error) {
+	id = strings.TrimSpace(id)
+	ownerUserID = strings.TrimSpace(ownerUserID)
+	projectID = strings.TrimSpace(projectID)
+	if id == "" || ownerUserID == "" || projectID == "" {
+		return nil, ErrConversationNotEditable
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var kind, parentConversationID, batchID string
+	if err := tx.QueryRowContext(
+		ctx,
+		`SELECT kind, parent_conversation_id, batch_id
+		 FROM conversations WHERE id = ? AND owner_user_id = ?`,
+		id,
+		ownerUserID,
+	).Scan(&kind, &parentConversationID, &batchID); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(kind) != "normal" ||
+		strings.TrimSpace(parentConversationID) != "" ||
+		strings.TrimSpace(batchID) != "" {
+		return nil, ErrConversationNotEditable
+	}
+
+	var activeProject int
+	if err := tx.QueryRowContext(
+		ctx,
+		`SELECT COUNT(*) FROM projects
+		 WHERE id = ? AND owner_user_id = ? AND status = 'active'`,
+		projectID,
+		ownerUserID,
+	).Scan(&activeProject); err != nil {
+		return nil, err
+	}
+	if activeProject == 0 {
+		return nil, ErrConversationNotEditable
+	}
+
+	var messageCount, childCount int
+	if err := tx.QueryRowContext(
+		ctx,
+		`SELECT COUNT(*) FROM messages WHERE conversation_id = ?`,
+		id,
+	).Scan(&messageCount); err != nil {
+		return nil, err
+	}
+	if messageCount > 0 {
+		return nil, ErrConversationNotEmpty
+	}
+	if err := tx.QueryRowContext(
+		ctx,
+		`SELECT COUNT(*) FROM conversations WHERE parent_conversation_id = ?`,
+		id,
+	).Scan(&childCount); err != nil {
+		return nil, err
+	}
+	if childCount > 0 {
+		return nil, ErrConversationNotEditable
+	}
+
+	result, err := tx.ExecContext(
+		ctx,
+		`UPDATE conversations
+		 SET project_id = ?, asset_id = '', updated_at = ?
+		 WHERE id = ? AND owner_user_id = ?
+		   AND NOT EXISTS (
+		     SELECT 1 FROM messages WHERE conversation_id = conversations.id
+		   )`,
+		projectID,
+		time.Now().UTC().Unix(),
+		id,
+		ownerUserID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return nil, err
+	}
+	if affected == 0 {
+		return nil, ErrConversationNotEmpty
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return db.GetConversation(ctx, id, ownerUserID)
 }
 
 // ListConversationChildren 返回批量父对话下的资产子对话。
@@ -462,6 +568,8 @@ func (db *DB) DeleteConversations(
 			`DELETE FROM hitl_requests WHERE conversation_id = ?`,
 			`DELETE FROM tool_executions WHERE conversation_id = ?`,
 			`DELETE FROM tool_jobs WHERE conversation_id = ?`,
+			`DELETE FROM tool_registry WHERE conversation_id = ?`,
+			`DELETE FROM tool_runtime_paths WHERE conversation_id = ?`,
 		} {
 			if _, err := tx.ExecContext(ctx, statement, id); err != nil {
 				return 0, err
@@ -853,11 +961,94 @@ const (
 )
 
 func (db *DB) AddProcessDetail(ctx context.Context, detail ProcessDetail) error {
+	return db.AddProcessDetails(ctx, []ProcessDetail{detail})
+}
+
+// AddProcessDetails 在单个事务中写入过程明细，重复 ID 自动忽略。
+func (db *DB) AddProcessDetails(ctx context.Context, details []ProcessDetail) error {
+	if len(details) == 0 {
+		return nil
+	}
+	prepared := make([]ProcessDetail, 0, len(details))
+	dataJSON := make([]string, 0, len(details))
+	for _, detail := range details {
+		normalized, raw, err := prepareProcessDetail(detail)
+		if err != nil {
+			return err
+		}
+		prepared = append(prepared, normalized)
+		dataJSON = append(dataJSON, raw)
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin process detail batch: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	statement, err := tx.PrepareContext(
+		ctx,
+		`INSERT OR IGNORE INTO process_details (
+			id, conversation_id, message_id, session_id, event_type, message, data, created_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+	)
+	if err != nil {
+		return fmt.Errorf("prepare process detail batch: %w", err)
+	}
+	defer statement.Close()
+	projectActive := map[string]bool{}
+	for index, detail := range prepared {
+		session := agentSessionFromDetail(detail)
+		if detail.SessionID == "" {
+			detail.SessionID = session.ID
+		}
+		result, err := statement.ExecContext(
+			ctx,
+			detail.ID,
+			detail.ConversationID,
+			nullableString(detail.MessageID),
+			detail.SessionID,
+			detail.EventType,
+			detail.Message,
+			dataJSON[index],
+			detail.CreatedAt.Unix(),
+		)
+		if err != nil {
+			return fmt.Errorf("add process detail batch: %w", err)
+		}
+		if affected, _ := result.RowsAffected(); affected > 0 {
+			if session.Status == "running" || session.Status == "waiting" {
+				active, seen := projectActive[detail.ConversationID]
+				if !seen {
+					active, err = projectActiveForConversation(ctx, tx, detail.ConversationID)
+					if err != nil {
+						return fmt.Errorf("read conversation project status: %w", err)
+					}
+					projectActive[detail.ConversationID] = active
+				}
+				if !active {
+					session.Status = "paused"
+					if session.Metadata == nil {
+						session.Metadata = map[string]interface{}{}
+					}
+					session.Metadata["statusReason"] = "项目不在进行中，忽略迟到的运行状态事件"
+				}
+			}
+			if err := upsertAgentSessionExec(ctx, tx, session, true); err != nil {
+				return fmt.Errorf("update agent session: %w", err)
+			}
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit process detail batch: %w", err)
+	}
+	return nil
+}
+
+func prepareProcessDetail(detail ProcessDetail) (ProcessDetail, string, error) {
 	dataJSON := "{}"
 	if detail.Data != nil {
 		raw, err := json.Marshal(detail.Data)
 		if err != nil {
-			return fmt.Errorf("marshal process detail: %w", err)
+			return ProcessDetail{}, "", fmt.Errorf("marshal process detail: %w", err)
 		}
 		dataJSON = string(raw)
 	}
@@ -871,23 +1062,11 @@ func (db *DB) AddProcessDetail(ctx context.Context, detail ProcessDetail) error 
 	if runes := []rune(message); len(runes) > maxProcessDetailMessageRunes {
 		message = string(runes[:maxProcessDetailMessageRunes]) + "…"
 	}
-	_, err := db.ExecContext(
-		ctx,
-		`INSERT INTO process_details (
-			id, conversation_id, message_id, event_type, message, data, created_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		detail.ID,
-		detail.ConversationID,
-		nullableString(detail.MessageID),
-		detail.EventType,
-		message,
-		dataJSON,
-		detail.CreatedAt.Unix(),
-	)
-	if err != nil {
-		return fmt.Errorf("add process detail: %w", err)
+	detail.Message = message
+	if detail.CreatedAt.IsZero() {
+		detail.CreatedAt = time.Now().UTC()
 	}
-	return nil
+	return detail, dataJSON, nil
 }
 
 func (db *DB) ListProcessDetails(ctx context.Context, conversationID string, limit int) ([]ProcessDetail, error) {
@@ -958,6 +1137,7 @@ func (db *DB) CountProcessDetailsByMessageIDs(
 	ctx context.Context,
 	conversationID string,
 	messageIDs []string,
+	sessionIDs ...string,
 ) (map[string]int, error) {
 	ids := normalizeProcessDetailMessageIDs(messageIDs)
 	result := make(map[string]int, len(ids))
@@ -970,13 +1150,14 @@ func (db *DB) CountProcessDetailsByMessageIDs(
 	for _, id := range ids {
 		args = append(args, id)
 	}
-	rows, err := db.QueryContext(
-		ctx,
-		`SELECT message_id, COUNT(*) FROM process_details
-		 WHERE conversation_id = ? AND message_id IN (`+placeholders+`)
-		 GROUP BY message_id`,
-		args...,
-	)
+	query := `SELECT message_id, COUNT(*) FROM process_details
+		 WHERE conversation_id = ? AND message_id IN (` + placeholders + `)`
+	if len(sessionIDs) > 0 && strings.TrimSpace(sessionIDs[0]) != "" {
+		query += ` AND session_id = ?`
+		args = append(args, strings.TrimSpace(sessionIDs[0]))
+	}
+	query += ` GROUP BY message_id`
+	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1047,6 +1228,7 @@ func (db *DB) ListProcessDetailsByMessageIDsPage(
 	messageIDs []string,
 	limit int,
 	offset int,
+	sessionIDs ...string,
 ) ([]ProcessDetail, int, bool, error) {
 	ids := normalizeProcessDetailMessageIDs(messageIDs)
 	if len(ids) == 0 {
@@ -1064,21 +1246,33 @@ func (db *DB) ListProcessDetailsByMessageIDsPage(
 	for _, id := range ids {
 		args = append(args, id)
 	}
+	sessionFilter := ""
+	if len(sessionIDs) > 0 && strings.TrimSpace(sessionIDs[0]) != "" {
+		sessionFilter = " AND session_id = ?"
+	}
+	countArgs := append([]interface{}{}, args...)
+	if sessionFilter != "" {
+		countArgs = append(countArgs, strings.TrimSpace(sessionIDs[0]))
+	}
 	var total int
 	if err := db.QueryRowContext(
 		ctx,
 		`SELECT COUNT(*) FROM process_details
-		 WHERE conversation_id = ? AND message_id IN (`+placeholders+`)`,
-		args...,
+		 WHERE conversation_id = ? AND message_id IN (`+placeholders+`)`+sessionFilter,
+		countArgs...,
 	).Scan(&total); err != nil {
 		return nil, 0, false, err
 	}
 	queryArgs := append(append([]interface{}{}, args...), limit, offset)
+	if sessionFilter != "" {
+		queryArgs = append([]interface{}{}, args...)
+		queryArgs = append(queryArgs, strings.TrimSpace(sessionIDs[0]), limit, offset)
+	}
 	rows, err := db.QueryContext(
 		ctx,
 		`SELECT id, conversation_id, COALESCE(message_id, ''), event_type, message, data, created_at
 		 FROM process_details
-		 WHERE conversation_id = ? AND message_id IN (`+placeholders+`)
+		 WHERE conversation_id = ? AND message_id IN (`+placeholders+`)`+sessionFilter+`
 		 ORDER BY created_at ASC, rowid ASC
 		 LIMIT ? OFFSET ?`,
 		queryArgs...,

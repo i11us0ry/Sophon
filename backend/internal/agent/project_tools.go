@@ -43,7 +43,8 @@ var (
 		"goal": {"open": true, "met": true, "abandoned": true},
 		"intent": {
 			"open": true, "running": true, "done": true,
-			"blocked": true, "exhausted": true, "capacity_blocked": true,
+			"paused": true, "blocked": true, "exhausted": true,
+			"stopped": true, "capacity_blocked": true,
 		},
 		"hint": {"active": true, "consumed": true},
 	}
@@ -144,10 +145,88 @@ func newProjectTools(service *Service) []tool.BaseTool {
 		service.verifyFindingTool(),
 		service.setGroupPriorityTool(),
 		service.queryMemoryTool(),
+		service.addGoalTool(),
 		service.addIntentTool(),
 		service.addHintTool(),
 	}
 	return append(tools, newProjectUpdateTools(service)...)
+}
+
+func (s *Service) addGoalTool() tool.BaseTool {
+	return &jsonTool{
+		name: "project_add_goal",
+		desc: "给当前任务新增一个最终可验证 Goal，并唤醒 Planner 重新规划。Goal 是最终成果，不是攻击步骤。",
+		params: map[string]*schema.ParameterInfo{
+			"title":    stringParam("Goal 标题", true),
+			"detail":   stringParam("Goal 的成功标准和补充说明"),
+			"asset_id": stringParam("关联资产 id（可选）"),
+		},
+		run: func(ctx context.Context, raw string) (string, error) {
+			var request struct {
+				Title   string `json:"title"`
+				Detail  string `json:"detail"`
+				AssetID string `json:"asset_id"`
+			}
+			if err := decodeToolArgs(raw, &request); err != nil {
+				return "", err
+			}
+			_, userID, projectID, err := s.currentProject(ctx)
+			if err != nil {
+				return "", err
+			}
+			title := normalizeGraphNodeTitle(request.Title)
+			if title == "" {
+				return "", fmt.Errorf("title 不能为空")
+			}
+			assetID := strings.TrimSpace(request.AssetID)
+			if assetID == "" {
+				assetID = currentAssetID(ctx)
+			}
+			assetID, err = s.validateProjectAsset(ctx, projectID, userID, assetID)
+			if err != nil {
+				return "", err
+			}
+			if err := s.validateCampaignAssetScope(ctx, assetID); err != nil {
+				return "", err
+			}
+			now := time.Now().UTC()
+			node, err := s.db.UpsertProjectGraphNode(ctx, database.GraphNode{
+				ID:         randomID(),
+				ProjectID:  projectID,
+				Kind:       "goal",
+				Title:      title,
+				Detail:     truncateProjectText(request.Detail, projectToolLongText),
+				Status:     "open",
+				Confidence: 80,
+				AssetID:    assetID,
+				Source:     "human",
+				CreatedAt:  now,
+				UpdatedAt:  now,
+			})
+			if err != nil {
+				return "", fmt.Errorf("写入 Goal 失败: %w", err)
+			}
+			s.syncProjectGraph(ctx, projectID, userID)
+			if info, ok := execctx.Subagent(ctx); !ok ||
+				!strings.EqualFold(strings.TrimSpace(info.Kind), "planner") {
+				s.emitAgentTrigger(
+					ctx,
+					database.AgentTriggerGoal,
+					"",
+					map[string]interface{}{
+						"goals":   []string{node.Title},
+						"summary": node.Title,
+						"goalId":  node.ID,
+					},
+					"goal-added:"+node.ID,
+				)
+			}
+			if err := s.reviveCoordinatedRuntime(ctx); err != nil {
+				return "", fmt.Errorf("启动 Coordinator 失败: %w", err)
+			}
+			return fmt.Sprintf("已新增 Goal：%s（id %s）", node.Title, node.ID), nil
+		},
+	}
 }
 
 func (s *Service) campaignOverviewTool() tool.BaseTool {
@@ -622,9 +701,9 @@ func (s *Service) nextTargetsTool() tool.BaseTool {
 func (s *Service) recordTestResultTool() tool.BaseTool {
 	return &jsonTool{
 		name: "project_record_test",
-		desc: "记录单个资产的安全测试覆盖结果；负向结论必须提供 evidence_refs，确认漏洞必须关联 finding。",
+		desc: "记录安全测试覆盖结果；运行时可关联资产，源码或附件级审计可省略 asset_id。负向结论必须提供证据，确认漏洞必须关联 finding。",
 		params: map[string]*schema.ParameterInfo{
-			"asset_id":      stringParam("资产 id（必须是本项目资产）", true),
+			"asset_id":      stringParam("可选：资产 id（必须是本项目资产）；源码或附件级审计可留空"),
 			"dimension":     stringParam("测试维度，例如 SQL注入、XSS、认证", true),
 			"technique":     stringParam("测试技术，例如 boolean/error/union/time-based"),
 			"status":        stringParam("状态：untested/running/tested_clean/blocked/suspicious/confirmed", true),
@@ -655,17 +734,25 @@ func (s *Service) recordTestResultTool() tool.BaseTool {
 			if err != nil {
 				return "", err
 			}
-			assetID, err := s.validateProjectAsset(
-				ctx,
-				projectID,
-				userID,
-				request.AssetID,
-			)
-			if err != nil {
-				return "", err
-			}
-			if assetID == "" {
-				return "", fmt.Errorf("asset_id 不能为空")
+			assetID := firstNonEmpty(request.AssetID, currentAssetID(ctx))
+			if assetID != "" {
+				assetID, err = s.validateProjectAsset(
+					ctx,
+					projectID,
+					userID,
+					assetID,
+				)
+				if err != nil {
+					return "", err
+				}
+			} else {
+				allowed, err := s.allowAssetlessSourceAudit(ctx, projectID, userID)
+				if err != nil {
+					return "", err
+				}
+				if !allowed {
+					return "", fmt.Errorf("asset_id 不能为空；只有项目无网络资产且存在上传附件时才能写入源码审计测试")
+				}
 			}
 			dimension := truncateProjectText(request.Dimension, projectToolShortText)
 			if dimension == "" {
@@ -715,30 +802,81 @@ func (s *Service) recordTestResultTool() tool.BaseTool {
 			if confidence > 100 {
 				confidence = 100
 			}
-			saved, err := s.db.UpsertProjectTestResult(ctx, database.ProjectTestResult{
-				ProjectID:    projectID,
-				AssetID:      assetID,
-				Dimension:    dimension,
-				Technique:    truncateProjectText(request.Technique, projectToolShortText),
-				Status:       status,
-				Result:       result,
-				Evidence:     evidence,
-				EvidenceRefs: evidenceRefs,
-				Confidence:   confidence,
-				FindingID:    strings.TrimSpace(request.FindingID),
-				IntentID:     strings.TrimSpace(request.IntentID),
-				CreatedAt:    time.Now().UTC(),
-			})
+			technique := truncateProjectText(request.Technique, projectToolShortText)
+			intentID := strings.TrimSpace(request.IntentID)
+			findingID := strings.TrimSpace(request.FindingID)
+			updatedAt := time.Now().UTC()
+			var saved *database.ProjectTestResult
+			if info, ok := execctx.Subagent(ctx); ok &&
+				strings.TrimSpace(info.HypothesisID) != "" {
+				current, currentErr := s.db.GetProjectTestResultByID(
+					ctx,
+					projectID,
+					strings.TrimSpace(info.HypothesisID),
+				)
+				if currentErr != nil || current == nil {
+					return "", fmt.Errorf("当前 Worker 假设不存在，不能写回测试结果")
+				}
+				if assetID != "" && strings.TrimSpace(current.AssetID) != assetID {
+					return "", fmt.Errorf("当前 Worker 假设不属于指定资产")
+				}
+				current.Status = status
+				current.Result = result
+				current.Evidence = evidence
+				current.EvidenceRefs = evidenceRefs
+				current.Confidence = confidence
+				current.FindingID = findingID
+				if intentID != "" {
+					current.IntentID = intentID
+				}
+				current.UpdatedAt = updatedAt
+				saved, err = s.db.UpsertProjectTestResult(ctx, *current)
+			} else {
+				active, activeErr := s.db.ListActiveProjectHypotheses(ctx, projectID)
+				if activeErr != nil {
+					return "", fmt.Errorf("读取活跃假设失败: %w", activeErr)
+				}
+				refs := make([]hypothesisDimensionRef, 0, len(active))
+				for _, item := range active {
+					refs = append(refs, hypothesisDimensionRef{
+						AssetID:   item.AssetID,
+						Dimension: item.Dimension,
+					})
+				}
+				if index := overlappingHypothesisIndex(refs, assetID, dimension); index >= 0 {
+					return "", fmt.Errorf(
+						"已有活跃假设 %s 覆盖同一资产的同一测试面，请使用 project_complete_hypothesis 写回",
+						active[index].ID,
+					)
+				}
+				saved, err = s.db.UpsertProjectTestResult(ctx, database.ProjectTestResult{
+					ProjectID:            projectID,
+					AssetID:              assetID,
+					Dimension:            dimension,
+					Technique:            technique,
+					Status:               status,
+					Result:               result,
+					Evidence:             evidence,
+					EvidenceRefs:         evidenceRefs,
+					Confidence:           confidence,
+					FindingID:            findingID,
+					IntentID:             intentID,
+					OriginConversationID: execctx.ConversationID(ctx),
+					OriginRunID:          execctx.RunID(ctx),
+					CreatedAt:            updatedAt,
+				})
+			}
 			if err != nil {
 				return "", fmt.Errorf("记录测试结果失败: %w", err)
 			}
-			if campaignID := strings.TrimSpace(execctx.CampaignID(ctx)); campaignID != "" {
+			if campaignID := strings.TrimSpace(execctx.CampaignID(ctx)); campaignID != "" &&
+				strings.TrimSpace(saved.AssetID) != "" {
 				if err := s.db.UpsertCampaignCoverage(
 					ctx,
 					campaignID,
-					assetID,
-					dimension,
-					strings.TrimSpace(request.Technique),
+					saved.AssetID,
+					saved.Dimension,
+					saved.Technique,
 					status,
 					evidenceRefs,
 				); err != nil {
@@ -769,6 +907,28 @@ func currentAssetID(ctx context.Context) string {
 	return strings.TrimSpace(execctx.AssetID(ctx))
 }
 
+func (s *Service) allowAssetlessSourceAudit(
+	ctx context.Context,
+	projectID string,
+	userID string,
+) (bool, error) {
+	if s == nil || s.db == nil || currentAssetID(ctx) != "" {
+		return false, nil
+	}
+	assets, err := s.db.ListProjectAssets(ctx, projectID, userID)
+	if err != nil {
+		return false, fmt.Errorf("读取项目资产失败: %w", err)
+	}
+	if len(assets) > 0 {
+		return false, nil
+	}
+	attachments, err := s.db.ListRecentProjectAttachments(ctx, projectID, userID, 1)
+	if err != nil {
+		return false, fmt.Errorf("读取项目附件失败: %w", err)
+	}
+	return len(attachments) > 0, nil
+}
+
 func graphNodeInCurrentAssetScope(ctx context.Context, node *database.GraphNode) bool {
 	if node == nil {
 		return false
@@ -789,6 +949,75 @@ func assetIDFromFactRelation(relation string) string {
 		value = value[:end]
 	}
 	return strings.TrimSpace(value)
+}
+
+func factKeysFromRelation(relation string) []string {
+	keys := make([]string, 0, 2)
+	seen := map[string]bool{}
+	for _, raw := range strings.FieldsFunc(relation, func(r rune) bool {
+		return r == ',' || r == ';' || r == ' ' || r == '\t' || r == '\r' || r == '\n'
+	}) {
+		ref := strings.TrimSpace(raw)
+		if len(ref) <= len("fact:") || !strings.EqualFold(ref[:len("fact:")], "fact:") {
+			continue
+		}
+		key := strings.TrimSpace(ref[len("fact:"):])
+		if key == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		keys = append(keys, key)
+	}
+	return keys
+}
+
+func (s *Service) inferredSupersedesKey(
+	ctx context.Context,
+	projectID string,
+	assetID string,
+	factType string,
+	key string,
+	relation string,
+	summary string,
+	evidence string,
+	confidence int,
+) string {
+	if s.db == nil || strings.TrimSpace(evidence) == "" {
+		return ""
+	}
+	if len(scanInjectionPatterns(strings.Join([]string{summary, evidence}, "\n"))) > 0 {
+		return ""
+	}
+	normalized := normalizeMemoryText(summary)
+	hasCorrection := textHasConclusionNegation(normalized)
+	for _, marker := range []string{
+		"无法逃逸", "不可控", "无法写入", "需登录", "requires login", "not reachable",
+	} {
+		if strings.Contains(normalized, marker) {
+			hasCorrection = true
+			break
+		}
+	}
+	if !hasCorrection {
+		return ""
+	}
+	keys := factKeysFromRelation(relation)
+	if len(keys) != 1 || strings.EqualFold(keys[0], key) {
+		return ""
+	}
+	old, err := s.db.GetProjectFactByKey(ctx, projectID, assetID, keys[0])
+	if err != nil || old == nil || !old.ValidTo.IsZero() || old.SupersededBy != "" {
+		return ""
+	}
+	if !strings.EqualFold(strings.TrimSpace(old.FactType), strings.TrimSpace(factType)) {
+		return ""
+	}
+	if strings.TrimSpace(old.AssetID) != strings.TrimSpace(assetID) ||
+		old.Confidence > confidence ||
+		textHasConclusionNegation(normalizeMemoryText(old.Summary)) {
+		return ""
+	}
+	return old.Key
 }
 
 func (s *Service) projectListTool() tool.BaseTool {
@@ -1309,7 +1538,7 @@ func (s *Service) recordFactTool() tool.BaseTool {
 			"intent_id":    stringParam("产生本事实的 intent id，用于建立探索链路"),
 			"key":          stringParam("事实标识，例如 目标IP、WAF类型", true),
 			"summary":      stringParam("一行摘要：什么 + 在哪 + 如何验证", true),
-			"body":         stringParam("完整可复现上下文、步骤和原始信息"),
+			"body":         stringParam("完整可复现上下文、步骤和原始信息", true),
 			"evidence":     stringParam("支持该事实的证据或证据来源"),
 			"relation":     stringParam("关联引用，例如 asset:<id>、fact:<key>、finding:<id>"),
 			"fact_type":    stringParam("事实分类，默认 general"),
@@ -1418,6 +1647,10 @@ func (s *Service) recordFactTool() tool.BaseTool {
 			if key == "" || summary == "" {
 				return "", fmt.Errorf("key 与 summary 不能为空")
 			}
+			body := strings.TrimSpace(request.Body)
+			if body == "" {
+				return "", fmt.Errorf("project_record_fact 必须提供 body：请补充完整上下文、关键步骤、源码位置或原始证据；summary 只作为索引")
+			}
 			confidence := int(request.Confidence)
 			if confidence <= 0 {
 				confidence = 80
@@ -1437,7 +1670,23 @@ func (s *Service) recordFactTool() tool.BaseTool {
 			if request.ObservedAt > 0 {
 				observedAt = time.Unix(int64(request.ObservedAt), 0).UTC()
 			}
-			if strings.TrimSpace(request.Supersedes) == "" {
+			supersedes := strings.TrimSpace(request.Supersedes)
+			autoSupersededKey := ""
+			if supersedes == "" {
+				autoSupersededKey = s.inferredSupersedesKey(
+					ctx,
+					projectID,
+					assetID,
+					factType,
+					key,
+					request.Relation,
+					summary,
+					request.Evidence,
+					confidence,
+				)
+				supersedes = autoSupersededKey
+			}
+			if supersedes == "" {
 				if conflict, conflictErr := s.findConclusionConflict(ctx, projectID, database.ProjectFact{
 					ProjectID:  projectID,
 					AssetID:    assetID,
@@ -1457,7 +1706,7 @@ func (s *Service) recordFactTool() tool.BaseTool {
 				Key:       key,
 				Value:     summary,
 				Summary:   summary,
-				Body:      truncateProjectText(request.Body, projectToolLongText),
+				Body:      truncateProjectText(body, projectToolLongText),
 				Evidence:  truncateProjectText(request.Evidence, projectToolLongText),
 				Relation: appendFactIntentRelation(
 					truncateProjectText(request.Relation, projectToolShortText),
@@ -1482,8 +1731,8 @@ func (s *Service) recordFactTool() tool.BaseTool {
 			if err != nil {
 				return "", fmt.Errorf("写入项目事实失败: %w", err)
 			}
-			if strings.TrimSpace(request.Supersedes) != "" {
-				if err := s.supersedeFact(ctx, projectID, assetID, request.Supersedes, decision.Fact); err != nil {
+			if supersedes != "" {
+				if err := s.supersedeFact(ctx, projectID, assetID, supersedes, decision.Fact); err != nil {
 					return "", fmt.Errorf("失效旧事实失败: %w", err)
 				}
 			}
@@ -1517,6 +1766,9 @@ func (s *Service) recordFactTool() tool.BaseTool {
 			if reuseTasks > 0 {
 				message += fmt.Sprintf("；已入队 %d 个同组凭据复用任务", reuseTasks)
 			}
+			if autoSupersededKey != "" {
+				message += fmt.Sprintf("；已自动失效被本次证据否定的关联事实 %s", autoSupersededKey)
+			}
 			message += intentWarning
 			if intentID != "" {
 				factNode, linkErr := s.materializeIntentFactNode(ctx, projectID, saved)
@@ -1529,6 +1781,25 @@ func (s *Service) recordFactTool() tool.BaseTool {
 				message += fmt.Sprintf("；已链接 intent %s", intentID)
 			}
 			s.syncProjectGraph(ctx, projectID, userID)
+			if memoryKind == "constraint" {
+				s.emitAgentTrigger(
+					ctx,
+					database.AgentTriggerHint,
+					"",
+					map[string]interface{}{
+						"hints":   []string{saved.Summary},
+						"summary": saved.Summary,
+						"kind":    "constraint",
+					},
+					"constraint:"+saved.ID,
+				)
+				if info, ok := execctx.Subagent(ctx); !ok ||
+					!strings.EqualFold(strings.TrimSpace(info.Kind), "planner") {
+					if err := s.reviveCoordinatedRuntime(ctx); err != nil {
+						return "", fmt.Errorf("启动 Coordinator 失败: %w", err)
+					}
+				}
+			}
 			return message, nil
 		},
 	}
@@ -1539,7 +1810,7 @@ func (s *Service) listAssetsTool() tool.BaseTool {
 		name: "project_list_assets",
 		desc: "列出当前项目的资产（域名/IP/URL/端口等）。",
 		params: map[string]*schema.ParameterInfo{
-			"kind":   stringParam("按资产类型过滤，例如 domain/ip/url/port/host"),
+			"kind":   stringParam("按资产类型过滤，例如 domain/ip/url/port/host/source"),
 			"status": stringParam("按资产状态过滤"),
 			"query":  stringParam("按名称、值或类型搜索"),
 			"limit":  integerParam("返回条数，默认 30，最大 50"),
@@ -1604,7 +1875,7 @@ func (s *Service) listAssetsTool() tool.BaseTool {
 func (s *Service) insertAssetsTool() tool.BaseTool {
 	return &jsonTool{
 		name: "project_insert_assets",
-		desc: "批量写入当前项目资产。JSON 数组，每项包含 name/kind/value，kind 只能是 domain/ip/url/port/host，可选 criticality/risk_score/status。",
+		desc: "批量写入当前项目资产。JSON 数组，每项包含 name/kind/value，kind 只能是 domain/ip/url/port/host/source，可选 criticality/risk_score/status。",
 		params: map[string]*schema.ParameterInfo{
 			"assets_json": stringParam(
 				`JSON 数组，例如 [{"name":"主站","kind":"url","value":"https://a.com"}]`,
@@ -1650,7 +1921,7 @@ func (s *Service) insertAssetsTool() tool.BaseTool {
 					if label == "" {
 						label = "未命名"
 					}
-					return "", fmt.Errorf("资产 %s 类型 %q 不受支持，只能是 domain/ip/url/port/host", label, input.Kind)
+					return "", fmt.Errorf("资产 %s 类型 %q 不受支持，只能是 domain/ip/url/port/host/source", label, input.Kind)
 				}
 			}
 
@@ -1736,7 +2007,6 @@ func validateStandardFindingReport(item database.Vulnerability) error {
 	}{
 		{label: "description", value: item.Description},
 		{label: "preconditions", value: item.Preconditions},
-		{label: "poc", value: item.ReproductionSteps},
 		{label: "evidence", value: item.Evidence},
 		{label: "impact", value: item.Impact},
 		{label: "recommendation", value: item.Recommendation},
@@ -1748,6 +2018,16 @@ func validateStandardFindingReport(item database.Vulnerability) error {
 		}
 	}
 	poc := strings.TrimSpace(item.ReproductionSteps)
+	state, _ := database.NormalizeVulnerabilityVerificationState(item.VerificationState)
+	if state == "observed" {
+		if len([]rune(poc)) < 20 {
+			return fmt.Errorf("observed 静态漏洞必须提供不少于 20 字的代码复现链")
+		}
+		return nil
+	}
+	if poc == "" {
+		return fmt.Errorf("%s 漏洞必须提供完整 PoC 或 HTTP 数据包", severity)
+	}
 	hasStructuredPOC := strings.Contains(poc, "```") ||
 		strings.Contains(poc, "curl ") ||
 		strings.Contains(poc, "GET ") ||
@@ -1763,31 +2043,44 @@ func validateStandardFindingReport(item database.Vulnerability) error {
 	return nil
 }
 
+func validateVulnerabilityReportDraft(item database.Vulnerability) error {
+	if strings.TrimSpace(item.Impact) == "" {
+		return fmt.Errorf("impact 不能为空")
+	}
+	if err := database.ValidateVulnerabilityEvidence(item); err != nil {
+		return err
+	}
+	return validateStandardFindingReport(item)
+}
+
 func (s *Service) reportFindingTool() tool.BaseTool {
 	return &jsonTool{
 		name: "project_report_finding",
-		desc: "把已确认漏洞按平台标准上报。标题由系统按“项目-系统地址-漏洞地址-类型-危害-编号”生成；漏洞类型必须使用规范列表；证据必填；复现步骤必须包含 Python 利用脚本。",
+		desc: "把漏洞按平台标准上报。代码审计可使用 verification_state=observed 和源码/调用链证据；verified/exploitable 才要求真实 HTTP PoC。标题由系统按“项目-系统地址-漏洞地址-类型-危害-编号”生成；漏洞类型必须使用规范列表；前置条件没有时直接写“否”。",
 		params: map[string]*schema.ParameterInfo{
-			"title":              stringParam("兼容短标题；最终标题由系统按固定格式生成"),
-			"severity":           stringParam("严重度：critical/high/medium/low/info，默认 medium"),
-			"description":        stringParam("漏洞概述：包含漏洞位置、类型、原理和测试链路"),
-			"target":             stringParam("受影响目标（URL/IP/端口）"),
-			"evidence":           stringParam("证据（请求响应、命令输出摘要）"),
-			"evidence_refs":      stringArrayParam("证据引用；" + evidenceReferenceFormatHint),
-			"asset_id":           stringParam("关联资产 id（可选，必须是本项目资产）"),
-			"intent_id":          stringParam("产生本漏洞的 intent id，用于建立探索链路"),
-			"vulnerability_type": stringParam("规范漏洞类型，必须来自平台19类漏洞列表"),
+			"title":         stringParam("兼容短标题；最终标题由系统按固定格式生成"),
+			"severity":      stringParam("严重度：critical/high/medium/low/info，默认 medium"),
+			"description":   stringParam("漏洞概述：包含漏洞位置、类型、原理和测试链路"),
+			"target":        stringParam("受影响目标；运行时漏洞填 URL/IP/端口，静态代码审计可填源码包、组件或项目资产"),
+			"evidence":      stringParam("证据只写实际执行结果：响应差异、命令回显、注入数据、上传访问证明或敏感数据样本；不要重复复现步骤；纯本地无发包证据可写“无”"),
+			"evidence_refs": stringArrayParam("证据引用；" + evidenceReferenceFormatHint),
+			"asset_id":      stringParam("关联资产 id（可选，必须是本项目资产）"),
+			"intent_id":     stringParam("产生本漏洞的 intent id，用于建立探索链路"),
+			"vulnerability_type": stringParam(
+				"规范漏洞类型，必须来自平台列表：" +
+					strings.Join(vulnerabilityfmt.SupportedTypes(), "、"),
+			),
 			"parameter":          stringParam("受影响参数名，例如 id、user、file"),
 			"http_method":        stringParam("HTTP 方法，例如 GET、POST"),
-			"preconditions":      stringParam("环境准备和前置条件"),
+			"preconditions":      stringParam("仅写实际依赖：账户、Token、Key、权限、时间窗或特殊环境；没有时直接写“否”"),
 			"attack_chain":       stringParam("测试链路；写入漏洞概述"),
 			"recommendation":     stringParam("可落地的修复方案"),
-			"poc":                stringParam("完整 POC、HTTP 数据包或分阶段复现步骤，末尾必须包含“利用脚本（优先 Python）”及 Python 代码块"),
+			"poc":                stringParam("复现步骤：先写复现过程和请求；HTTP 漏洞附完整 Burp 数据包；纯本地执行写“数据包：无”；最后必须附可直接执行的 Python 代码块"),
 			"impact":             stringParam("分层危害分析：直接、数据、系统和其他风险"),
 			"residual_notes":     stringParam("复测与清理备注；没有复测时写“无”"),
-			"reproduction_steps": stringParam("兼容旧调用；poc 为空时作为 POC"),
+			"reproduction_steps": stringParam("兼容旧调用；poc 为空时作为 Burp HTTP 数据包"),
 			"confidence":         integerParam("结论置信度 0-100，默认按严重度计算"),
-			"verification_state": stringParam("验证状态：observed/verified/exploitable，默认 verified"),
+			"verification_state": stringParam("验证状态：observed=静态代码证据闭合，verified=运行时验证，exploitable=已证明可利用"),
 			"exploitability":     stringParam("可利用性说明"),
 			"test_technique":     stringParam("验证技术，例如 boolean/error/union/time-based"),
 		},
@@ -1845,11 +2138,23 @@ func (s *Service) reportFindingTool() tool.BaseTool {
 			}
 			vulnerabilityType, validType := vulnerabilityfmt.NormalizeType(request.VulnerabilityType)
 			if !validType {
-				return "", fmt.Errorf("vulnerability_type 必须从平台规定列表中选择")
+				return "", fmt.Errorf(
+					"vulnerability_type 必须从平台规定列表中选择：%s",
+					strings.Join(vulnerabilityfmt.SupportedTypes(), "、"),
+				)
 			}
 			if title == "" {
 				title = vulnerabilityType
 			}
+			verificationState := strings.ToLower(strings.TrimSpace(request.VerificationState))
+			if verificationState == "" {
+				verificationState = "verified"
+			}
+			normalizedVerificationState, validState := database.NormalizeVulnerabilityVerificationState(verificationState)
+			if !validState {
+				return "", fmt.Errorf("verification_state 必须是 observed/verified/exploitable")
+			}
+			verificationState = normalizedVerificationState
 			hasEvidence := strings.TrimSpace(request.Evidence) != ""
 			for _, ref := range request.EvidenceRefs {
 				if strings.TrimSpace(ref) != "" {
@@ -1864,18 +2169,13 @@ func (s *Service) reportFindingTool() tool.BaseTool {
 			if poc == "" {
 				poc = strings.TrimSpace(request.ReproductionSteps)
 			}
-			if (severity == "critical" || severity == "high") && poc == "" {
-				return "", fmt.Errorf("%s 漏洞必须提供 POC 或复现步骤", severity)
-			}
-			if err := vulnerabilityfmt.ValidateReproduction(poc); err != nil {
-				return "", err
+			attackChain := strings.TrimSpace(request.AttackChain)
+			if poc == "" && verificationState == "observed" {
+				poc = attackChain
 			}
 			impact := strings.TrimSpace(request.Impact)
-			if impact == "" {
-				return "", fmt.Errorf("impact 不能为空")
-			}
 			description := strings.TrimSpace(request.Description)
-			if chain := strings.TrimSpace(request.AttackChain); chain != "" {
+			if chain := attackChain; chain != "" {
 				if description != "" {
 					description += "\n"
 				}
@@ -1894,11 +2194,6 @@ func (s *Service) reportFindingTool() tool.BaseTool {
 			if confidence <= 0 {
 				confidence = severityEvidenceConfidence(severity)
 			}
-			verificationState := strings.ToLower(strings.TrimSpace(request.VerificationState))
-			if verificationState == "" {
-				verificationState = "verified"
-			}
-
 			now := time.Now().UTC()
 			finding := database.Vulnerability{
 				ID:                randomID(),
@@ -1928,112 +2223,7 @@ func (s *Service) reportFindingTool() tool.BaseTool {
 				UpdatedAt:         now,
 			}
 			finding = database.NormalizeVulnerabilityEvidence(finding)
-			if err := database.ValidateVulnerabilityEvidence(finding); err != nil {
-				return "", err
-			}
-			if err := validateStandardFindingReport(finding); err != nil {
-				return "", err
-			}
-			if err := s.ReviewVulnerability(ctx, finding); err != nil {
-				return "", err
-			}
-			assetID, err := s.resolveFindingAsset(
-				ctx,
-				projectID,
-				userID,
-				request.AssetID,
-				target,
-				severity,
-			)
-			if err != nil {
-				return "", err
-			}
-			if err := s.validateCampaignAssetScope(ctx, assetID); err != nil {
-				return "", err
-			}
-			if intentNode != nil && !graphAssetScopeCompatible(assetID, intentNode.AssetID) {
-				return "", fmt.Errorf("intent_id 与漏洞不属于同一资产")
-			}
-			finding.AssetID = assetID
-			projectName := "未关联系统"
-			projectHints := []string{target, finding.Impact, finding.Description}
-			if project, err := s.db.GetProject(ctx, projectID, userID); err == nil {
-				if name := strings.TrimSpace(project.Name); name != "" {
-					projectName = name
-				}
-				projectHints = append(projectHints, project.Description, project.Goals, project.Scope)
-			}
-			assetValue := ""
-			assetName := ""
-			if assetID != "" {
-				if asset, err := s.db.GetAsset(ctx, assetID, userID); err == nil {
-					assetValue = asset.Value
-					assetName = asset.Name
-				}
-			}
-			projectHints = append(projectHints, assetName, assetValue)
-			finding.Title = vulnerabilityfmt.BuildTitle(vulnerabilityfmt.TitleParts{
-				ProjectName:          vulnerabilityfmt.InferProductName(projectName, projectHints...),
-				VulnerabilityAddress: vulnerabilityfmt.VulnerabilityAddress(target, finding.Title, finding.Description),
-				VulnerabilityType:    vulnerabilityType,
-				ImpactSummary:        vulnerabilityfmt.ShortImpact(vulnerabilityType),
-				ID:                   finding.ID,
-			})
-			finding = database.NormalizeVulnerabilityEvidence(finding)
-			savedFinding, merged, err := s.db.CreateOrMergeVulnerability(ctx, finding)
-			if err != nil {
-				return "", fmt.Errorf("上报漏洞失败: %w", err)
-			}
-			finding = *savedFinding
-			s.markMissionObjectiveCompleteFromFinding(ctx, savedFinding)
-			s.enqueueFindingVerification(ctx, savedFinding)
-			saved, err := s.materializeFindingNode(ctx, projectID, savedFinding)
-			if err != nil {
-				return "", fmt.Errorf("创建攻击路径节点失败: %w", err)
-			}
-			if intentID != "" {
-				if err := s.linkGraphEdge(ctx, projectID, intentID, saved.ID, "yields"); err != nil {
-					return "", err
-				}
-			}
-			if !missionSuppressesAutomaticFollowUps(ctx) {
-				if err := s.spawnFindingFollowUpIntents(ctx, projectID, savedFinding); err != nil {
-					return "", fmt.Errorf("派生漏洞后续意图失败: %w", err)
-				}
-			}
-			if merged {
-				if err := s.upsertFindingTestResult(ctx, projectID, savedFinding); err != nil {
-					return "", err
-				}
-				if !missionSuppressesAutomaticFollowUps(ctx) {
-					s.seedFollowUpHypotheses(ctx, projectID, *savedFinding)
-				}
-				s.syncProjectGraph(ctx, projectID, userID)
-				return fmt.Sprintf(
-					"已合并重复漏洞：%s（id %s，置信度 %d，证据引用 %d；攻击路径节点 %s）",
-					savedFinding.Title,
-					savedFinding.ID,
-					savedFinding.Confidence,
-					len(savedFinding.EvidenceRefs),
-					saved.ID,
-				), nil
-			}
-			if err := s.upsertFindingTestResult(ctx, projectID, &finding); err != nil {
-				return "", err
-			}
-			if !missionSuppressesAutomaticFollowUps(ctx) {
-				s.seedFollowUpHypotheses(ctx, projectID, finding)
-			}
-
-			s.syncProjectGraph(ctx, projectID, userID)
-			return fmt.Sprintf(
-				"已上报漏洞：%s（severity %s，status open，evidenceRefs %d，id %s；攻击路径节点 %s）",
-				finding.Title,
-				finding.Severity,
-				len(finding.EvidenceRefs),
-				finding.ID,
-				saved.ID,
-			), nil
+			return s.submitVulnerabilityFinding(ctx, finding, request.AssetID, intentNode, intentID)
 		},
 	}
 }
@@ -2045,6 +2235,9 @@ func (s *Service) enqueueFindingVerification(
 	finding *database.Vulnerability,
 ) {
 	if s == nil || s.db == nil || finding == nil || missionSuppressesAutomaticFollowUps(ctx) {
+		return
+	}
+	if strings.EqualFold(strings.TrimSpace(finding.Status), "pending_review") {
 		return
 	}
 	campaignID, err := s.resolveCampaignID(ctx, "")
@@ -2085,6 +2278,9 @@ func (s *Service) upsertFindingTestResult(
 	if finding == nil {
 		return nil
 	}
+	if strings.EqualFold(strings.TrimSpace(finding.Status), "pending_review") {
+		return nil
+	}
 	dimension := strings.TrimSpace(finding.VulnerabilityType)
 	if dimension == "" {
 		dimension = "security-test"
@@ -2094,17 +2290,19 @@ func (s *Service) upsertFindingTestResult(
 		result = strings.TrimSpace(finding.Impact)
 	}
 	_, err := s.db.UpsertProjectTestResult(ctx, database.ProjectTestResult{
-		ProjectID:    projectID,
-		AssetID:      finding.AssetID,
-		Dimension:    dimension,
-		Technique:    strings.TrimSpace(finding.TestTechnique),
-		Status:       "confirmed",
-		Result:       truncateProjectText(result, projectToolLongText),
-		Evidence:     truncateProjectText(finding.Evidence, projectToolLongText),
-		EvidenceRefs: append([]string(nil), finding.EvidenceRefs...),
-		Confidence:   finding.Confidence,
-		FindingID:    finding.ID,
-		CreatedAt:    time.Now().UTC(),
+		ProjectID:            projectID,
+		AssetID:              finding.AssetID,
+		Dimension:            dimension,
+		Technique:            strings.TrimSpace(finding.TestTechnique),
+		Status:               "confirmed",
+		Result:               truncateProjectText(result, projectToolLongText),
+		Evidence:             truncateProjectText(finding.Evidence, projectToolLongText),
+		EvidenceRefs:         append([]string(nil), finding.EvidenceRefs...),
+		Confidence:           finding.Confidence,
+		FindingID:            finding.ID,
+		OriginConversationID: execctx.ConversationID(ctx),
+		OriginRunID:          execctx.RunID(ctx),
+		CreatedAt:            time.Now().UTC(),
 	})
 	if err != nil {
 		return fmt.Errorf("写入漏洞测试结果失败: %w", err)
@@ -2631,6 +2829,33 @@ func (s *Service) addIntentTool() tool.BaseTool {
 				links++
 			}
 			s.syncProjectGraph(ctx, projectID, userID)
+			priority := int(request.Priority)
+			if priority <= 0 {
+				priority = 70
+			}
+			if _, err := s.db.UpsertProjectTestResult(ctx, database.ProjectTestResult{
+				ProjectID:            projectID,
+				AssetID:              assetID,
+				Dimension:            truncateProjectText(title, projectToolShortText),
+				Technique:            "direct_intent_" + saved.ID,
+				Status:               "untested",
+				IntentID:             saved.ID,
+				OriginConversationID: execctx.ConversationID(ctx),
+				OriginRunID:          execctx.RunID(ctx),
+				Rationale:            truncateProjectText(detail, projectToolLongText),
+				Expected:             truncateProjectText(request.SuccessCriteria, projectToolLongText),
+				Priority:             priority,
+				Required:             true,
+				CreatedAt:            now,
+			}); err != nil {
+				return "", fmt.Errorf("将 intent 加入 Worker 队列失败: %w", err)
+			}
+			if handle := s.orchestrationFor(execctx.ConversationID(ctx)); handle != nil {
+				handle.signalWorkers()
+			}
+			if err := s.reviveCoordinatedRuntime(ctx); err != nil {
+				return "", fmt.Errorf("启动 Coordinator 失败: %w", err)
+			}
 			return fmt.Sprintf(
 				"已写入 intent：%s（status %s，id %s，来源边 %d）",
 				saved.Title,
@@ -2738,6 +2963,24 @@ func (s *Service) addGraphNode(
 		return "", fmt.Errorf("写入攻击路径节点失败: %w", err)
 	}
 	s.syncProjectGraph(ctx, projectID, userID)
+	if kind == "hint" {
+		if info, ok := execctx.Subagent(ctx); !ok ||
+			!strings.EqualFold(strings.TrimSpace(info.Kind), "planner") {
+			s.emitAgentTrigger(
+				ctx,
+				database.AgentTriggerHint,
+				"",
+				map[string]interface{}{
+					"hints":   []string{saved.Title, saved.Detail},
+					"summary": saved.Title,
+				},
+				"hint:"+saved.ID,
+			)
+			if err := s.reviveCoordinatedRuntime(ctx); err != nil {
+				return "", fmt.Errorf("启动 Coordinator 失败: %w", err)
+			}
+		}
+	}
 	return fmt.Sprintf(
 		"已写入攻击路径 %s 节点：%s（status %s，id %s）",
 		kind,
@@ -2962,7 +3205,8 @@ func inferFindingAssetKind(value string) string {
 	if _, _, err := net.ParseCIDR(value); err == nil {
 		return "host"
 	}
-	if host, err := database.NormalizeAssetValue("host", value); err == nil && !strings.Contains(host, ".") {
+	if host, err := database.NormalizeAssetValue("host", value); err == nil &&
+		(strings.Contains(host, ".") || strings.Contains(host, ":")) {
 		return "host"
 	}
 	return ""

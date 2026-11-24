@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"sophon/internal/database"
+	"sophon/internal/execctx"
 )
 
 const (
@@ -282,6 +283,11 @@ func (s *Service) spawnFindingFollowUpIntents(
 			if err := s.linkGraphEdge(ctx, projectID, findingNode.ID, existing.ID, "derived_from"); err != nil {
 				return err
 			}
+			candidate.ProjectID = projectID
+			candidate.IntentID = existing.ID
+			candidate.OriginConversationID = execctx.ConversationID(ctx)
+			candidate.OriginRunID = execctx.RunID(ctx)
+			_, _ = s.db.UpsertProjectTestResult(ctx, candidate)
 			continue
 		}
 		intent, err := s.db.UpsertProjectGraphNode(ctx, database.GraphNode{
@@ -304,6 +310,11 @@ func (s *Service) spawnFindingFollowUpIntents(
 		if err := s.linkGraphEdge(ctx, projectID, findingNode.ID, intent.ID, "derived_from"); err != nil {
 			return err
 		}
+		candidate.ProjectID = projectID
+		candidate.IntentID = intent.ID
+		candidate.OriginConversationID = execctx.ConversationID(ctx)
+		candidate.OriginRunID = execctx.RunID(ctx)
+		_, _ = s.db.UpsertProjectTestResult(ctx, candidate)
 	}
 	return nil
 }

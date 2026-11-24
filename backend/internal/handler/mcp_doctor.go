@@ -43,7 +43,7 @@ var pythonImportPattern = regexp.MustCompile(
 	`(?m)^\s*(?:import\s+([A-Za-z_][A-Za-z0-9_]*)|from\s+([A-Za-z_][A-Za-z0-9_]*)\s+import\b)`,
 )
 
-// 包装脚本里 subprocess 调用的外部命令：cmd = ["rpcclient", ...] 或 subprocess.run(["nmap", ...])。
+// 包装脚本里 subprocess 调用的外部命令：cmd = ["smbclient", ...] 或 subprocess.run(["nmap", ...])。
 var (
 	commandListPattern    = regexp.MustCompile(`(?m)(?:^|\s)(?:cmd|command|argv)\s*=\s*\[\s*"([^"]+)"`)
 	subprocessListPattern = regexp.MustCompile(

@@ -23,9 +23,11 @@ type AgentRoleHandler struct {
 
 type agentRoleListItem struct {
 	database.AgentRole
-	Internal  bool `json:"internal"`
-	Mandatory bool `json:"mandatory"`
-	Editable  bool `json:"editable"`
+	Internal  bool   `json:"internal"`
+	System    bool   `json:"system"`
+	Kind      string `json:"kind"`
+	Mandatory bool   `json:"mandatory"`
+	Editable  bool   `json:"editable"`
 }
 
 const (
@@ -59,16 +61,19 @@ func (h *AgentRoleHandler) List(c *gin.Context) {
 	items := make([]agentRoleListItem, 0, len(roles))
 	for _, role := range roles {
 		_, isSystem := agentpkg.SystemAgentDefinitionForRole(role)
-		if isSystem && !includeInternal && role.ID != agentpkg.SystemRetestAgentID {
+		if isSystem && !includeInternal {
 			continue
 		}
 		item := agentRoleListItem{
 			AgentRole: role,
 			Internal:  isSystem,
+			System:    isSystem,
+			Kind:      "task_profile",
 			Mandatory: isSystem && !agentpkg.SystemAgentDisableableForRole(role),
 			Editable:  agentpkg.SystemAgentEditableForRole(role),
 		}
 		if isSystem {
+			item.Kind = "system_agent"
 			systemItems = append(systemItems, item)
 		} else {
 			items = append(items, item)
@@ -94,20 +99,12 @@ func (h *AgentRoleHandler) Create(c *gin.Context) {
 		return
 	}
 	if strings.TrimSpace(request.Prompt) == "" {
-		badRequest(c, "invalid_agent_role", "角色提示词不能为空")
+		badRequest(c, "invalid_agent_role", "任务模板方法提示不能为空")
 		return
 	}
 	defaultMode := "auto"
-	if request.DefaultMode != nil {
-		var err error
-		defaultMode, err = normalizeRoleDefaultMode(*request.DefaultMode)
-		if err != nil {
-			badRequest(c, "invalid_agent_role", err.Error())
-			return
-		}
-	}
 	if len([]rune(request.Prompt)) > maxRolePromptRunes {
-		badRequest(c, "invalid_agent_role", "角色提示词不能超过 32768 个字符")
+		badRequest(c, "invalid_agent_role", "任务模板方法提示不能超过 32768 个字符")
 		return
 	}
 	skills, err := h.normalizeSkillNames(request.Skills)
@@ -135,7 +132,7 @@ func (h *AgentRoleHandler) Create(c *gin.Context) {
 			UpdatedAt:   now,
 		}
 		if strings.TrimSpace(restored.Prompt) == "" {
-			badRequest(c, "invalid_agent_role", "角色提示词不能为空")
+			badRequest(c, "invalid_agent_role", "任务模板方法提示不能为空")
 			return
 		}
 		if err := h.db.RestoreAgentRole(c.Request.Context(), restored); err != nil {
@@ -201,18 +198,10 @@ func (h *AgentRoleHandler) Update(c *gin.Context) {
 	}
 	if strings.TrimSpace(request.Prompt) != "" {
 		if len([]rune(request.Prompt)) > maxRolePromptRunes {
-			badRequest(c, "invalid_agent_role", "角色提示词不能超过 32768 个字符")
+			badRequest(c, "invalid_agent_role", "任务模板方法提示不能超过 32768 个字符")
 			return
 		}
 		role.Prompt = strings.TrimSpace(request.Prompt)
-	}
-	if request.DefaultMode != nil {
-		defaultMode, err := normalizeRoleDefaultMode(*request.DefaultMode)
-		if err != nil {
-			badRequest(c, "invalid_agent_role", err.Error())
-			return
-		}
-		role.DefaultMode = defaultMode
 	}
 	skills, err := h.normalizeSkillNames(request.Skills)
 	if err != nil {
@@ -280,7 +269,7 @@ func (h *AgentRoleHandler) normalizeSkillNames(values []string) ([]string, error
 		seen[value] = true
 		result = append(result, value)
 		if len(result) > maxRoleSkills {
-			return nil, fmt.Errorf("单个角色最多绑定 %d 个技能", maxRoleSkills)
+			return nil, fmt.Errorf("单个任务模板最多推荐 %d 个方法包", maxRoleSkills)
 		}
 	}
 	return result, nil

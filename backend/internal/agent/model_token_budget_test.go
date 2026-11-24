@@ -93,3 +93,61 @@ func TestWrapModelTokenBudgetWithToolsSharesContextBudget(t *testing.T) {
 		t.Fatal("WithTools 后仍应共享 Token 预算提醒")
 	}
 }
+
+func TestModelTokenBudgetRepairsMalformedToolCallArguments(t *testing.T) {
+	base := &recordingModel{}
+	wrapped := wrapModelTokenBudget(base)
+	original := []*schema.Message{
+		schema.AssistantMessage("", []schema.ToolCall{
+			{
+				ID:   "valid",
+				Type: "function",
+				Function: schema.FunctionCall{
+					Name:      "valid_tool",
+					Arguments: `{"value":1}`,
+				},
+			},
+			{
+				ID:   "truncated",
+				Type: "function",
+				Function: schema.FunctionCall{
+					Name:      "truncated_tool",
+					Arguments: `{"value":`,
+				},
+			},
+			{
+				ID:   "empty",
+				Type: "function",
+				Function: schema.FunctionCall{
+					Name:      "empty_tool",
+					Arguments: "",
+				},
+			},
+			{
+				ID:   "array",
+				Type: "function",
+				Function: schema.FunctionCall{
+					Name:      "array_tool",
+					Arguments: `["not","an","object"]`,
+				},
+			},
+		}),
+	}
+	if _, err := wrapped.Generate(context.Background(), original); err != nil {
+		t.Fatalf("Generate 调用失败: %v", err)
+	}
+	if len(base.inputs) != 1 || len(base.inputs[0]) != 1 {
+		t.Fatalf("模型输入记录异常: %+v", base.inputs)
+	}
+	calls := base.inputs[0][0].ToolCalls
+	if len(calls) != 4 ||
+		calls[0].Function.Arguments != `{"value":1}` ||
+		calls[1].Function.Arguments != "{}" ||
+		calls[2].Function.Arguments != "{}" ||
+		calls[3].Function.Arguments != "{}" {
+		t.Fatalf("损坏的工具参数未修复: %+v", calls)
+	}
+	if original[0].ToolCalls[1].Function.Arguments != `{"value":` {
+		t.Fatalf("不应修改 ADK 原始消息: %+v", original[0].ToolCalls)
+	}
+}

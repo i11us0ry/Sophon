@@ -22,6 +22,7 @@ func TestBuildAgentTraceSummaryCountsUniqueAgents(t *testing.T) {
 			EventType: "subagent.started",
 			Data: map[string]interface{}{
 				"agentId": "worker-1", "agentName": "上传 Worker", "agentKind": "worker",
+				"parentAgentId": "mainagent", "intentId": "intent-upload", "hypothesisId": "hyp-1",
 				"workerFocus": "文件上传", "allowedSkills": []interface{}{"dotnet-file-audit"},
 				"task": "审计上传链路",
 			},
@@ -49,6 +50,8 @@ func TestBuildAgentTraceSummaryCountsUniqueAgents(t *testing.T) {
 		t.Fatalf("Agent 汇总列表错误: %#v", summary["agents"])
 	}
 	if agents[0].Status != "completed" || agents[0].DurationMS != 1500 ||
+		agents[0].ParentAgentID != "mainagent" || agents[0].IntentID != "intent-upload" ||
+		agents[0].HypothesisID != "hyp-1" ||
 		len(agents[0].AllowedSkills) != 1 || agents[0].AllowedSkills[0] != "dotnet-file-audit" {
 		t.Fatalf("Worker 生命周期合并错误: %+v", agents[0])
 	}
@@ -108,6 +111,75 @@ func TestBatchDeleteCancelsRunningTasks(t *testing.T) {
 	}
 	if _, err := os.Stat(conversationDir); !os.IsNotExist(err) {
 		t.Fatalf("对话附件目录应被清理: %v", err)
+	}
+}
+
+func TestUpdateConversationProjectRejectsNonEmptyConversation(t *testing.T) {
+	db, err := database.Open(filepath.Join(t.TempDir(), "conversation-project.db"))
+	if err != nil {
+		t.Fatalf("打开测试数据库失败: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ctx := context.Background()
+	now := time.Now().UTC()
+	for _, projectID := range []string{"project-a", "project-b"} {
+		if err := db.CreateProject(ctx, database.Project{
+			ID:          projectID,
+			OwnerUserID: "user-1",
+			Name:        projectID,
+			Status:      "active",
+			CreatedAt:   now,
+			UpdatedAt:   now,
+		}); err != nil {
+			t.Fatalf("创建项目失败: %v", err)
+		}
+	}
+	if err := db.CreateConversation(ctx, database.Conversation{
+		ID:          "conv-project",
+		OwnerUserID: "user-1",
+		ProjectID:   "project-a",
+		Title:       "新对话",
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}); err != nil {
+		t.Fatalf("创建对话失败: %v", err)
+	}
+	handler := &ChatHandler{db: db}
+	gin.SetMode(gin.TestMode)
+
+	request := func() *httptest.ResponseRecorder {
+		recorder := httptest.NewRecorder()
+		ginCtx, _ := gin.CreateTestContext(recorder)
+		ginCtx.Request = httptest.NewRequest(
+			http.MethodPut,
+			"/api/conversations/conv-project/project",
+			strings.NewReader(`{"projectId":"project-b"}`),
+		)
+		ginCtx.Params = gin.Params{{Key: "id", Value: "conv-project"}}
+		ginCtx.Set("sophon.user", &database.User{ID: "user-1", Username: "user-1"})
+		handler.UpdateConversationProject(ginCtx)
+		return recorder
+	}
+
+	if recorder := request(); recorder.Code != http.StatusOK {
+		t.Fatalf("空对话改绑项目失败: status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	updated, err := db.GetConversation(ctx, "conv-project", "user-1")
+	if err != nil || updated.ProjectID != "project-b" {
+		t.Fatalf("对话项目未更新: %+v err=%v", updated, err)
+	}
+	if err := db.AddMessage(ctx, database.Message{
+		ID:             "msg-project",
+		ConversationID: "conv-project",
+		Role:           "user",
+		Content:        "hello",
+		CreatedAt:      now,
+	}); err != nil {
+		t.Fatalf("写入消息失败: %v", err)
+	}
+	if recorder := request(); recorder.Code != http.StatusConflict ||
+		!strings.Contains(recorder.Body.String(), "conversation_not_empty") {
+		t.Fatalf("已有消息的对话不应改绑项目: status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
 }
 

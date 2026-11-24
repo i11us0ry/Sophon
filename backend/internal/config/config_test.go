@@ -55,7 +55,9 @@ func TestNormalizeAgentMaxHypotheses(t *testing.T) {
 func TestZeroAgentLimitsRemainUnlimited(t *testing.T) {
 	t.Setenv("SOPHON_AGENT_MAX_TURN_TOKENS", "")
 	t.Setenv("SOPHON_AGENT_MAX_ITERATIONS", "")
+	t.Setenv("SOPHON_AGENT_MAX_TOOL_CALLS", "")
 	t.Setenv("SOPHON_AGENT_MAX_HYPOTHESES", "")
+	t.Setenv("SOPHON_AGENT_SUBAGENT_MAX_TOOL_CALLS", "")
 	zero := 0
 	if got := pickIntAllowZero("SOPHON_AGENT_MAX_TURN_TOKENS", &zero, 40); got != 0 {
 		t.Fatalf("Token 0 应为不限，实际 %d", got)
@@ -63,17 +65,28 @@ func TestZeroAgentLimitsRemainUnlimited(t *testing.T) {
 	if got := pickIntAllowZero("SOPHON_AGENT_MAX_ITERATIONS", &zero, 40); got != 0 {
 		t.Fatalf("迭代 0 应为不限，实际 %d", got)
 	}
+	if got := pickIntAllowZero("SOPHON_AGENT_MAX_TOOL_CALLS", &zero, 500); got != 0 {
+		t.Fatalf("工具调用 0 应为不限，实际 %d", got)
+	}
 	if got := normalizeAgentMaxHypotheses(pickIntAllowZero("SOPHON_AGENT_MAX_HYPOTHESES", &zero, 200)); got != 0 {
 		t.Fatalf("假设 0 应为不限，实际 %d", got)
+	}
+	if got := normalizeSubagentMaxToolCalls(
+		pickIntAllowZero("SOPHON_AGENT_SUBAGENT_MAX_TOOL_CALLS", &zero, 80),
+	); got != 0 {
+		t.Fatalf("Worker 工具调用 0 应为不限，实际 %d", got)
 	}
 }
 
 func TestNormalizeSubagentBudgets(t *testing.T) {
-	if got := normalizeSubagentMaxToolCalls(0); got != 80 {
-		t.Fatalf("默认工具调用预算错误: %d", got)
+	if got := normalizeSubagentMaxToolCalls(0); got != 0 {
+		t.Fatalf("工具调用预算 0 应为不限: %d", got)
 	}
-	if got := normalizeSubagentMaxToolCalls(999); got != 500 {
+	if got := normalizeSubagentMaxToolCalls(999); got != 999 {
 		t.Fatalf("工具调用预算上限错误: %d", got)
+	}
+	if got := normalizeSubagentMaxToolCalls(100000001); got != 100000000 {
+		t.Fatalf("工具调用预算最大值错误: %d", got)
 	}
 	if got := normalizeSubagentMaxDuration(10); got != 60 {
 		t.Fatalf("耗时预算下限错误: %d", got)

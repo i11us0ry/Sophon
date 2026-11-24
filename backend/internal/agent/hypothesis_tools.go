@@ -2,31 +2,36 @@ package agent
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
 
 	"sophon/internal/database"
+	"sophon/internal/execctx"
 )
 
 const (
-	maxHypothesesPerPlan  = 20
+	maxHypothesesPerPlan  = 4
 	maxFollowUpPerFinding = 5
 )
 
 type hypothesisInput struct {
-	AssetID          string `json:"asset_id"`
-	Dimension        string `json:"dimension"`
-	Technique        string `json:"technique"`
-	Rationale        string `json:"rationale"`
-	ExpectedEvidence string `json:"expected_evidence"`
-	Priority         int    `json:"priority"`
-	Required         *bool  `json:"required"`
+	AssetID          string   `json:"asset_id"`
+	ParentIDs        []string `json:"parent_ids"`
+	Dimension        string   `json:"dimension"`
+	Technique        string   `json:"technique"`
+	Rationale        string   `json:"rationale"`
+	ExpectedEvidence string   `json:"expected_evidence"`
+	Priority         int      `json:"priority"`
+	Required         *bool    `json:"required"`
 }
 
 var highRiskUploadEntryAliases = []struct {
@@ -52,7 +57,7 @@ func (s *Service) planHypothesesTool() tool.BaseTool {
 		desc: "批量规划结构化安全测试假设。每个假设包含资产、测试维度、技术、依据、预期证据和优先级。",
 		params: map[string]*schema.ParameterInfo{
 			"hypotheses_json": stringParam(
-				`JSON 数组，例如 [{"asset_id":"asset-1","dimension":"SQL注入","technique":"time-based","rationale":"数据库参数未参数化","expected_evidence":"可重复延时响应","priority":80}]`,
+				`JSON 数组，单次最多 4 个，例如 [{"asset_id":"asset-1","parent_ids":["fact-node-1"],"dimension":"SQL注入","technique":"time-based","rationale":"数据库参数未参数化","expected_evidence":"可重复延时响应","priority":80}]；源码或附件级审计可省略 asset_id`,
 				true,
 			),
 		},
@@ -93,18 +98,52 @@ func (s *Service) planHypothesesTool() tool.BaseTool {
 			}
 			skipped := 0
 			planned := 0
+			assetlessSourceAudit, err := s.allowAssetlessSourceAudit(ctx, projectID, userID)
+			if err != nil {
+				return "", err
+			}
+			activeHypotheses, err := s.db.ListActiveProjectHypotheses(ctx, projectID)
+			if err != nil {
+				return "", fmt.Errorf("读取现有假设失败: %w", err)
+			}
+			plannedDimensions := make([]hypothesisDimensionRef, 0, len(activeHypotheses))
+			for _, item := range activeHypotheses {
+				switch item.ExecutionState {
+				case database.ProjectExecutionOpen,
+					database.ProjectExecutionRunning,
+					database.ProjectExecutionPaused:
+					plannedDimensions = append(plannedDimensions, hypothesisDimensionRef{
+						AssetID:   item.AssetID,
+						Dimension: item.Dimension,
+					})
+				}
+			}
 			for _, input := range inputs {
-				assetID, err := s.validateProjectAsset(ctx, projectID, userID, input.AssetID)
+				assetID := firstNonEmpty(input.AssetID, currentAssetID(ctx))
+				if assetID != "" {
+					assetID, err = s.validateProjectAsset(ctx, projectID, userID, assetID)
+					if err != nil {
+						return "", err
+					}
+				} else if !assetlessSourceAudit {
+					return "", fmt.Errorf("asset_id 不能为空；只有项目无网络资产且存在上传附件时才能创建源码审计假设")
+				}
+				parentNodes, err := s.resolveHypothesisParents(
+					ctx,
+					projectID,
+					assetID,
+					input.ParentIDs,
+				)
 				if err != nil {
 					return "", err
-				}
-				if assetID == "" {
-					skipped++
-					continue
 				}
 				dimension := truncateProjectText(input.Dimension, projectToolShortText)
 				technique := truncateProjectText(input.Technique, projectToolShortText)
 				if dimension == "" {
+					skipped++
+					continue
+				}
+				if overlappingHypothesisIndex(plannedDimensions, assetID, dimension) >= 0 {
 					skipped++
 					continue
 				}
@@ -126,21 +165,78 @@ func (s *Service) planHypothesesTool() tool.BaseTool {
 				if input.Required != nil {
 					required = *input.Required
 				}
+				if existing, existingErr := s.db.GetProjectTestResult(
+					ctx,
+					projectID,
+					assetID,
+					dimension,
+					technique,
+				); existingErr == nil && existing != nil {
+					skipped++
+					continue
+				} else if existingErr != nil && !errors.Is(existingErr, sql.ErrNoRows) {
+					return "", fmt.Errorf("检查已有测试意图失败: %w", existingErr)
+				}
+				now := time.Now().UTC()
+				intentTitle := strings.TrimSpace(dimension)
+				if technique != "" {
+					intentTitle += " · " + technique
+				}
+				intentNode, err := s.db.UpsertProjectGraphNode(ctx, database.GraphNode{
+					ID:         randomID(),
+					ProjectID:  projectID,
+					Kind:       "intent",
+					Title:      truncateProjectText(intentTitle, projectToolShortText),
+					Detail:     truncateProjectText(input.Rationale, projectToolLongText),
+					Status:     "open",
+					Confidence: 70,
+					AssetID:    assetID,
+					Source:     "planner",
+					CreatedAt:  now,
+					UpdatedAt:  now,
+				})
+				if err != nil {
+					return "", fmt.Errorf("写入 Planner Intent 节点失败: %w", err)
+				}
+				if rootID := s.latestIntentSourceRootID(ctx, projectID, assetID); rootID != "" {
+					_ = s.linkGraphEdge(ctx, projectID, rootID, intentNode.ID, "spawns")
+				}
+				for _, parent := range parentNodes {
+					if err := s.linkGraphEdge(
+						ctx,
+						projectID,
+						parent.ID,
+						intentNode.ID,
+						"derived_from",
+					); err != nil {
+						return "", fmt.Errorf("关联假设父节点失败: %w", err)
+					}
+				}
 				if _, err := s.db.UpsertProjectTestResult(ctx, database.ProjectTestResult{
-					ProjectID: projectID,
-					AssetID:   assetID,
-					Dimension: dimension,
-					Technique: technique,
-					Status:    "untested",
-					Rationale: truncateProjectText(input.Rationale, projectToolLongText),
-					Expected:  truncateProjectText(input.ExpectedEvidence, projectToolLongText),
-					Priority:  priority,
-					Required:  required,
-					CreatedAt: time.Now().UTC(),
+					ProjectID:            projectID,
+					AssetID:              assetID,
+					Dimension:            dimension,
+					Technique:            technique,
+					Status:               "untested",
+					IntentID:             intentNode.ID,
+					OriginConversationID: execctx.ConversationID(ctx),
+					OriginRunID:          execctx.RunID(ctx),
+					Rationale:            truncateProjectText(input.Rationale, projectToolLongText),
+					Expected:             truncateProjectText(input.ExpectedEvidence, projectToolLongText),
+					Priority:             priority,
+					Required:             required,
+					CreatedAt:            time.Now().UTC(),
 				}); err != nil {
 					return "", fmt.Errorf("写入测试假设失败: %w", err)
 				}
+				plannedDimensions = append(plannedDimensions, hypothesisDimensionRef{
+					AssetID:   assetID,
+					Dimension: dimension,
+				})
 				planned++
+			}
+			if planned > 0 {
+				s.syncProjectGraph(ctx, projectID, userID)
 			}
 			message := fmt.Sprintf("测试假设已规划：写入 %d 个，跳过 %d 个。", planned, skipped)
 			if maxHypotheses > 0 && total+planned >= maxHypotheses {
@@ -149,9 +245,84 @@ func (s *Service) planHypothesesTool() tool.BaseTool {
 					maxHypotheses,
 				)
 			}
+			if handle := s.orchestrationFor(execctx.ConversationID(ctx)); handle != nil {
+				handle.signalWorkers()
+			}
 			return message, nil
 		},
 	}
+}
+
+func (s *Service) resolveHypothesisParents(
+	ctx context.Context,
+	projectID string,
+	assetID string,
+	parentIDs []string,
+) ([]database.GraphNode, error) {
+	parents := make([]database.GraphNode, 0, len(parentIDs))
+	for _, parentID := range normalizeUniqueStrings(parentIDs) {
+		parent, err := s.db.GetProjectGraphNode(ctx, parentID, projectID)
+		if err != nil || parent == nil {
+			return nil, fmt.Errorf("父节点 %s 不存在或不属于当前项目", parentID)
+		}
+		switch strings.ToLower(strings.TrimSpace(parent.Kind)) {
+		case "fact", "finding", "intent":
+		default:
+			return nil, fmt.Errorf("父节点 %s 必须是 fact、finding 或 intent", parentID)
+		}
+		if !graphAssetScopeCompatible(assetID, parent.AssetID) {
+			return nil, fmt.Errorf("父节点 %s 与假设目标不属于同一资产范围", parentID)
+		}
+		parents = append(parents, *parent)
+	}
+	return parents, nil
+}
+
+type hypothesisDimensionRef struct {
+	AssetID   string
+	Dimension string
+}
+
+func overlappingHypothesisIndex(
+	items []hypothesisDimensionRef,
+	assetID string,
+	dimension string,
+) int {
+	assetID = strings.TrimSpace(assetID)
+	for index, item := range items {
+		if strings.TrimSpace(item.AssetID) != assetID {
+			continue
+		}
+		if hypothesisDimensionsOverlap(item.Dimension, dimension) {
+			return index
+		}
+	}
+	return -1
+}
+
+func hypothesisDimensionsOverlap(left, right string) bool {
+	left = canonicalHypothesisDimension(left)
+	right = canonicalHypothesisDimension(right)
+	if left == "" || right == "" {
+		return false
+	}
+	if left == right {
+		return true
+	}
+	if len([]rune(left)) < 4 || len([]rune(right)) < 4 {
+		return false
+	}
+	return strings.Contains(left, right) || strings.Contains(right, left)
+}
+
+func canonicalHypothesisDimension(value string) string {
+	var builder strings.Builder
+	for _, character := range strings.ToLower(strings.TrimSpace(value)) {
+		if unicode.IsLetter(character) || unicode.IsNumber(character) {
+			builder.WriteRune(character)
+		}
+	}
+	return builder.String()
 }
 
 func highRiskUploadEntries(value string) []string {
@@ -171,9 +342,9 @@ func highRiskUploadEntries(value string) []string {
 func (s *Service) listHypothesesTool() tool.BaseTool {
 	return &jsonTool{
 		name: "project_list_hypotheses",
-		desc: "查看当前项目的待验证、运行中或可疑测试假设，按优先级排序。",
+		desc: "查看当前项目的测试意图，包含执行状态、结果状态、暂停/停止/耗尽原因。",
 		params: map[string]*schema.ParameterInfo{
-			"status": stringParam("可选：untested/running/suspicious"),
+			"status": stringParam("可选：untested/running/paused/blocked/stopped/exhausted/suspicious/confirmed"),
 			"query":  stringParam("按维度、技术、依据或预期证据搜索"),
 			"limit":  integerParam("返回条数，默认 20，最大 100"),
 		},
@@ -217,8 +388,9 @@ func (s *Service) listHypothesesTool() tool.BaseTool {
 				}
 				matched++
 				builder.WriteString(fmt.Sprintf(
-					"- [%s] %s/%s（asset=%s，required=%t，priority=%d，attempts=%d，id=%s）\n",
-					item.Status,
+					"- [%s/%s] %s/%s（asset=%s，required=%t，priority=%d，attempts=%d，id=%s）\n",
+					orDefaultProjectToolValue(item.ExecutionState, item.Status),
+					orDefaultProjectToolValue(item.OutcomeState, "unknown"),
 					item.Dimension,
 					orDefaultProjectToolValue(item.Technique, "-"),
 					item.AssetID,
@@ -232,6 +404,9 @@ func (s *Service) listHypothesesTool() tool.BaseTool {
 				}
 				if item.Expected != "" {
 					builder.WriteString("  预期证据: " + truncateProjectText(item.Expected, projectToolShortText) + "\n")
+				}
+				if item.StateReason != "" {
+					builder.WriteString("  状态原因: " + truncateProjectText(item.StateReason, projectToolShortText) + "\n")
 				}
 			}
 			return capProjectOutput(&builder), nil
@@ -275,10 +450,11 @@ func (s *Service) startHypothesisTool() tool.BaseTool {
 func (s *Service) completeHypothesisTool() tool.BaseTool {
 	return &jsonTool{
 		name: "project_complete_hypothesis",
-		desc: "完成一个测试假设并写入结论、证据、置信度及关联漏洞。",
+		desc: "完成一个测试意图并写回执行状态、结果状态、结论、证据和关联漏洞。",
 		params: map[string]*schema.ParameterInfo{
 			"hypothesis_id": stringParam("测试假设 id", true),
-			"status":        stringParam("完成状态：tested_clean/blocked/suspicious/confirmed", true),
+			"status":        stringParam("完成状态：tested_clean/blocked/suspicious/confirmed/stopped/exhausted", true),
+			"state_reason":  stringParam("执行终态原因，例如 model_error/budget_exhausted/no_evidence/user_stopped"),
 			"result":        stringParam("测试结论"),
 			"evidence":      stringParam("证据摘要"),
 			"evidence_refs": stringArrayParam("证据引用数组；" + evidenceReferenceFormatHint),
@@ -289,6 +465,7 @@ func (s *Service) completeHypothesisTool() tool.BaseTool {
 			var request struct {
 				HypothesisID string   `json:"hypothesis_id"`
 				Status       string   `json:"status"`
+				StateReason  string   `json:"state_reason"`
 				Result       string   `json:"result"`
 				Evidence     string   `json:"evidence"`
 				EvidenceRefs []string `json:"evidence_refs"`
@@ -308,7 +485,7 @@ func (s *Service) completeHypothesisTool() tool.BaseTool {
 			}
 			status, ok := database.NormalizeProjectTestResultStatus(request.Status)
 			if !ok || !database.IsProjectTestResultTerminal(status) {
-				return "", fmt.Errorf("完成状态必须是 tested_clean/blocked/suspicious/confirmed")
+				return "", fmt.Errorf("完成状态必须是 tested_clean/blocked/suspicious/confirmed/stopped/exhausted")
 			}
 			result := truncateProjectText(request.Result, projectToolLongText)
 			evidence := truncateProjectText(request.Evidence, projectToolLongText)
@@ -344,8 +521,13 @@ func (s *Service) completeHypothesisTool() tool.BaseTool {
 				if err := s.validateEvidenceReferences(ctx, projectID, userID, evidenceRefs, "high"); err != nil {
 					return "", err
 				}
+			case "stopped", "exhausted":
+				if result == "" && strings.TrimSpace(request.StateReason) == "" {
+					return "", fmt.Errorf("%s 必须说明原因", status)
+				}
 			}
 			item.Status = status
+			item.StateReason = strings.TrimSpace(request.StateReason)
 			item.Result = result
 			item.Evidence = evidence
 			item.EvidenceRefs = evidenceRefs
@@ -356,6 +538,13 @@ func (s *Service) completeHypothesisTool() tool.BaseTool {
 			if err != nil {
 				return "", fmt.Errorf("完成测试假设失败: %w", err)
 			}
+			s.syncIntentNodeFromHypothesis(
+				ctx,
+				projectID,
+				saved.IntentID,
+				saved.ExecutionState,
+				saved.StateReason,
+			)
 			return fmt.Sprintf(
 				"测试假设已完成：%s/%s，status=%s，confidence=%d（id=%s）",
 				saved.Dimension,
@@ -521,15 +710,34 @@ func (s *Service) seedFollowUpHypotheses(
 			items = items[:remaining]
 		}
 	}
+	active, err := s.db.ListActiveProjectHypotheses(ctx, projectID)
+	if err != nil {
+		return
+	}
+	refs := make([]hypothesisDimensionRef, 0, len(active))
+	for _, item := range active {
+		refs = append(refs, hypothesisDimensionRef{
+			AssetID:   item.AssetID,
+			Dimension: item.Dimension,
+		})
+	}
 	for index := range items {
+		if overlappingHypothesisIndex(refs, items[index].AssetID, items[index].Dimension) >= 0 {
+			continue
+		}
 		items[index].ProjectID = projectID
-		_, _ = s.db.UpsertProjectTestResult(ctx, items[index])
+		if _, err := s.db.UpsertProjectTestResult(ctx, items[index]); err == nil {
+			refs = append(refs, hypothesisDimensionRef{
+				AssetID:   items[index].AssetID,
+				Dimension: items[index].Dimension,
+			})
+		}
 	}
 }
 
 func shouldGenerateFollowUps(finding database.Vulnerability) bool {
 	switch strings.ToLower(strings.TrimSpace(finding.Status)) {
-	case "fixed", "false_positive", "ignored", "closed", "dismissed", "resolved":
+	case "pending_review", "fixed", "false_positive", "ignored", "closed", "dismissed", "resolved":
 		return false
 	case "confirmed":
 		return true

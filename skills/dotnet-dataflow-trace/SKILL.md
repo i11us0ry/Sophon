@@ -10,6 +10,41 @@ metadata:
 
 本技能只输出数据流和可控性证据，不直接给漏洞等级或修复建议。
 
+## 适用场景
+
+适合已经存在明确入口、参数或 Sink 候选，需要证明输入如何跨方法、跨类型和跨分支到达危险操作。
+
+## 不适用场景
+
+如果入口或 Sink 尚未确定，不必对所有代码执行数据流追踪；仅有同名变量或危险 API 名称时，不能补写未观察到的流。
+
+## 核心判断
+
+数据流追踪只回答输入是否以及如何到达 Sink。参数可控性、分支可达、转换、净化和最终执行需要逐段证据。
+
+## 证据标准
+
+- 每个关键跳转必须有 file、line、symbol 和表达式。
+- 分支需要记录可达条件与提前退出。
+- 参数经过模型绑定、映射、编码、加密或反射时需要记录状态变化。
+- Trace 只能标记 COMPLETE、PARTIAL 或 UNRESOLVED，不得把 UNKNOWN 升级为确认。
+
+## 决策树
+
+- Source 和 Sink 明确：按调用链逐层追踪。
+- 跨接口或 DI 实现：定位具体实现类。
+- 分支存在：分别记录进入和退出路径。
+- 防护存在：判断完全阻断、条件阻断或仅编码。
+- 动态反射或运行时代理无法解析：标记未闭合并停止该分支。
+
+## 常见误判
+
+- 只凭方法名判断可控性。
+- 把 DTO 字段和实体字段自动视为同一值。
+- 忽略异步、扩展方法、基类和中间件。
+- 把编码当成参数化或白名单。
+- 在 PARTIAL 状态下给出 confirmed 结论。
+
 ## Source
 
 - MVC 参数：`[FromBody]`、`[FromQuery]`、`[FromForm]`、`[FromRoute]`、`[FromHeader]`。
@@ -52,35 +87,7 @@ metadata:
 - Repository、Service、UnitOfWork、MediatR。
 - Reflection、`Activator.CreateInstance`、动态代理。
 
-## 输出格式
-
-```text
-Entry:
-  route_id:
-  file:line
-  symbol:
-
-Source:
-  file:line
-  expression:
-
-Flow:
-  1. file:line symbol transformation
-  2. file:line branch/validation
-  3. file:line symbol
-
-Sink:
-  file:line
-  api:
-  argument:
-
-Controllability: FULL | CONDITIONAL | NONE | UNKNOWN
-Branch Evidence:
-Protection:
-Trace Status: COMPLETE | PARTIAL | UNRESOLVED
-```
-
-## 规则
+## 追踪规则
 
 1. 每个关键跳转必须有 file:line。
 2. 不能只凭方法名判断参数可控。

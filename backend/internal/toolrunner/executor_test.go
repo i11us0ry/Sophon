@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 func intPointer(value int) *int {
@@ -153,6 +155,22 @@ func TestExecutorRunsCommand(t *testing.T) {
 	}
 }
 
+func TestExecutorAppliesToolEnvironment(t *testing.T) {
+	executor := &Executor{Timeout: 5 * time.Second}
+	result, err := executor.Run(context.Background(), Tool{
+		Name:        "env-demo",
+		Command:     "sh",
+		Args:        []string{"-c", `printf '%s' "$SOPHON_TEST_VALUE"`},
+		Environment: map[string]string{"SOPHON_TEST_VALUE": "tool-env-ok"},
+	}, nil)
+	if err != nil {
+		t.Fatalf("执行失败: %v", err)
+	}
+	if result.Output != "tool-env-ok" {
+		t.Fatalf("工具环境变量未生效: %q", result.Output)
+	}
+}
+
 func TestExecutorTimeoutKillsChildProcessGroup(t *testing.T) {
 	workspace := t.TempDir()
 	marker := filepath.Join(workspace, "orphan-child.txt")
@@ -210,6 +228,42 @@ func TestExecutorRejectsPythonDetachedSession(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "进程组") {
 		t.Fatalf("应拒绝 Python setsid 脱离进程组: %v", err)
+	}
+}
+
+func TestPythonDependencyToolsRejectEnvNameTraversal(t *testing.T) {
+	for _, name := range []string{"install-python-package.yaml", "execute-python-script.yaml"} {
+		t.Run(name, func(t *testing.T) {
+			raw, err := os.ReadFile(filepath.Join("..", "..", "..", "tools", name))
+			if err != nil {
+				t.Fatalf("读取工具定义失败: %v", err)
+			}
+			var item Tool
+			if err := yaml.Unmarshal(raw, &item); err != nil {
+				t.Fatalf("解析工具定义失败: %v", err)
+			}
+			root := t.TempDir()
+			executor := &Executor{
+				WorkspaceRoot: root,
+				Timeout:       5 * time.Second,
+			}
+			args := map[string]any{
+				"_sophon_workspace": filepath.Join(root, "workspace"),
+				"env_name":          "../../escape",
+			}
+			if item.Name == "execute-python-script" {
+				args["script"] = "print('should-not-run')"
+			} else {
+				args["package"] = "dnfile"
+			}
+			result, err := executor.Run(context.Background(), item, args)
+			if err == nil {
+				t.Fatal("非法 env_name 应被拒绝")
+			}
+			if result == nil || !strings.Contains(result.Output, "env_name") {
+				t.Fatalf("应返回明确 env_name 错误: result=%+v err=%v", result, err)
+			}
+		})
 	}
 }
 
@@ -341,6 +395,7 @@ func TestExecutorExposesConversationWorkspace(t *testing.T) {
 	root := t.TempDir()
 	conversation := filepath.Join(root, "conversation-1")
 	worker := filepath.Join(conversation, "subagents", "worker-1")
+	project := filepath.Join(root, "projects", "project-1")
 	executor := &Executor{Timeout: 5 * time.Second, WorkspaceRoot: root}
 	result, err := executor.Run(context.Background(), Tool{
 		Name:    "exec",
@@ -350,9 +405,12 @@ func TestExecutorExposesConversationWorkspace(t *testing.T) {
 			{Name: "command", Position: intPointer(0), Required: true},
 		},
 	}, map[string]any{
-		"command":                        `printf 'pwd=%s\nworkspace=%s\nconversation=%s\n' "$PWD" "$SOPHON_WORKSPACE" "$SOPHON_CONVERSATION_WORKSPACE"`,
+		"command":                        `printf 'pwd=%s\nworkspace=%s\nconversation=%s\nproject=%s\nproject_id=%s\nconversation_id=%s\n' "$PWD" "$SOPHON_WORKSPACE" "$SOPHON_CONVERSATION_WORKSPACE" "$SOPHON_PROJECT_WORKSPACE" "$SOPHON_PROJECT_ID" "$SOPHON_CONVERSATION_ID"`,
 		"_sophon_workspace":              worker,
 		"_sophon_conversation_workspace": conversation,
+		"_sophon_project_workspace":      project,
+		"_sophon_project_id":             "project-1",
+		"_sophon_conversation_id":        "conversation-1",
 	})
 	if err != nil {
 		t.Fatalf("共享工作区环境变量执行失败: %v", err)
@@ -363,8 +421,44 @@ func TestExecutorExposesConversationWorkspace(t *testing.T) {
 	}
 	if !strings.Contains(result.Output, "pwd="+realWorker) ||
 		!strings.Contains(result.Output, "workspace="+worker) ||
-		!strings.Contains(result.Output, "conversation="+conversation) {
+		!strings.Contains(result.Output, "conversation="+conversation) ||
+		!strings.Contains(result.Output, "project="+project) ||
+		!strings.Contains(result.Output, "project_id=project-1") ||
+		!strings.Contains(result.Output, "conversation_id=conversation-1") {
 		t.Fatalf("Worker 工作区环境不正确: %q", result.Output)
+	}
+}
+
+func TestExecutorPrependsRegisteredToolPaths(t *testing.T) {
+	root := t.TempDir()
+	binDir := filepath.Join(root, "registered-bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("创建工具目录失败: %v", err)
+	}
+	toolPath := filepath.Join(binDir, "custom-tool")
+	if err := os.WriteFile(toolPath, []byte("#!/bin/sh\nprintf 'registered-tool-ok\\n'\n"), 0o755); err != nil {
+		t.Fatalf("写入测试工具失败: %v", err)
+	}
+	workspace := filepath.Join(root, "conversation")
+	executor := &Executor{Timeout: 5 * time.Second, WorkspaceRoot: root}
+	result, err := executor.Run(context.Background(), Tool{
+		Name:    "exec",
+		Command: "sh",
+		Args:    []string{"-c"},
+		Parameters: []Parameter{
+			{Name: "command", Position: intPointer(0), Required: true},
+		},
+	}, map[string]any{
+		"command":            `custom-tool; printf 'tool_paths=%s\n' "$SOPHON_TOOL_PATHS"`,
+		"_sophon_workspace":  workspace,
+		"_sophon_tool_paths": binDir,
+	})
+	if err != nil {
+		t.Fatalf("执行注册工具失败: %v", err)
+	}
+	if !strings.Contains(result.Output, "registered-tool-ok") ||
+		!strings.Contains(result.Output, "tool_paths="+binDir) {
+		t.Fatalf("注册工具 PATH 未生效: %q", result.Output)
 	}
 }
 
@@ -425,7 +519,7 @@ func TestBoundedOutputBufferCapsMemory(t *testing.T) {
 		t.Fatalf("有界缓冲统计异常: len=%d total=%d", buffer.data.Len(), buffer.total)
 	}
 	output := buffer.String()
-	if !strings.Contains(output, "输出超过") || len(output) > 128 {
+	if !strings.Contains(output, "输出超过") || len(output) > 128 || !buffer.Truncated() {
 		t.Fatalf("截断提示异常: %q", output)
 	}
 }

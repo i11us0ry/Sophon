@@ -65,7 +65,23 @@ func (s *Service) runMCPSearchTools(ctx context.Context, raw string) (string, er
 	if limit > 50 {
 		limit = 50
 	}
-	matches := s.registry.search(request.Query, limit)
+	matches := s.registry.search(request.Query, 50)
+	if blocked, _ := s.localExecutionBlockedByZhizi(ctx); blocked {
+		filtered := make([]*registryEntry, 0, len(matches))
+		for _, entry := range matches {
+			if entry == nil || strings.EqualFold(entry.serverName, toolRunnerServerName) {
+				continue
+			}
+			if isLocalExecutionToolName(entry.toolName) {
+				continue
+			}
+			filtered = append(filtered, entry)
+		}
+		matches = filtered
+	}
+	if len(matches) > limit {
+		matches = matches[:limit]
+	}
 	total := s.registry.len()
 	settings := s.mcpToolSettings(ctx)
 	disabled := s.disabledMCPToolNames(ctx)
@@ -151,9 +167,17 @@ func (s *Service) runMCPUsetool(ctx context.Context, raw string) (string, error)
 		return "", fmt.Errorf("工具 %s 参数需为 JSON 对象: %w", entry.qualified, err)
 	}
 	if allowed, reason := s.subagentToolDecision(ctx, entry.qualified, args); !allowed {
+		s.recordSafetyInterception(ctx, entry.qualified, reason, map[string]interface{}{
+			"serverName": entry.serverName,
+			"source":     "subagent_capability",
+		})
 		return "", fmt.Errorf("子 Agent 能力模式拒绝执行 %s：%s", entry.qualified, reason)
 	}
-	return invokeTool(ctx, entry.tool, arguments)
+	result, err := invokeTool(ctx, entry.tool, arguments)
+	if err != nil {
+		return "", err
+	}
+	return unwrapToolResult(result)
 }
 
 func (s *Service) mcpToolSettings(ctx context.Context) map[string]databaseMCPToolSetting {

@@ -37,22 +37,33 @@ const vulnerabilityTypes = [
   '跨站脚本（XSS）',
   'SQL 注入',
   '跨站请求伪造（CSRF）',
-  '未授权访问',
-  '越界读取',
+  '服务端请求伪造（SSRF）',
   '命令注入',
-  'UAF',
   '路径遍历',
   '文件上传',
+  '文件下载',
+  '任意文件读取',
+  '文件包含',
+  '未授权访问',
+  '越权访问',
+  '认证绕过',
+  '弱口令',
+  '硬编码凭据',
+  '信息泄露',
+  '业务逻辑漏洞',
+  '开放重定向',
+  '点击劫持',
+  '反序列化',
+  'XXE',
+  'SSTI',
+  '表达式注入',
+  '拒绝服务',
+  '竞态条件',
+  'UAF',
+  '越界读取',
+  '越界写入',
   '缓冲区溢出',
   '空指针解引用',
-  '文件下载',
-  '信息泄露',
-  '硬编码凭据',
-  '竞态条件',
-  '越界写入',
-  '点击劫持',
-  '文件包含',
-  '服务端请求伪造（SSRF）',
 ]
 const vulnerabilityForm = reactive({
   projectId: '',
@@ -62,7 +73,7 @@ const vulnerabilityForm = reactive({
   vulnerabilityType: '',
   target: '',
   preconditions: '',
-  reproductionSteps: '1. 发送验证请求\n\n利用脚本（优先 Python）：\n```python\nimport requests\nprint(requests.get("https://target.example", timeout=10).status_code)\n```',
+  reproductionSteps: '```http\nPOST /api/example HTTP/1.1\nHost: target.example\nUser-Agent: Mozilla/5.0\nContent-Type: application/json\nCookie: <REDACTED>\n\n{"id":"1"}\n```',
   description: '',
   evidence: '',
   impact: '',
@@ -335,6 +346,7 @@ onMounted(load)
                 @change="updateVulnerabilityStatus(item, ($event.target as HTMLSelectElement).value)"
               >
                 <option value="open">{{ t('vulnStatus.open') }}</option>
+                <option value="pending_review">{{ t('vulnStatus.pending_review') }}</option>
                 <option value="confirmed">{{ t('vulnStatus.confirmed') }}</option>
                 <option value="fixed">{{ t('vulnStatus.fixed') }}</option>
                 <option value="ignored">{{ t('vulnStatus.ignored') }}</option>

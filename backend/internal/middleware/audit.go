@@ -3,6 +3,7 @@ package middleware
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -171,10 +172,37 @@ func summarizeAuditBody(route string, body []byte) string {
 	if len(body) == 0 || route == "/api/chat/stream" {
 		return ""
 	}
+	if isAgentRoleRoute(route) {
+		return summarizeAgentRoleBody(body)
+	}
 	if sensitiveAuditBodyRoute(route) {
 		return "***"
 	}
 	summary, ok := redact.JSON(body)
+	if !ok {
+		return ""
+	}
+	return summary
+}
+
+func isAgentRoleRoute(route string) bool {
+	return route == "/api/agent-roles" ||
+		strings.HasPrefix(route, "/api/agent-roles/")
+}
+
+func summarizeAgentRoleBody(body []byte) string {
+	var payload map[string]interface{}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return ""
+	}
+	if prompt, ok := payload["prompt"].(string); ok {
+		payload["prompt"] = fmt.Sprintf("<redacted:%d chars>", len([]rune(prompt)))
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return ""
+	}
+	summary, ok := redact.JSON(encoded)
 	if !ok {
 		return ""
 	}

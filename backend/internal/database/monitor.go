@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"strings"
 	"time"
 
@@ -27,6 +28,7 @@ type ToolExecution struct {
 	Status         string                 `json:"status"`
 	Result         string                 `json:"result"`
 	Error          string                 `json:"error"`
+	Outcome        ToolExecutionOutcome   `json:"outcome"`
 	StartedAt      time.Time              `json:"startedAt"`
 	FinishedAt     *time.Time             `json:"finishedAt"`
 }
@@ -98,6 +100,7 @@ func (db *DB) FinishToolExecution(
 	id string,
 	result string,
 	invokeErr error,
+	structuredContent ...any,
 ) {
 	if id == "" {
 		return
@@ -109,16 +112,23 @@ func (db *DB) FinishToolExecution(
 		status = "failed"
 		errText = truncateToolExecutionText(redact.Text(invokeErr.Error()))
 	}
+	result = truncateToolExecutionText(redact.Text(result))
+	outcome := buildToolExecutionOutcome(status, result, invokeErr, structuredContent...)
+	if status == "failed" && outcome.Status == "success" {
+		outcome.Status = "error"
+	}
+	outcomeJSON := marshalToolExecutionOutcome(outcome)
 	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), toolExecutionWriteTimeout)
 	defer cancel()
 	_, _ = db.ExecContext(
 		writeCtx,
 		`UPDATE tool_executions
-		 SET status = ?, result = ?, error = ?, finished_at = ?
+		 SET status = ?, result = ?, error = ?, outcome_json = ?, finished_at = ?
 		 WHERE id = ?`,
 		status,
-		truncateToolExecutionText(redact.Text(result)),
+		result,
 		errText,
+		outcomeJSON,
 		finishedAt.Unix(),
 		id,
 	)
@@ -133,12 +143,16 @@ func (db *DB) FailRunningToolExecutions(
 	if reason == "" {
 		reason = "服务重启导致执行中断"
 	}
+	reason = truncateToolExecutionText(redact.Text(reason))
+	outcome := buildToolExecutionOutcome("failed", "", errors.New(reason))
+	outcomeJSON := marshalToolExecutionOutcome(outcome)
 	result, err := db.ExecContext(
 		ctx,
 		`UPDATE tool_executions
-		 SET status = 'failed', error = ?, finished_at = ?
+		 SET status = 'failed', error = ?, outcome_json = ?, finished_at = ?
 		 WHERE status = 'running'`,
 		reason,
+		outcomeJSON,
 		time.Now().UTC().Unix(),
 	)
 	if err != nil {
@@ -246,7 +260,7 @@ func (db *DB) ListToolExecutionsFiltered(
 	rows, err := db.QueryContext(
 		ctx,
 		`SELECT id, conversation_id, user_id, tool_name, arguments, fingerprint,
-			status, result, error, started_at, finished_at
+			status, result, error, outcome_json, started_at, finished_at
 		 FROM tool_executions`+where+order+`
 		 LIMIT ? OFFSET ?`,
 		append(args, limit, offset)...,
@@ -260,6 +274,7 @@ func (db *DB) ListToolExecutionsFiltered(
 	for rows.Next() {
 		var item ToolExecution
 		var raw string
+		var outcomeJSON string
 		var startedAt int64
 		var finishedAt interface{}
 		if err := rows.Scan(
@@ -272,6 +287,7 @@ func (db *DB) ListToolExecutionsFiltered(
 			&item.Status,
 			&item.Result,
 			&item.Error,
+			&outcomeJSON,
 			&startedAt,
 			&finishedAt,
 		); err != nil {
@@ -279,6 +295,7 @@ func (db *DB) ListToolExecutionsFiltered(
 		}
 		item.StartedAt = time.Unix(startedAt, 0)
 		_ = json.Unmarshal([]byte(raw), &item.Arguments)
+		item.Outcome = decodeToolExecutionOutcome(outcomeJSON)
 		if value, ok := finishedAt.(int64); ok {
 			finished := time.Unix(value, 0)
 			item.FinishedAt = &finished
@@ -297,12 +314,13 @@ func (db *DB) GetToolExecution(
 ) (*ToolExecution, error) {
 	var item ToolExecution
 	var raw string
+	var outcomeJSON string
 	var startedAt int64
 	var finishedAt sql.NullInt64
 	err := db.QueryRowContext(
 		ctx,
 		`SELECT id, conversation_id, user_id, tool_name, arguments, fingerprint,
-			status, result, error, started_at, finished_at
+			status, result, error, outcome_json, started_at, finished_at
 		 FROM tool_executions WHERE id = ?`,
 		id,
 	).Scan(
@@ -315,6 +333,7 @@ func (db *DB) GetToolExecution(
 		&item.Status,
 		&item.Result,
 		&item.Error,
+		&outcomeJSON,
 		&startedAt,
 		&finishedAt,
 	)
@@ -322,6 +341,7 @@ func (db *DB) GetToolExecution(
 		return nil, err
 	}
 	_ = json.Unmarshal([]byte(raw), &item.Arguments)
+	item.Outcome = decodeToolExecutionOutcome(outcomeJSON)
 	item.StartedAt = time.Unix(startedAt, 0)
 	if finishedAt.Valid {
 		value := time.Unix(finishedAt.Int64, 0)
@@ -337,6 +357,7 @@ type toolExecutionScanner interface {
 func scanToolExecution(row toolExecutionScanner) (*ToolExecution, error) {
 	var item ToolExecution
 	var raw string
+	var outcomeJSON string
 	var startedAt int64
 	var finishedAt sql.NullInt64
 	if err := row.Scan(
@@ -349,12 +370,14 @@ func scanToolExecution(row toolExecutionScanner) (*ToolExecution, error) {
 		&item.Status,
 		&item.Result,
 		&item.Error,
+		&outcomeJSON,
 		&startedAt,
 		&finishedAt,
 	); err != nil {
 		return nil, err
 	}
 	_ = json.Unmarshal([]byte(raw), &item.Arguments)
+	item.Outcome = decodeToolExecutionOutcome(outcomeJSON)
 	item.StartedAt = time.Unix(startedAt, 0)
 	if finishedAt.Valid {
 		value := time.Unix(finishedAt.Int64, 0)
@@ -381,7 +404,7 @@ func (db *DB) FindRecentCompletedToolExecution(
 	item, err := scanToolExecution(db.QueryRowContext(
 		ctx,
 		`SELECT id, conversation_id, user_id, tool_name, arguments, fingerprint,
-			status, result, error, started_at, finished_at
+			status, result, error, outcome_json, started_at, finished_at
 		 FROM tool_executions
 		 WHERE conversation_id = ? AND tool_name = ? AND fingerprint = ?
 		   AND status = 'completed' AND started_at >= ?
@@ -402,7 +425,7 @@ func (db *DB) FindRecentCompletedToolExecution(
 	rows, err := db.QueryContext(
 		ctx,
 		`SELECT id, conversation_id, user_id, tool_name, arguments, fingerprint,
-			status, result, error, started_at, finished_at
+			status, result, error, outcome_json, started_at, finished_at
 		 FROM tool_executions
 		 WHERE conversation_id = ? AND tool_name = ?
 		   AND status = 'completed' AND fingerprint = '' AND started_at >= ?
@@ -448,7 +471,7 @@ func (db *DB) ListRecentProbeExecutions(
 	rows, err := db.QueryContext(
 		ctx,
 		`SELECT id, conversation_id, user_id, tool_name, arguments, fingerprint,
-			status, result, error, started_at, finished_at
+			status, result, error, outcome_json, started_at, finished_at
 		 FROM tool_executions
 		 WHERE conversation_id = ?
 		   AND tool_name IN ('exec', 'execute-python-script')

@@ -9,57 +9,45 @@ description: Java Web 源码鉴权机制审计工具。从源码中识别所有�
 
 扫描 Java Web 项目源码，识别鉴权机制实现，检测鉴权绕过漏洞和越权访问缺陷。
 
----
+## 适用场景
 
-## 漏洞分级标准
+适合源码或反编译代码中存在 Spring Security、Shiro、Filter、Interceptor、JWT 或自定义鉴权，需要判断真实路由是否被正确覆盖以及资源归属是否校验。
 
-**详见 [SEVERITY_RATING.md](../java-shared/SEVERITY_RATING.md)**
+## 不适用场景
 
-- 漏洞编号格式: `{C/H/M/L}-AUTH-{序号}`
-- 严重等级 = f(可达性 R, 影响范围 I, 利用复杂度 C)
-- Score = R × 0.40 + I × 0.35 + C × 0.25，映射 CVSS 3.1
+只发现鉴权框架、白名单路径或漏洞版本不能直接证明鉴权绕过。必须证明鉴权使用的路径与最终路由解释不一致、保护范围遗漏，或已登录用户能访问不应访问的资源。
 
----
+## 核心判断
 
-## 检测范围边界
+Java 鉴权结论取决于 Filter/Interceptor 的注册顺序、匹配范围、URI 规范化方式、认证与授权分层以及对象归属。组件 CVE 需要同时满足受影响版本和对应调用/配置条件。
 
-**本技能检测范围仅包含以下类型：**
-- 鉴权绕过漏洞（Bypass）
-- 越权访问缺陷（Privilege Escalation）
-- 会话管理缺陷（Session Fixation / Hijacking）
-- 已知组件漏洞（CVE）
+## 证据标准
 
-**以下不属于本技能检测范围（即使在通常意义上也属于"安全问题"）：**
-- ❌ 代码质量问题（命名不规范、逻辑冗余、性能问题等）
-- ❌ 通用安全漏洞（SQL 注入、XSS、CSRF 等，使用专项技能）
-- ❌ 架构设计建议（缺少限流、日志审计、加密强度等）
-- ❌ 业务逻辑合理性（接口是否应该公开等业务决策）
+- 可确认：真实路由、鉴权链覆盖、解析差异或授权缺口以及未授权效果证据闭合。
+- 待验证：发现危险 URI 获取方式、过宽白名单或组件版本，但尚未证明请求能落到受保护 handler。
+- 判为否：目标路由被完整覆盖、路径解释一致、角色与对象归属校验生效，或组件漏洞条件不成立。
 
----
+## 决策树
 
-## 核心要求
+- 梳理路由与鉴权入口：确认 Filter、Interceptor、注解和 framework matcher 的执行顺序。
+- 检查路径解释：比较鉴权使用的 URI 与路由框架最终匹配路径。
+- 检查授权边界：区分登录态、角色权限、租户和对象归属。
+- 检查组件版本：只把版本作为候选，继续验证配置和代码调用。
+- 形成绕过请求：输出基线、对照组和实际业务效果。
 
-**此技能必须完整检查所有鉴权相关代码，不允许省略。**
+## 常见误判
 
-- ✅ 识别所有鉴权入口点（Filter/Interceptor/注解）
-- ✅ 分析每个路由的鉴权状态
-- ✅ 检测所有潜在的鉴权绕过模式
-- ✅ 为每个漏洞点提供验证 PoC
-- ❌ 禁止省略任何鉴权配置
-- ❌ 禁止跳过反编译步骤
+- 鉴权 Filter 使用 `getRequestURI()` 就认定可绕过，未证明路由解释差异。
+- 看到白名单路径或 `permitAll` 就认定敏感 handler 被公开。
+- 把认证成功等同于具备角色和对象级授权。
+- 用 `pom.xml` 或 JAR 版本直接确认 CVE 可利用。
+- 在验证越权时修改真实角色、审批或业务数据。
 
 ---
 
-## 工作流程
+## 分析视角
 
 ### 1. 项目分析初始化
-
-```
-输入: 项目源码路径
-      可选: 已知框架信息、关注的路径
-```
-
-**初始化步骤：**
 
 1. 识别项目类型（源码/编译后/混合）
 2. 识别鉴权框架（通过配置文件和特征类）
@@ -76,9 +64,9 @@ description: Java Web 源码鉴权机制审计工具。从源码中识别所有�
 | Interceptor | `implements HandlerInterceptor`, `preHandle()` | `WebMvcConfig` | [FILTER_INTERCEPTOR.md](references/FILTER_INTERCEPTOR.md) |
 | 注解鉴权 | `@RequiresRoles`, `@PreAuthorize`, 自定义注解 | - | [ANNOTATION_AUTH.md](references/ANNOTATION_AUTH.md) |
 
-### 2.1 组件版本检测（CRITICAL）
+### 2.1 组件版本识别
 
-**必须检测鉴权相关组件的版本，识别已知漏洞。**
+可将组件版本作为已知漏洞候选线索。
 
 详细漏洞版本参见 [VERSION_VULNS.md](references/VERSION_VULNS.md)
 
@@ -146,9 +134,6 @@ artifactId=shiro-core
 | PAC4J | < 4.0.0 | CVE-2021-44878 | 认证绕过 | - |
 | JJWT | < 0.10.0 | - | 弱密钥风险 | - |
 
-#### 版本检测输出格式
-
-```markdown
 ## 组件版本分析
 
 ### 检测到的鉴权组件
@@ -182,22 +167,13 @@ Host: {{host}}
 
 ### 3. 反编译阶段（CRITICAL）
 
-**当源码不可用时，必须使用 CFR 反编译器反编译鉴权相关类。**
+**当源码不可用时，按运行环境中可用的反编译能力处理鉴权相关类。**
 
 详细策略参见 [DECOMPILE_STRATEGY.md](references/DECOMPILE_STRATEGY.md)
 
 #### 3.1 反编译工具调用
 
-```bash
-# 反编译单个鉴权类
-java -jar {CFR_JAR} /path/to/AuthFilter.class --outputdir {output_path}/decompiled
-
-# 反编译鉴权相关目录
-find /path/to/WEB-INF/classes/com/example/security -name "*.class" | xargs java -jar {CFR_JAR} --outputdir {output_path}/decompiled
-
-# 反编译多个指定文件
-java -jar {CFR_JAR} /path/to/AuthFilter.class /path/to/SecurityConfig.class /path/to/PermissionInterceptor.class --outputdir {output_path}/decompiled
-```
+可使用运行环境中可用的反编译工具。内置 `java_decompile`、CFR、`javap` 等均可作为候选，按实际能力和结果选择。
 
 #### 3.2 必须反编译的类
 
@@ -520,130 +496,6 @@ if (obj != null) {
 | Session 固定 | 登录前后 Session ID 不变 | 中 |
 | 会话超时过长 | Session timeout > 30min | 低 |
 | Cookie 不安全 | 缺少 HttpOnly/Secure 标志 | 中 |
-
-### 7. 报告生成（CRITICAL - 必须生成三个文件）
-
-**必须生成以下三个文件，缺一不可：**
-
-```
-{project_name}_audit/auth_audit/
-├── {project_name}_auth_audit_{timestamp}.md      # 主报告（漏洞分析）
-├── {project_name}_auth_mapping_{timestamp}.md    # 路由-鉴权映射表
-└── {project_name}_auth_README_{timestamp}.md     # 审计说明文档
-```
-
-#### 7.1 三个文件的职责划分（避免内容重复）
-
-| 文件 | 核心职责 | 包含内容 | 不应包含 |
-|------|----------|----------|----------|
-| 主报告 | 漏洞分析 | 漏洞详情、数据流分析、PoC、修复措施 | 完整路由列表 |
-| 映射表 | 路由清单 | 所有路由的鉴权状态表格 | 漏洞详细分析 |
-| 说明文档 | 审计元信息 | 方法论、工具、局限性、验证指南 | 具体漏洞内容 |
-
-#### 7.2 报告生成子步骤（必须按顺序执行）
-
-```
-步骤 7.1: 生成主报告
-  └── 创建 {project_name}_auth_audit_{timestamp}.md
-      ├── 鉴权框架识别
-      ├── 鉴权架构概览
-      ├── 风险统计
-      ├── 高危/中危/低危风险详情
-      └── 修复建议总结
-
-步骤 7.2: 生成映射表
-  └── 创建 {project_name}_auth_mapping_{timestamp}.md
-      ├── 按模块分组的路由表格
-      ├── 鉴权状态说明
-      └── 风险统计汇总
-
-步骤 7.3: 生成审计说明文档
-  └── 创建 {project_name}_auth_README_{timestamp}.md
-      ├── 审计概述（目标、范围、时间）
-      ├── 审计方法和工具
-      ├── 审计局限性
-      ├── 验证方法说明
-      └── 下一步建议
-
-步骤 7.4: 验证报告完整性（CRITICAL）
-  └── 检查三个文件是否都存在
-      ├── [ ] 主报告文件存在
-      ├── [ ] 映射表文件存在
-      └── [ ] 说明文档文件存在
-```
-
-#### 7.3 文件完整性验证命令
-
-```bash
-# 验证三个文件都已生成
-ls -la {project_name}_audit/auth_audit/
-
-# 预期输出应包含：
-# {project_name}_auth_audit_{timestamp}.md
-# {project_name}_auth_mapping_{timestamp}.md
-# {project_name}_auth_README_{timestamp}.md
-```
-
-**如果任何文件缺失，必须立即补充！**
-
----
-
-## 输出格式
-
-**必须生成 3 个文件，严格按照 references/ 目录中的填充式模板生成。**
-
-| 文件 | 模板 | 命名格式 | 职责 |
-|------|------|---------|------|
-| 主报告 | [OUTPUT_TEMPLATE_MAIN.md](references/OUTPUT_TEMPLATE_MAIN.md) | `{project_name}_auth_audit_{YYYYMMDD_HHMMSS}.md` | 漏洞分析和修复建议 |
-| 映射表 | [OUTPUT_TEMPLATE_MAPPING.md](references/OUTPUT_TEMPLATE_MAPPING.md) | `{project_name}_auth_mapping_{YYYYMMDD_HHMMSS}.md` | 完整路由-鉴权对应关系 |
-| 说明文档 | [OUTPUT_TEMPLATE_README.md](references/OUTPUT_TEMPLATE_README.md) | `{project_name}_auth_README_{YYYYMMDD_HHMMSS}.md` | 审计方法论和局限性 |
-
-**关键规则：**
-- 必须生成 3 个文件（不是 1 个也不是 2 个）
-- 主报告不包含完整路由列表（放映射表中）
-- 映射表不包含漏洞详细分析（放主报告中）
-- README 不包含具体漏洞内容
-- 三个文件间互相引用链接必须正确
-- 通用规范参考: [java-shared/OUTPUT_STANDARD.md](../java-shared/OUTPUT_STANDARD.md)
-
----
-
-## 验证检查清单
-
-**在标记审计完成前，必须执行以下检查：**
-
-### 架构分析检查
-- [ ] 识别完整的鉴权架构（Filter/Interceptor/Action 各层）
-- [ ] 分析每层的职责（登录检查/权限检查/业务校验）
-- [ ] 绘制鉴权架构图
-
-### 代码分析检查
-- [ ] 所有 Filter/Interceptor 已分析
-- [ ] 所有鉴权配置已解析
-- [ ] 每个路由都有鉴权状态标注
-
-### 漏洞检测检查
-- [ ] 所有绕过模式已检测
-- [ ] **对每个可疑模式执行了数据流分析**
-- [ ] **区分了"已验证"和"待验证"漏洞**
-- [ ] **分析了绕过后是否有其他层拦截**
-
-### 报告质量检查
-- [ ] 高危风险都有前置条件分析
-- [ ] 高危风险都有数据流分析
-- [ ] 高危风险都有实际影响说明
-- [ ] 高危风险都有验证 PoC（区分登录/未登录场景）
-
-### 文件完整性检查（CRITICAL - 三文件验证）
-- [ ] **主报告文件已生成**: `{project_name}_audit/auth_audit/{project_name}_auth_audit_{timestamp}.md`
-- [ ] **映射表文件已生成**: `{project_name}_audit/auth_audit/{project_name}_auth_mapping_{timestamp}.md`
-- [ ] **说明文档已生成**: `{project_name}_audit/auth_audit/{project_name}_auth_README_{timestamp}.md`
-- [ ] 三个文件内容不重复（职责划分正确）
-- [ ] 文件间相互引用链接正确
-
-**⚠️ 如果任何文件缺失，必须立即补充后再标记完成！**
-
----
 
 ## 验证建议
 

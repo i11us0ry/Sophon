@@ -60,68 +60,81 @@ func TestTolerantToolReturnsErrorAsResult(t *testing.T) {
 	if err != nil {
 		t.Fatalf("工具失败应回传给模型而不是中断: %v", err)
 	}
-	if !strings.Contains(result, "[工具 http-framework-test 执行失败") {
-		t.Fatalf("缺少失败提示: %q", result)
+	header, body, ok := parseToolResult(result)
+	if !ok || header.Status != toolResultStatusError || header.ErrorClass != toolErrorCommandExit {
+		t.Fatalf("错误协议头异常: %+v body=%q", header, body)
 	}
-	if !strings.Contains(result, "Illegal header name") {
-		t.Fatalf("缺少原始错误详情: %q", result)
+	if !strings.Contains(body, "Illegal header name") {
+		t.Fatalf("缺少原始错误详情: %q", body)
 	}
-	for _, expected := range []string{"先分析错误类型", "修改命令", "禁止原样重复", "不得绕过"} {
-		if !strings.Contains(result, expected) {
-			t.Fatalf("失败提示缺少重试分析要求 %q: %q", expected, result)
+	actions := strings.Join(header.NextActions, " ")
+	for _, expected := range []string{"检查命令输出", "修改命令或参数", "禁止原样重复"} {
+		if !strings.Contains(actions, expected) {
+			t.Fatalf("失败提示缺少重试分析要求 %q: %q", expected, actions)
 		}
 	}
 }
 
-func TestDefaultSystemPromptRequiresToolFailureRetryAnalysis(t *testing.T) {
+func TestDefaultSystemPromptKeepsExecutionBoundariesConcise(t *testing.T) {
 	if len([]rune(defaultSystemPrompt)) > 2200 {
 		t.Fatalf("默认系统提示仍然过长: %d", len([]rune(defaultSystemPrompt)))
 	}
 	for _, expected := range []string{
-		"必须先分析错误类型和可修复性",
-		"修改命令、参数或执行方式后重试",
-		"禁止原样重复失败命令",
-		"不得用等价方式规避安全策略",
-		"internet_search",
+		"工具与能力",
+		"mcp_search_tools",
+		"mcp_use_tool",
+		"project_next_targets",
+		"pent_agent_execute",
+		"read_skill",
+		"只有用户明确表示“不需要 Worker”或等价指令时，主 Agent 才自行执行",
+		"工具失败时先判断错误类型和可修复性",
+		"不得用等价方式绕过授权、拦截或人工审批",
 	} {
 		if !strings.Contains(defaultSystemPrompt, expected) {
-			t.Fatalf("系统提示缺少失败重试要求 %q", expected)
+			t.Fatalf("系统提示缺少基础设施边界 %q", expected)
 		}
 	}
 }
 
-func TestDefaultPromptAllowsMinimizedSensitiveEndpointTesting(t *testing.T) {
-	for _, expected := range []string{
-		"user/order/face/contact/behavior/download",
+func TestDefaultPromptDoesNotEncodeEndpointSpecificWorkflow(t *testing.T) {
+	for _, forbidden := range []string{
 		"page_size=1",
 		"禁止批量翻页",
-		"Policy Engine 拒绝",
-		"技术阻断",
+		"必须先调用",
+		"优先处理 `project_next_targets`",
+		"每个测试方向必须形成",
 	} {
-		if !strings.Contains(defaultSystemPrompt, expected) {
-			t.Fatalf("系统提示缺少敏感接口最小化测试规则 %q", expected)
+		if strings.Contains(defaultSystemPrompt, forbidden) {
+			t.Fatalf("系统提示不应固化具体测试流程 %q", forbidden)
 		}
 	}
 }
 
-func TestProjectWritebackPromptCoversCompactWriteContract(t *testing.T) {
-	if len([]rune(projectWritebackGuidance)) > 1400 {
-		t.Fatalf("项目写回纪律仍然过长: %d", len([]rune(projectWritebackGuidance)))
+func TestDefaultPromptDoesNotForceSpecificToolChoice(t *testing.T) {
+	if strings.Contains(defaultSystemPrompt, "必须使用 java_decompile") ||
+		strings.Contains(defaultSystemPrompt, "必须调用 pent_agent") ||
+		strings.Contains(defaultSystemPrompt, "必须填写 worker_focus") {
+		t.Fatalf("默认提示不应强制某个工具")
+	}
+}
+
+func TestProjectToolGuidanceDescribesCapabilitiesWithoutWorkflow(t *testing.T) {
+	if len([]rune(projectWritebackGuidance)) > 500 {
+		t.Fatalf("项目工具提示仍然过长: %d", len([]rune(projectWritebackGuidance)))
 	}
 	for _, expected := range []string{
-		"project_insert_assets",
-		"project_plan_hypotheses",
-		"project_start_hypothesis",
-		"project_complete_hypothesis",
-		"project_record_test",
-		"project_record_audit",
-		"tested_clean",
-		"project_report_finding",
-		"evidence_refs",
+		"项目工具能力",
+		"project_*",
 		"project_list(resource=facts/findings)",
+		"project_get(resource=graph_node)",
 	} {
 		if !strings.Contains(projectWritebackGuidance, expected) {
-			t.Fatalf("项目写回纪律缺少关键契约 %q", expected)
+			t.Fatalf("项目工具提示缺少能力说明 %q", expected)
+		}
+	}
+	for _, forbidden := range []string{"（强制）", "测试前用", "必须", "立即用"} {
+		if strings.Contains(projectWritebackGuidance, forbidden) {
+			t.Fatalf("项目工具提示不应规定执行流程 %q", forbidden)
 		}
 	}
 }
@@ -132,7 +145,8 @@ func TestTolerantToolUsesErrorMessageWhenResultEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("工具失败应回传: %v", err)
 	}
-	if !strings.Contains(result, "title 不能为空") {
+	_, body, ok := parseToolResult(result)
+	if !ok || !strings.Contains(body, "title 不能为空") {
 		t.Fatalf("结果为空时应使用错误文本: %q", result)
 	}
 }
@@ -149,8 +163,9 @@ func TestTolerantToolKeepsCancelSemantics(t *testing.T) {
 func TestTolerantToolPassesThroughSuccess(t *testing.T) {
 	probe := &errorProbeTool{name: "demo", result: "ok"}
 	result, err, wrapped := invokeWrappedProbe(t, context.Background(), probe)
-	if err != nil || result != "ok" {
-		t.Fatalf("成功结果应原样透传: %q, err=%v", result, err)
+	header, body, ok := parseToolResult(result)
+	if err != nil || !ok || header.Status != toolResultStatusSuccess || body != "ok" {
+		t.Fatalf("成功结果协议异常: %q, header=%+v, err=%v", result, header, err)
 	}
 	info, err := wrapped.Info(context.Background())
 	if err != nil || info == nil || info.Name != "demo" {
@@ -168,13 +183,17 @@ func TestTolerantToolTruncatesLongErrorKeepingTail(t *testing.T) {
 	if err != nil {
 		t.Fatalf("工具失败应回传: %v", err)
 	}
-	if !strings.Contains(result, "Name or service not known") {
-		t.Fatalf("超长错误应保留末尾原因: %q", result)
+	header, body, ok := parseToolResult(result)
+	if !ok || header.ErrorClass != toolErrorTargetUnreachable {
+		t.Fatalf("长错误分类异常: %+v, %q", header, result)
 	}
-	if !strings.Contains(result, "已省略") {
-		t.Fatalf("应标注省略信息: %q", result)
+	if !strings.Contains(body, "Name or service not known") {
+		t.Fatalf("超长错误应保留末尾原因: %q", body)
 	}
-	if len([]rune(result)) > tolerantToolErrorRunes+600 {
-		t.Fatalf("长错误应被截断，实际 %d 字", len([]rune(result)))
+	if !strings.Contains(body, "已省略") {
+		t.Fatalf("应标注省略信息: %q", body)
+	}
+	if len([]rune(body)) > tolerantToolErrorRunes+600 {
+		t.Fatalf("长错误应被截断，实际 %d 字", len([]rune(body)))
 	}
 }

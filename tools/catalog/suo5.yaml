@@ -1,0 +1,18 @@
+name: suo5
+version: 2.2.0
+description: suo5 HTTP tunnel client
+license: MIT
+tool_definition: suo5.yaml
+verify_args:
+  - "--help"
+artifacts:
+  linux-amd64:
+    url: https://github.com/zema1/suo5/releases/download/v2.2.0/suo5-linux-amd64
+    sha256: 629dc3e537d611e2da7e5e0274900213e817d4057b344e6cb82bd95dee937d3b
+    destination: suo5-linux-amd64
+    mode: "0755"
+  linux-arm64:
+    url: https://github.com/zema1/suo5/releases/download/v2.2.0/suo5-linux-arm64
+    sha256: 06ce70daa0b33a2abfbac790a8923df732dcd2b524a107763b8ac77df4fc6842
+    destination: suo5-linux-arm64
+    mode: "0755"

@@ -127,3 +127,58 @@ func TestProjectFinalizationMetricsForAssetsScopesCoverage(t *testing.T) {
 		t.Fatalf("最终化范围未按目标资产收窄: %+v", metrics)
 	}
 }
+
+func TestProjectAuditStateSinceIgnoresCheckpointOnlyWrites(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "project-audit-state.db"))
+	if err != nil {
+		t.Fatalf("打开数据库失败: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ctx := context.Background()
+	now := time.Now().UTC()
+	if err := db.CreateProject(ctx, Project{
+		ID: "project-audit-state", OwnerUserID: "user-1", Name: "审计状态",
+		Status: "active", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("创建项目失败: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO project_facts (
+		id, project_id, fact_type, key, value, created_at, updated_at, subject_type
+	) VALUES
+		('scope-audit', 'project-audit-state', 'scope', 'business/audit-scope', 'scope', ?, ?, 'audit_scope'),
+		('checkpoint-audit', 'project-audit-state', 'note', 'note/checkpoint', 'next', ?, ?, 'audit_checkpoint')`,
+		now.Unix(), now.Unix(), now.Unix(), now.Unix(),
+	); err != nil {
+		t.Fatalf("写入审计事实失败: %v", err)
+	}
+	hasScope, changed, err := db.ProjectAuditStateSince(
+		ctx,
+		"project-audit-state",
+		now.Add(-time.Second),
+	)
+	if err != nil {
+		t.Fatalf("读取审计状态失败: %v", err)
+	}
+	if !hasScope || changed {
+		t.Fatalf("仅写 scope/checkpoint 不应算作实质进展: scope=%v changed=%v", hasScope, changed)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO project_facts (
+		id, project_id, fact_type, key, value, created_at, updated_at, subject_type
+	) VALUES (
+		'cell-audit', 'project-audit-state', 'constraint',
+		'business/audit-cell-test', 'tested', ?, ?, 'audit_cell'
+	)`, now.Unix()+1, now.Unix()+1); err != nil {
+		t.Fatalf("写入审计单元失败: %v", err)
+	}
+	_, changed, err = db.ProjectAuditStateSince(
+		ctx,
+		"project-audit-state",
+		now.Add(-time.Second),
+	)
+	if err != nil {
+		t.Fatalf("重新读取审计状态失败: %v", err)
+	}
+	if !changed {
+		t.Fatal("新增审计单元应算作实质进展")
+	}
+}

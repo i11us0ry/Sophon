@@ -19,6 +19,7 @@ const (
 	skillToolCacheTTL    = 12 * time.Hour
 	turnToolCacheMaxSize = 500
 	probeReplayTTL       = 45 * time.Minute
+	localReadReplayTTL   = 12 * time.Hour
 )
 
 // turnToolCacheKey 以助手消息作为轮次边界：用户在 UI 点“继续”会创建新的助手消息，
@@ -236,12 +237,52 @@ func (s *Service) lookupRecentProbeExecution(
 		conversationID,
 		toolName,
 		fingerprint,
-		time.Now().Add(-probeReplayTTL),
+		time.Now().Add(-probeReplayTTLFor(toolName, rawArguments)),
 	)
 	if err != nil || item == nil {
 		return nil, false
 	}
 	return item, true
+}
+
+func probeReplayTTLFor(toolName, rawArguments string) time.Duration {
+	if strings.TrimSpace(toolName) != "exec" {
+		return probeReplayTTL
+	}
+	var request struct {
+		Command string `json:"command"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(rawArguments)), &request); err != nil {
+		return probeReplayTTL
+	}
+	command := " " + strings.ToLower(strings.TrimSpace(request.Command)) + " "
+	if command == "  " {
+		return probeReplayTTL
+	}
+	for _, marker := range []string{
+		" >", ">>", "sed -i", " rm ", " mv ", " cp ", " install ", " touch ",
+		" mkdir ", " chmod ", " chown ", " tee ", " find ", "-delete", "-exec",
+		"curl ", "wget ", "nmap ", "naabu ", "nuclei ", "masscan ",
+		"python ", "python3 ", "bash -c", "sh -c",
+	} {
+		if strings.Contains(command, marker) {
+			if marker == " find " && !strings.Contains(command, "-delete") &&
+				!strings.Contains(command, "-exec") {
+				continue
+			}
+			return probeReplayTTL
+		}
+	}
+	for _, marker := range []string{
+		"cat ", "sed -n", "grep ", "ls ", "find ", "head ", "tail ",
+		"wc ", "stat ", "file ", "strings ", "javap ", "unzip ", "diff ",
+		"sha256sum ",
+	} {
+		if strings.Contains(command, marker) {
+			return localReadReplayTTL
+		}
+	}
+	return probeReplayTTL
 }
 
 func isTurnWriteTool(toolName string) bool {
@@ -251,7 +292,7 @@ func isTurnWriteTool(toolName string) bool {
 		"project_retest_finding", "project_verify_finding", "project_insert_assets",
 		"project_upsert_entity", "project_link_entities", "project_add_intent",
 		"project_add_hint", "project_update_goal", "project_update_intent",
-		"project_sync_graph":
+		"project_plan_hypotheses", "planner_todo_update", "project_sync_graph":
 		return true
 	default:
 		return false

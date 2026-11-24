@@ -59,6 +59,8 @@ type ProjectCoverage struct {
 	AssetCoverage           []AssetCoverageState `json:"assetCoverage"`
 	UntestedAssets          []Asset              `json:"untestedAssets"`
 	NextTargets             []CoverageTarget     `json:"nextTargets"`
+	PendingIntentTargets    []CoverageTarget     `json:"pendingIntentTargets"`
+	EvidenceGapTargets      []CoverageTarget     `json:"evidenceGapTargets"`
 }
 
 const (
@@ -125,6 +127,8 @@ func (db *DB) ProjectCoverage(
 		AssetCoverage:           make([]AssetCoverageState, 0, len(assets)),
 		UntestedAssets:          make([]Asset, 0),
 		NextTargets:             make([]CoverageTarget, 0),
+		PendingIntentTargets:    make([]CoverageTarget, 0),
+		EvidenceGapTargets:      make([]CoverageTarget, 0),
 	}
 	for _, item := range testCoverage {
 		coverage.TestsTotal += item.TestsTotal
@@ -187,35 +191,41 @@ func (db *DB) ProjectCoverage(
 		switch strings.ToLower(strings.TrimSpace(node.Status)) {
 		case "running":
 			coverage.IntentsRunning++
-			targets = append(targets, CoverageTarget{
+			target := CoverageTarget{
 				Kind:   "intent",
 				RefID:  node.ID,
 				Label:  node.Title,
 				Reason: "进行中意图",
 				Score:  80,
-			})
+			}
+			targets = append(targets, target)
+			coverage.PendingIntentTargets = append(coverage.PendingIntentTargets, target)
 		case "open":
 			coverage.IntentsOpen++
-			targets = append(targets, CoverageTarget{
+			target := CoverageTarget{
 				Kind:   "intent",
 				RefID:  node.ID,
 				Label:  node.Title,
 				Reason: "待办意图",
 				Score:  70,
-			})
+			}
+			targets = append(targets, target)
+			coverage.PendingIntentTargets = append(coverage.PendingIntentTargets, target)
 		}
 	}
 
 	for _, item := range findingSamples {
 		hasEvidence := strings.TrimSpace(item.Evidence) != "" || len(item.EvidenceRefs) > 0
 		if !hasEvidence {
-			targets = append(targets, CoverageTarget{
+			target := CoverageTarget{
 				Kind:   "evidence",
 				RefID:  item.ID,
 				Label:  item.Title,
 				Reason: "漏洞缺证据",
 				Score:  60 + coverageSeverityWeight(item.Severity),
-			})
+			}
+			targets = append(targets, target)
+			coverage.EvidenceGapTargets = append(coverage.EvidenceGapTargets, target)
 		}
 	}
 
@@ -255,13 +265,15 @@ func (db *DB) ProjectCoverage(
 		if fact.Importance > 0 {
 			score = 40 + fact.Importance/2
 		}
-		targets = append(targets, CoverageTarget{
+		target := CoverageTarget{
 			Kind:   "evidence",
 			RefID:  fact.ID,
 			Label:  fact.Key,
 			Reason: reason,
 			Score:  score,
-		})
+		}
+		targets = append(targets, target)
+		coverage.EvidenceGapTargets = append(coverage.EvidenceGapTargets, target)
 	}
 
 	for _, asset := range assets {
@@ -345,6 +357,13 @@ func (db *DB) ProjectCoverage(
 		coverage.FullCoverageRatio = float64(coverage.AssetsCovered) / float64(coverage.AssetsTotal)
 	}
 
+	coverage.NextTargets = sortAndTrimCoverageTargets(targets)
+	coverage.PendingIntentTargets = sortAndTrimCoverageTargets(coverage.PendingIntentTargets)
+	coverage.EvidenceGapTargets = sortAndTrimCoverageTargets(coverage.EvidenceGapTargets)
+	return coverage, nil
+}
+
+func sortAndTrimCoverageTargets(targets []CoverageTarget) []CoverageTarget {
 	sort.SliceStable(targets, func(i, j int) bool {
 		if targets[i].Score != targets[j].Score {
 			return targets[i].Score > targets[j].Score
@@ -355,10 +374,9 @@ func (db *DB) ProjectCoverage(
 		return targets[i].Label < targets[j].Label
 	})
 	if len(targets) > coverageNextTargetLimit {
-		targets = targets[:coverageNextTargetLimit]
+		return targets[:coverageNextTargetLimit]
 	}
-	coverage.NextTargets = targets
-	return coverage, nil
+	return targets
 }
 
 func coverageNormalizeValue(value string) string {

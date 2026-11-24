@@ -442,6 +442,7 @@ func (db *DB) migrate(ctx context.Context) error {
 			id TEXT PRIMARY KEY,
 			conversation_id TEXT NOT NULL,
 			message_id TEXT,
+			session_id TEXT NOT NULL DEFAULT '',
 			event_type TEXT NOT NULL,
 			message TEXT NOT NULL DEFAULT '',
 			data TEXT NOT NULL DEFAULT '',
@@ -450,6 +451,76 @@ func (db *DB) migrate(ctx context.Context) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_process_details_conversation_created
 		 ON process_details(conversation_id, created_at)`,
+		`CREATE TABLE IF NOT EXISTS agent_sessions (
+			id TEXT PRIMARY KEY,
+			conversation_id TEXT NOT NULL,
+			role TEXT NOT NULL,
+			title TEXT NOT NULL,
+			status TEXT NOT NULL DEFAULT 'idle',
+			agent_id TEXT NOT NULL DEFAULT '',
+			agent_name TEXT NOT NULL DEFAULT '',
+			hypothesis_id TEXT NOT NULL DEFAULT '',
+			parent_session_id TEXT NOT NULL DEFAULT '',
+			activity_count INTEGER NOT NULL DEFAULT 0,
+			metadata TEXT NOT NULL DEFAULT '{}',
+			created_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL,
+			last_activity_at INTEGER NOT NULL,
+			FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_agent_sessions_conversation
+		 ON agent_sessions(conversation_id, role, last_activity_at DESC)`,
+		`CREATE TABLE IF NOT EXISTS agent_orchestrations (
+			conversation_id TEXT PRIMARY KEY,
+			project_id TEXT NOT NULL,
+			owner_user_id TEXT NOT NULL,
+			status TEXT NOT NULL DEFAULT 'running',
+			plan_json TEXT NOT NULL DEFAULT '{}',
+			phase TEXT NOT NULL DEFAULT '',
+			agent_mode TEXT NOT NULL DEFAULT 'deep',
+			run_id TEXT NOT NULL DEFAULT '',
+			message_id TEXT NOT NULL DEFAULT '',
+			campaign_id TEXT NOT NULL DEFAULT '',
+			campaign_task_id TEXT NOT NULL DEFAULT '',
+			feedback_json TEXT NOT NULL DEFAULT '[]',
+			last_error TEXT NOT NULL DEFAULT '',
+			started_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL,
+			FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_agent_orchestrations_status
+		 ON agent_orchestrations(status, updated_at DESC)`,
+		`CREATE TABLE IF NOT EXISTS agent_triggers (
+			id TEXT PRIMARY KEY,
+			conversation_id TEXT NOT NULL,
+			project_id TEXT NOT NULL DEFAULT '',
+			kind TEXT NOT NULL,
+			intent_id TEXT NOT NULL DEFAULT '',
+			payload_json TEXT NOT NULL DEFAULT '{}',
+			dedupe_key TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT 'pending',
+			created_at INTEGER NOT NULL,
+			consumed_at INTEGER NOT NULL DEFAULT 0,
+			FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_agent_triggers_pending
+		 ON agent_triggers(conversation_id, status, created_at ASC)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_triggers_dedupe
+		 ON agent_triggers(dedupe_key)
+		 WHERE dedupe_key <> ''`,
+		`CREATE TABLE IF NOT EXISTS agent_planner_todos (
+			id TEXT PRIMARY KEY,
+			conversation_id TEXT NOT NULL,
+			project_id TEXT NOT NULL DEFAULT '',
+			content TEXT NOT NULL,
+			status TEXT NOT NULL DEFAULT 'pending',
+			source_intent_id TEXT NOT NULL DEFAULT '',
+			created_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL,
+			FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_agent_planner_todos_conversation
+		 ON agent_planner_todos(conversation_id, updated_at DESC)`,
 		`CREATE TABLE IF NOT EXISTS attachments (
 			id TEXT PRIMARY KEY,
 			conversation_id TEXT NOT NULL,
@@ -497,6 +568,7 @@ func (db *DB) migrate(ctx context.Context) error {
 			status TEXT NOT NULL,
 			result TEXT NOT NULL DEFAULT '',
 			error TEXT NOT NULL DEFAULT '',
+			outcome_json TEXT NOT NULL DEFAULT '{}',
 			started_at INTEGER NOT NULL,
 			finished_at INTEGER
 		)`,
@@ -744,6 +816,30 @@ func (db *DB) migrate(ctx context.Context) error {
 			)`,
 		`CREATE INDEX IF NOT EXISTS idx_vulnerabilities_owner
 			 ON vulnerabilities(owner_user_id, updated_at DESC)`,
+		`CREATE TABLE IF NOT EXISTS vulnerability_report_drafts (
+				id TEXT PRIMARY KEY,
+				project_id TEXT NOT NULL,
+				owner_user_id TEXT NOT NULL,
+				fingerprint TEXT NOT NULL,
+				conversation_id TEXT NOT NULL DEFAULT '',
+				hypothesis_id TEXT NOT NULL DEFAULT '',
+				intent_id TEXT NOT NULL DEFAULT '',
+				source_tool_call_id TEXT NOT NULL DEFAULT '',
+				payload TEXT NOT NULL,
+				status TEXT NOT NULL DEFAULT 'pending',
+				attempts INTEGER NOT NULL DEFAULT 0,
+				last_error TEXT NOT NULL DEFAULT '',
+				vulnerability_id TEXT NOT NULL DEFAULT '',
+				next_attempt_at INTEGER NOT NULL DEFAULT 0,
+				lease_until INTEGER NOT NULL DEFAULT 0,
+				created_at INTEGER NOT NULL,
+				updated_at INTEGER NOT NULL,
+				UNIQUE(project_id, owner_user_id, fingerprint)
+			)`,
+		`CREATE INDEX IF NOT EXISTS idx_vulnerability_report_drafts_project
+			 ON vulnerability_report_drafts(project_id, updated_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_vulnerability_report_drafts_queue
+			 ON vulnerability_report_drafts(status, next_attempt_at, updated_at)`,
 		`CREATE TABLE IF NOT EXISTS vulnerability_retests (
 			id TEXT PRIMARY KEY,
 			vulnerability_id TEXT NOT NULL,
@@ -867,6 +963,41 @@ func (db *DB) migrate(ctx context.Context) error {
 			updated_at INTEGER NOT NULL,
 			PRIMARY KEY (server_name, tool_name)
 		)`,
+		`CREATE TABLE IF NOT EXISTS tool_registry (
+			id TEXT PRIMARY KEY,
+			owner_user_id TEXT NOT NULL DEFAULT '',
+			project_id TEXT NOT NULL DEFAULT '',
+			conversation_id TEXT NOT NULL DEFAULT '',
+			scope TEXT NOT NULL DEFAULT 'project',
+			name TEXT NOT NULL,
+			command TEXT NOT NULL,
+			args_json TEXT NOT NULL DEFAULT '[]',
+			env_json TEXT NOT NULL DEFAULT '{}',
+			version TEXT NOT NULL DEFAULT '',
+			source TEXT NOT NULL DEFAULT '',
+			health_check_json TEXT NOT NULL DEFAULT '[]',
+			enabled INTEGER NOT NULL DEFAULT 1,
+			status TEXT NOT NULL DEFAULT 'registered',
+			last_error TEXT NOT NULL DEFAULT '',
+			created_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL,
+			UNIQUE(owner_user_id, project_id, conversation_id, name)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_tool_registry_scope
+		 ON tool_registry(owner_user_id, project_id, conversation_id, enabled, updated_at DESC)`,
+		`CREATE TABLE IF NOT EXISTS tool_runtime_paths (
+			id TEXT PRIMARY KEY,
+			owner_user_id TEXT NOT NULL DEFAULT '',
+			project_id TEXT NOT NULL DEFAULT '',
+			conversation_id TEXT NOT NULL DEFAULT '',
+			scope TEXT NOT NULL DEFAULT 'project',
+			path TEXT NOT NULL,
+			created_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL,
+			UNIQUE(owner_user_id, project_id, conversation_id, path)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_tool_runtime_paths_scope
+		 ON tool_runtime_paths(owner_user_id, project_id, conversation_id, updated_at DESC)`,
 		`CREATE TABLE IF NOT EXISTS intercept_rules (
 			id TEXT PRIMARY KEY,
 			name TEXT NOT NULL,
@@ -945,6 +1076,14 @@ func (db *DB) migrate(ctx context.Context) error {
 				parent_finding_id TEXT NOT NULL DEFAULT '',
 				attempts INTEGER NOT NULL DEFAULT 0,
 				required INTEGER NOT NULL DEFAULT 1,
+				execution_state TEXT NOT NULL DEFAULT 'open',
+				outcome_state TEXT NOT NULL DEFAULT 'unknown',
+				state_reason TEXT NOT NULL DEFAULT '',
+				last_worker_session_id TEXT NOT NULL DEFAULT '',
+				last_started_at INTEGER NOT NULL DEFAULT 0,
+				last_finished_at INTEGER NOT NULL DEFAULT 0,
+				origin_conversation_id TEXT NOT NULL DEFAULT '',
+				origin_run_id TEXT NOT NULL DEFAULT '',
 				created_at INTEGER NOT NULL,
 				updated_at INTEGER NOT NULL,
 				FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
@@ -976,6 +1115,41 @@ func (db *DB) migrate(ctx context.Context) error {
 		 ADD COLUMN agent_mode TEXT NOT NULL DEFAULT ''`,
 	); err != nil {
 		return err
+	}
+	if err := db.ensureColumn(
+		ctx,
+		"process_details",
+		"session_id",
+		`ALTER TABLE process_details ADD COLUMN session_id TEXT NOT NULL DEFAULT ''`,
+	); err != nil {
+		return err
+	}
+	if err := db.ensureAgentSessionSchema(ctx); err != nil {
+		return err
+	}
+	for _, column := range []struct {
+		name string
+		sql  string
+	}{
+		{
+			name: "run_id",
+			sql: `ALTER TABLE agent_orchestrations
+				ADD COLUMN run_id TEXT NOT NULL DEFAULT ''`,
+		},
+		{
+			name: "message_id",
+			sql: `ALTER TABLE agent_orchestrations
+				ADD COLUMN message_id TEXT NOT NULL DEFAULT ''`,
+		},
+	} {
+		if err := db.ensureColumn(
+			ctx,
+			"agent_orchestrations",
+			column.name,
+			column.sql,
+		); err != nil {
+			return err
+		}
 	}
 	if err := db.ensureColumn(
 		ctx,
@@ -1026,6 +1200,14 @@ func (db *DB) migrate(ctx context.Context) error {
 		"tool_executions",
 		"fingerprint",
 		`ALTER TABLE tool_executions ADD COLUMN fingerprint TEXT NOT NULL DEFAULT ''`,
+	); err != nil {
+		return err
+	}
+	if err := db.ensureColumn(
+		ctx,
+		"tool_executions",
+		"outcome_json",
+		`ALTER TABLE tool_executions ADD COLUMN outcome_json TEXT NOT NULL DEFAULT '{}'`,
 	); err != nil {
 		return err
 	}
@@ -1390,12 +1572,20 @@ func (db *DB) migrate(ctx context.Context) error {
 		}
 	}
 	testResultColumns := map[string]string{
-		"rationale":         "ALTER TABLE project_test_results ADD COLUMN rationale TEXT NOT NULL DEFAULT ''",
-		"expected_evidence": "ALTER TABLE project_test_results ADD COLUMN expected_evidence TEXT NOT NULL DEFAULT ''",
-		"priority":          "ALTER TABLE project_test_results ADD COLUMN priority INTEGER NOT NULL DEFAULT 0",
-		"parent_finding_id": "ALTER TABLE project_test_results ADD COLUMN parent_finding_id TEXT NOT NULL DEFAULT ''",
-		"attempts":          "ALTER TABLE project_test_results ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0",
-		"required":          "ALTER TABLE project_test_results ADD COLUMN required INTEGER NOT NULL DEFAULT 1",
+		"rationale":              "ALTER TABLE project_test_results ADD COLUMN rationale TEXT NOT NULL DEFAULT ''",
+		"expected_evidence":      "ALTER TABLE project_test_results ADD COLUMN expected_evidence TEXT NOT NULL DEFAULT ''",
+		"priority":               "ALTER TABLE project_test_results ADD COLUMN priority INTEGER NOT NULL DEFAULT 0",
+		"parent_finding_id":      "ALTER TABLE project_test_results ADD COLUMN parent_finding_id TEXT NOT NULL DEFAULT ''",
+		"attempts":               "ALTER TABLE project_test_results ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0",
+		"required":               "ALTER TABLE project_test_results ADD COLUMN required INTEGER NOT NULL DEFAULT 1",
+		"execution_state":        "ALTER TABLE project_test_results ADD COLUMN execution_state TEXT NOT NULL DEFAULT 'open'",
+		"outcome_state":          "ALTER TABLE project_test_results ADD COLUMN outcome_state TEXT NOT NULL DEFAULT 'unknown'",
+		"state_reason":           "ALTER TABLE project_test_results ADD COLUMN state_reason TEXT NOT NULL DEFAULT ''",
+		"last_worker_session_id": "ALTER TABLE project_test_results ADD COLUMN last_worker_session_id TEXT NOT NULL DEFAULT ''",
+		"last_started_at":        "ALTER TABLE project_test_results ADD COLUMN last_started_at INTEGER NOT NULL DEFAULT 0",
+		"last_finished_at":       "ALTER TABLE project_test_results ADD COLUMN last_finished_at INTEGER NOT NULL DEFAULT 0",
+		"origin_conversation_id": "ALTER TABLE project_test_results ADD COLUMN origin_conversation_id TEXT NOT NULL DEFAULT ''",
+		"origin_run_id":          "ALTER TABLE project_test_results ADD COLUMN origin_run_id TEXT NOT NULL DEFAULT ''",
 	}
 	for column, statement := range testResultColumns {
 		if err := db.ensureColumn(ctx, "project_test_results", column, statement); err != nil {
@@ -1406,6 +1596,42 @@ func (db *DB) migrate(ctx context.Context) error {
 		ctx,
 		`CREATE INDEX IF NOT EXISTS idx_project_test_results_priority
 		 ON project_test_results(project_id, priority DESC, updated_at DESC)`,
+	); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(
+		ctx,
+		`CREATE INDEX IF NOT EXISTS idx_project_test_results_origin
+		 ON project_test_results(project_id, origin_conversation_id, execution_state, priority DESC)`,
+	); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(
+		ctx,
+		`UPDATE project_test_results
+		 SET execution_state = CASE status
+		     WHEN 'untested' THEN 'open'
+		     WHEN 'running' THEN 'running'
+		     WHEN 'tested_clean' THEN 'done'
+		     WHEN 'confirmed' THEN 'done'
+		     WHEN 'suspicious' THEN 'done'
+		     WHEN 'blocked' THEN 'blocked'
+		     ELSE execution_state
+		 END,
+		 outcome_state = CASE status
+		     WHEN 'tested_clean' THEN 'clean'
+		     WHEN 'confirmed' THEN 'confirmed'
+		     WHEN 'suspicious' THEN 'suspicious'
+		     ELSE outcome_state
+		 END
+		 WHERE execution_state = 'open' AND outcome_state = 'unknown'`,
+	); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(
+		ctx,
+		`CREATE INDEX IF NOT EXISTS idx_project_test_results_execution
+		 ON project_test_results(project_id, execution_state, priority DESC, updated_at DESC)`,
 	); err != nil {
 		return err
 	}
@@ -1497,6 +1723,14 @@ func (db *DB) migrate(ctx context.Context) error {
 	if _, err := db.ExecContext(
 		ctx,
 		`UPDATE project_facts SET summary = value WHERE TRIM(summary) = ''`,
+	); err != nil {
+		return err
+	}
+	// 历史摘要-only 事实用摘要回填正文，保证详情和全文读取不再出现空 body。
+	if _, err := db.ExecContext(
+		ctx,
+		`UPDATE project_facts SET body = summary
+		 WHERE TRIM(body) = '' AND TRIM(summary) <> ''`,
 	); err != nil {
 		return err
 	}

@@ -10,15 +10,6 @@
 - 你的输出重点是“如何安全、可复现地验证漏洞存在”，而不是追求攻击效果最大化。
 - 对每个高危或需验证漏洞，应尽量生成一个对应的最小 POC 脚本，作为授权测试环境中的执行模板。
 
-## 安全边界（必须遵守）
-
-- 仅设计授权环境下的最小验证方案。
-- 不输出破坏性自动化攻击脚本。
-- 允许输出仅用于授权环境、默认指向占位目标、需人工补齐参数后才能运行的最小验证脚本模板。
-- 不做批量攻击、持久化、横向移动、破坏业务数据等无关行为。
-- 所有步骤必须以“验证存在性”为目标，而不是扩大影响。
-- 若某漏洞的验证天然可能触碰高风险操作，必须明确写出风险提示和止损点。
-
 ## 路径约定
 
 - 用户提供的输出目录、补充请求样本、测试材料路径，可以使用真实路径。
@@ -26,9 +17,9 @@
 - 不在本 Agent 中写入任何个人机器绝对路径。
 - 本阶段默认读取 `{output_dir}/step4/` 的漏洞分析产物，并写入 `{output_dir}/step5/`；旧版根目录平铺文件只作为兼容兜底读取。
 
-## 启动前置条件（硬性门控，不满足则立即终止）
+## 启动材料参考（缺失时可降级分析并标注覆盖缺口）
 
-1. `{output_dir}/step4/vuln_analysis.json` 必须存在。
+1. `{output_dir}/step4/vuln_analysis.json` 可优先存在。
 2. 以下文件中至少存在 2 个：
    - `{output_dir}/step3/crypto_native_analysis.json`
    - `{output_dir}/step3/jni_analysis.json`
@@ -37,9 +28,9 @@
    - `{output_dir}/step2/traffic_alignment.json`
 3. `{custom_requests}` 可选，但若存在应作为重点目标输入。
 
-若 1 不满足，立即终止并输出：
+若 1 不满足，可基于现有材料继续，并输出：
 
-`「错误：vuln_analysis.json 不存在，尚无明确漏洞发现，无法设计最小验证 POC。」`
+`「材料受限：vuln_analysis.json 不存在，将从现有代码、流量和风险线索中整理可验证候选，并标记验证覆盖缺口。」`
 
 ## 输入
 
@@ -75,7 +66,7 @@
 
 **优先读取 Guardian Level（若存在）：**
 
-若 `vuln_analysis.json` 的 `vulnerabilities[]` 条目中包含 `guardian_level` 字段，必须以此作为本阶段 PoC 设计优先级的第一依据：
+若 `vuln_analysis.json` 的 `vulnerabilities[]` 条目中包含 `guardian_level` 字段，可优先参考该字段安排 PoC 设计：
 
 | guardian_level | Phase 5 动作 |
 |---------------|-------------|
@@ -251,8 +242,8 @@
 脚本生成原则：
 - 一个漏洞至少对应一个脚本文件；若同一漏洞需同时有请求验证和运行时观察，可生成多个脚本
 - 默认使用占位目标、占位 token、占位测试数据，不得内嵌真实生产地址或真实敏感值
-- 若前序阶段已给出 `reproduction_materials`、`runtime_hook_points`、`input_order`，必须优先消费这些字段生成脚本注释与占位参数
-- 若脚本只能部分生成，必须保留 `TODO` 注释，明确仍需人工补齐的字段
+- 若前序阶段已给出 `reproduction_materials`、`runtime_hook_points`、`input_order`，可优先使用这些字段生成脚本注释与占位参数
+- 若脚本只能部分生成，可保留 `TODO` 注释并说明仍需人工补齐的字段
 
 推荐命名：
 - `{output_dir}/step5/pocs/{vuln_id}/validate_request.py`
@@ -289,7 +280,7 @@
 
 ### Step 6: 生成输出文件
 
-必须生成：
+可按需生成：
 - `{output_dir}/step5/validation_cases.json`
 - `{output_dir}/step5/test_plan.md`
 - `{output_dir}/step5/repro_steps.md`

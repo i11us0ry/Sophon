@@ -15,6 +15,7 @@ import (
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"sophon/internal/execctx"
+	"sophon/internal/toolwire"
 )
 
 type ExecutionRecorder interface {
@@ -25,7 +26,7 @@ type ExecutionRecorder interface {
 		toolName string,
 		args map[string]interface{},
 	) string
-	FinishToolExecution(ctx context.Context, id, result string, invokeErr error)
+	FinishToolExecution(ctx context.Context, id, result string, invokeErr error, structuredContent ...any)
 }
 
 type ToolInterceptor func(
@@ -46,6 +47,7 @@ type Client struct {
 	command        string
 	args           []string
 	env            []string
+	workDir        string
 	connectTimeout time.Duration
 	callTimeout    time.Duration
 	session        *sdkmcp.ClientSession
@@ -86,6 +88,11 @@ func (c *Client) Connect(ctx context.Context) error {
 	if c.command == "" {
 		return fmt.Errorf("MCP command is empty")
 	}
+	if c.workDir != "" {
+		if err := os.MkdirAll(c.workDir, 0o700); err != nil {
+			return fmt.Errorf("create MCP workdir: %w", err)
+		}
+	}
 
 	sessionCtx, cancel := context.WithCancel(context.Background())
 	type result struct {
@@ -100,6 +107,9 @@ func (c *Client) Connect(ctx context.Context) error {
 			Version: "0.1.0",
 		}, nil)
 		command := exec.Command(c.command, c.args...)
+		if c.workDir != "" {
+			command.Dir = c.workDir
+		}
 		if len(c.env) > 0 {
 			command.Env = append(os.Environ(), c.env...)
 		}
@@ -162,6 +172,10 @@ func (c *Client) SetServerName(serverName string) {
 
 func (c *Client) SetEnv(env []string) {
 	c.env = append([]string(nil), env...)
+}
+
+func (c *Client) SetWorkDir(workDir string) {
+	c.workDir = strings.TrimSpace(workDir)
 }
 
 func (c *Client) SetLimiter(limiter *ConcurrencyLimiter) {
@@ -254,26 +268,32 @@ func (t *bridgeTool) InvokableRun(
 	})
 	if err != nil {
 		if t.recorder != nil {
-			t.recorder.FinishToolExecution(ctx, executionID, "", err)
+			t.recorder.FinishToolExecution(ctx, executionID, "", err, structuredContentArgs(result)...)
 		}
 		return "", fmt.Errorf("call MCP tool %s: %w", t.name, err)
 	}
 	text, err := resultText(result)
 	if err != nil {
 		if t.recorder != nil {
-			t.recorder.FinishToolExecution(ctx, executionID, "", err)
+			t.recorder.FinishToolExecution(ctx, executionID, "", err, structuredContentArgs(result)...)
 		}
 		return "", err
 	}
 	if result.IsError {
-		failure := fmt.Errorf("MCP tool %s failed: %s", t.name, text)
+		failure := mcpToolFailure(t.name, text, result.StructuredContent)
 		if t.recorder != nil {
-			t.recorder.FinishToolExecution(ctx, executionID, text, failure)
+			t.recorder.FinishToolExecution(
+				ctx,
+				executionID,
+				text,
+				failure,
+				structuredContentArgs(result)...,
+			)
 		}
 		return text, failure
 	}
 	if t.recorder != nil {
-		t.recorder.FinishToolExecution(ctx, executionID, text, nil)
+		t.recorder.FinishToolExecution(ctx, executionID, text, nil, structuredContentArgs(result)...)
 	}
 	return text, nil
 }
@@ -314,14 +334,69 @@ func resultText(result *sdkmcp.CallToolResult) (string, error) {
 		parts = append(parts, string(raw))
 	}
 	if len(parts) > 0 {
-		return strings.Join(parts, "\n"), nil
+		text := strings.Join(parts, "\n")
+		if result.StructuredContent == nil {
+			return text, nil
+		}
+		return toolwire.AppendStructured(text, result.StructuredContent)
 	}
 	if result.StructuredContent == nil {
 		return "", nil
 	}
-	raw, err := json.Marshal(result.StructuredContent)
-	if err != nil {
-		return "", err
+	return toolwire.AppendStructured("", result.StructuredContent)
+}
+
+type mcpCommandResult struct {
+	Kind       string `json:"kind"`
+	Status     string `json:"status"`
+	ExitCode   *int   `json:"exit_code"`
+	TimedOut   bool   `json:"timed_out"`
+	Truncated  bool   `json:"truncated"`
+	NoMatch    bool   `json:"no_match"`
+	ErrorClass string `json:"error_class"`
+}
+
+func mcpToolFailure(toolName, text string, structured any) error {
+	commandResult := decodeMCPCommandResult(structured)
+	if commandResult.Kind == "command_result" {
+		switch commandResult.ErrorClass {
+		case "command_exit":
+			if commandResult.ExitCode != nil {
+				return fmt.Errorf("命令退出码 %d", *commandResult.ExitCode)
+			}
+		case "policy":
+			return fmt.Errorf("工具策略拒绝执行")
+		case "timeout":
+			return fmt.Errorf("工具执行超时")
+		case "no_match":
+			return fmt.Errorf("命令无匹配结果")
+		}
+		if commandResult.NoMatch {
+			return fmt.Errorf("命令无匹配结果")
+		}
+		if commandResult.ExitCode != nil && *commandResult.ExitCode != 0 {
+			return fmt.Errorf("命令退出码 %d", *commandResult.ExitCode)
+		}
 	}
-	return string(raw), nil
+	return fmt.Errorf("MCP tool %s failed: %s", toolName, text)
+}
+
+func decodeMCPCommandResult(structured any) mcpCommandResult {
+	var result mcpCommandResult
+	if structured == nil {
+		return result
+	}
+	raw, err := json.Marshal(structured)
+	if err != nil {
+		return result
+	}
+	_ = json.Unmarshal(raw, &result)
+	return result
+}
+
+func structuredContentArgs(result *sdkmcp.CallToolResult) []any {
+	if result == nil || result.StructuredContent == nil {
+		return nil
+	}
+	return []any{result.StructuredContent}
 }

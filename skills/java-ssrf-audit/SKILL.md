@@ -9,15 +9,39 @@ description: Java Web 源码 SSRF（服务端请求伪造）漏洞审计工具�
 
 扫描 Java Web 项目源码，识别所有 HTTP 请求出口，检测 SSRF 漏洞。
 
----
+## 适用场景
 
-## 漏洞分级标准
+适合 Webhook、回调、图片抓取、URL 预览、代理下载或远程 API 调用中，URL、host、scheme、端口或重定向目标可能由请求输入影响。
 
-详见 [SEVERITY_RATING.md](../java-shared/SEVERITY_RATING.md)
+## 不适用场景
 
-- 漏洞编号格式: `{C/H/M/L}-SSRF-{序号}`
-- URL 完全可控 + 无鉴权 → 🔴 Critical
-- Score = R × 0.40 + I × 0.35 + C × 0.25
+只发现 `RestTemplate`、`HttpClient` 或 `URL.openConnection()` 不能直接确认 SSRF。固定目标、可靠 allowlist、网络出口阻断，或请求结果完全不可观测时，需要降级或判为否。
+
+## 核心判断
+
+SSRF 需要确认用户对最终请求目标的控制程度、客户端如何解析 URL 和重定向、服务端实际网络可达范围，以及响应/错误/时间差异是否能作为证据。云元数据只是影响候选，不是默认事实。
+
+## 证据标准
+
+- 可确认：真实请求入口、URL 控制映射、最终出站目标和可观测响应/内网效果证据闭合。
+- 待验证：存在可控 URL 或弱 allowlist，但 DNS、redirect、代理、网络策略或结果通道尚未确认。
+- 判为否：目标固定、规范化后的 host/scheme 受严格约束、出站被阻断，或请求结果不可观测且没有 OOB 证据。
+
+## 决策树
+
+- 找到 HTTP sink：回查最终 URL 构造和请求客户端配置。
+- 用户可控制 URL：检查 scheme、authority、DNS 解析和重定向处理。
+- 存在 allowlist：确认校验与实际连接使用同一解析结果。
+- 请求可发出：判断内网可达性和响应、错误、时间或 OOB 观测。
+- 只有组件或 URL 参数名：保留候选，不直接升级为内网访问。
+
+## 常见误判
+
+- 请求参数名为 `url` 就认定完全可控。
+- 字符串前缀 allowlist 未检查 `@`、反斜杠、编码和重定向绕过。
+- URL 校验完成后发生 DNS 重绑定，或连接目标与校验目标不一致。
+- 只证明请求超时，没有证明目标可由服务端访问。
+- 直接读取或使用云元数据中的真实凭证。
 
 ---
 
@@ -212,43 +236,13 @@ Content-Type: application/json
 
 ---
 
-## 核心要求
-
-- ✅ 识别所有 12 种 HTTP 客户端 sink
-- ✅ 追踪 URL 参数来源判定可控性
-- ✅ 检测防护绕过的可能性
-- ✅ 评估云环境元数据利用链
-- ✅ 结合鉴权状态评估实际风险
-- ❌ 禁止忽略 URL 白名单的绕过分析
-- ❌ 禁止跳过内网可达性评估
-
----
-
 ## 反编译阶段（CRITICAL）
 
-**当源码不可用时，必须使用 CFR 反编译器反编译 HTTP 客户端相关类。**
+**当源码不可用时，按运行环境中可用的反编译能力处理 HTTP 客户端相关类。**
 
 详细策略参见 [DECOMPILE_STRATEGY.md](references/DECOMPILE_STRATEGY.md)
 
-```bash
-# 反编译 HTTP 客户端工具类
-java -jar {CFR_JAR} /path/to/HttpUtils.class --outputdir {output_path}/decompiled
-
-# 批量反编译
-find /path/to/WEB-INF/classes -name "*Http*.class" -o -name "*Fetch*.class" -o -name "*Download*.class" | \
-  xargs java -jar {CFR_JAR} --outputdir {output_path}/decompiled
-```
-
----
-
-## 输出格式
-
-**严格按照 [references/OUTPUT_TEMPLATE.md](references/OUTPUT_TEMPLATE.md) 中的填充式模板生成输出文件。**
-
-- 文件名格式: `{project_name}_ssrf_audit_{YYYYMMDD_HHMMSS}.md`
-- 不得修改模板结构、不得增删章节、不得调整顺序
-- 所有【填写】占位符必须替换为实际内容
-- 通用规范参考: [java-shared/OUTPUT_STANDARD.md](../java-shared/OUTPUT_STANDARD.md)
+可使用运行环境中可用的反编译工具。内置 `java_decompile`、CFR、`javap` 等均可作为候选，按实际能力和结果选择。
 
 ---
 

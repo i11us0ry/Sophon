@@ -1,5 +1,5 @@
 name: "naabu"
-command: "/opt/sophon/thirdTools/naabu"
+command: "naabu"
 args: ["-silent", "-no-color", "-disable-update-check"]
 enabled: true
 timeout_seconds: 900

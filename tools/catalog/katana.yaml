@@ -1,0 +1,22 @@
+name: katana
+version: 1.8.0
+description: ProjectDiscovery web crawling framework
+license: MIT
+tool_definition: katana.yaml
+verify_args:
+  - "-version"
+artifacts:
+  linux-amd64:
+    url: https://github.com/projectdiscovery/katana/releases/download/v1.8.0/katana_1.8.0_linux_amd64.zip
+    sha256: cb027ae99d0757061b70c07a15c7a80f62c5a535ab52c4a329f80c4b0a7309d2
+    destination: katana
+    mode: "0755"
+    archive: zip
+    member: katana
+  linux-arm64:
+    url: https://github.com/projectdiscovery/katana/releases/download/v1.8.0/katana_1.8.0_linux_arm64.zip
+    sha256: 80e269210727a855511ffac8dfb01297b2344742acec71a35e8ba4a67a90f0f2
+    destination: katana
+    mode: "0755"
+    archive: zip
+    member: katana

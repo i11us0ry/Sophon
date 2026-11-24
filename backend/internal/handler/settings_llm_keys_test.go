@@ -143,6 +143,9 @@ func TestProbeLLMKeyStatus(t *testing.T) {
 		case "Bearer quota-error":
 			writer.WriteHeader(http.StatusPaymentRequired)
 			_, _ = writer.Write([]byte(`{"error":{"message":"insufficient balance"}}`))
+		case "Bearer not-enough-balance":
+			writer.WriteHeader(http.StatusBadRequest)
+			_, _ = writer.Write([]byte(`{"error":{"code":"NOT_ENOUGH_BALANCE"}}`))
 		default:
 			writer.WriteHeader(http.StatusInternalServerError)
 		}
@@ -162,6 +165,7 @@ func TestProbeLLMKeyStatus(t *testing.T) {
 		{key: "healthy", wantStatus: llmKeyStatusHealthy, wantText: "正常"},
 		{key: "auth-error", wantStatus: llmKeyStatusError, wantText: "认证失败"},
 		{key: "quota-error", wantStatus: llmKeyStatusError, wantText: "额度不足"},
+		{key: "not-enough-balance", wantStatus: llmKeyStatusError, wantText: "额度不足"},
 	}
 	for _, item := range cases {
 		got := probeLLMKey(context.Background(), server.Client(), cfg, item.key)

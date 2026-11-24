@@ -1,0 +1,13 @@
+name: impacket
+version: 0.13.1
+description: Impacket protocol toolkit copied from the pinned upstream source
+tool_definition: impacket.yaml
+build:
+  url: https://codeload.github.com/fortra/impacket/tar.gz/c456746d7a0f0bb25e8968a59f25aae1ad519935
+  sha256: b760661341dcf585e11424d41d188591d32d636874f2c783784511bf6ae0885c
+  archive: tar.gz
+  strip_components: 1
+  recipe: copy
+  destination: impacket
+  directory: true
+  entry: examples/psexec.py

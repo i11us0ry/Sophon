@@ -23,7 +23,6 @@ DIM    = \x1b[2m   灰色次要信息
 \x1b[1m\x1b[36m╔══════════════════════════════════════════════════════╗
 ║  Stage N: 阶段名称                                    ║
 ╚══════════════════════════════════════════════════════╝\x1b[0m
-\x1b[2m  Worker 池: {used}/{max}  |  QA 池: {qa_used}/{qa_max}  |  队列: {queued}\x1b[0m
 
   启动 agent:
   \x1b[33m⟳\x1b[0m agent-X-name   → 模块/范围描述
@@ -31,7 +30,6 @@ DIM    = \x1b[2m   灰色次要信息
   ...
 ```
 
-## 2. Worker 池状态面板
 
 ```
 \x1b[1m  Worker Pool (Stage N)\x1b[0m
@@ -61,10 +59,8 @@ DIM    = \x1b[2m   灰色次要信息
   → 进入 Stage N+1...
 ```
 
-## 5. TaskCreate 规则
 
 - 每个 worker agent → 1 个 `pending` 任务
-- spawn agent 时立即 TaskUpdate 标记为 `in_progress`，activeForm 设为简要描述
 - agent 完成后标记 `completed`
 - worker 池满时排队 agent 保持 `pending`
 
@@ -73,8 +69,6 @@ DIM    = \x1b[2m   灰色次要信息
 传递给每个 agent 的 prompt 中必须包含：
 
 ```
-⚠️ 进度可视化要求（使用 TaskCreate/TaskUpdate）：
-- 启动后立即使用 TaskCreate 创建 3-8 个子任务
 - 每个子任务必须设置 activeForm 为当前正在做的事（如"正在扫描 UploadController.java 的上传校验逻辑"）
 - 开始子任务时用 TaskUpdate 标记 in_progress（CLI 自动显示 spinner）
 - 完成子任务时标记 completed
@@ -105,7 +99,6 @@ DIM    = \x1b[2m   灰色次要信息
 
 ## 8. 禁止行为
 
-- **禁止** spawn agent 后不做任何 TaskUpdate 直接等待结果
 - **禁止** 在多个 agent 同时完成时逐条转发原始报告内容（刷屏）
 - **禁止** 跳过阶段启动/完成面板
 - **禁止** Worker Pool 状态变化时不更新面板

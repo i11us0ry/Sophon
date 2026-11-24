@@ -31,9 +31,6 @@ func newSkillReaderTool(service *Service) tool.BaseTool {
 			if !skillname.Valid(name) {
 				return "", fmt.Errorf("技能名称不合法: %q", name)
 			}
-			if allowed, restricted := service.roleSkillAccess(ctx, name); restricted && !allowed {
-				return "", fmt.Errorf("技能 %s 未绑定到当前角色", name)
-			}
 			skillsDir := strings.TrimSpace(service.configSnapshot().SkillsDir)
 			if skillsDir == "" {
 				return "", fmt.Errorf("未配置技能目录 skills_dir")
@@ -56,44 +53,4 @@ func newSkillReaderTool(service *Service) tool.BaseTool {
 			return content, nil
 		},
 	}
-}
-
-func (s *Service) roleSkillAccess(ctx context.Context, skillName string) (bool, bool) {
-	if s == nil || s.db == nil {
-		return false, true
-	}
-	if info, ok := execctx.Subagent(ctx); ok && len(info.AllowedSkills) > 0 {
-		allowed := false
-		for _, name := range info.AllowedSkills {
-			if strings.TrimSpace(name) == skillName {
-				allowed = true
-				break
-			}
-		}
-		if !allowed {
-			return false, true
-		}
-	}
-	conversationID := strings.TrimSpace(execctx.ConversationID(ctx))
-	userID := strings.TrimSpace(execctx.UserID(ctx))
-	if conversationID == "" || userID == "" {
-		return false, true
-	}
-	conversation, err := s.db.GetConversation(ctx, conversationID, userID)
-	if err != nil {
-		return false, true
-	}
-	if strings.TrimSpace(conversation.AgentRoleID) == "" {
-		return false, false
-	}
-	role, err := s.db.GetAgentRole(ctx, conversation.AgentRoleID)
-	if err != nil || !role.Enabled || len(role.Skills) == 0 {
-		return false, true
-	}
-	for _, bound := range role.Skills {
-		if strings.TrimSpace(bound) == skillName {
-			return true, true
-		}
-	}
-	return false, true
 }

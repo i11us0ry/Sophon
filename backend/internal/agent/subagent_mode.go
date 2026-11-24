@@ -216,6 +216,32 @@ func (s *Service) analyzeToolCapability(
 			reason:     analysis.Reason,
 			localWrite: analysis.Capability == policy.CapabilityDestructive && !analysis.Delete,
 		}
+	case plannerTodoUpdateToolName:
+		return toolCapabilityAnalysis{
+			capability: policy.CapabilityDestructive,
+			reason:     "仅替换当前会话的 Planner 待办状态",
+			localWrite: true,
+		}
+	case orchestratorControlToolName:
+		action := strings.ToLower(strings.TrimSpace(modeStringArg(args, "action")))
+		switch action {
+		case "status", "worker_output", "worker_trace":
+			return toolCapabilityAnalysis{
+				capability: policy.CapabilityRead,
+				reason:     "仅查询当前编排状态或 Worker 输出",
+			}
+		case "steer", "steer_worker", "stop_worker", "resume", "resume_project", "stop":
+			return toolCapabilityAnalysis{
+				capability: policy.CapabilityDestructive,
+				reason:     "仅控制当前会话的后台编排状态",
+				localWrite: true,
+			}
+		default:
+			return toolCapabilityAnalysis{
+				capability: policy.CapabilityDestructive,
+				reason:     "未知的编排控制操作",
+			}
+		}
 	}
 
 	if s != nil && s.db != nil && serverName != "" {
@@ -244,10 +270,7 @@ func (s *Service) plainToolName(toolName string) string {
 		}
 	}
 	// 未登记时按 server__tool 约定回退，保证能力判定仍能识别内置工具。
-	if index := strings.Index(trimmed, "__"); index > 0 && index+2 < len(trimmed) {
-		return trimmed[index+2:]
-	}
-	return trimmed
+	return canonicalToolName(trimmed)
 }
 
 func modeStringArg(args map[string]interface{}, key string) string {
@@ -288,11 +311,15 @@ func (t *gatedSubagentTool) InvokableRun(
 			_ = json.Unmarshal([]byte(trimmed), &args)
 		}
 		if allowed, reason := t.service.subagentToolDecision(ctx, t.name, args); !allowed {
-			return fmt.Sprintf(
-				"[工具 %s 执行失败，请根据错误决定重试或向用户说明]\n子 Agent 能力模式拒绝执行 %s：%s",
+			t.service.recordSafetyInterception(ctx, t.name, reason, map[string]interface{}{
+				"source": "subagent_capability",
+			})
+			return renderToolError(
 				t.name,
-				t.name,
-				reason,
+				toolErrorPolicy,
+				fmt.Sprintf("子 Agent 能力模式拒绝执行 %s：%s", t.name, reason),
+				false,
+				nil,
 			), nil
 		}
 	}

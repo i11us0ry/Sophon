@@ -21,6 +21,9 @@ func TestDefaultCapabilityIsFailClosed(t *testing.T) {
 	if got := DefaultCapability("project_list_facts"); got != CapabilityRead {
 		t.Fatalf("项目查询应为 read，实际 %s", got)
 	}
+	if got := DefaultCapability("planner_todo_list"); got != CapabilityRead {
+		t.Fatalf("Planner Todo 查询应为 read，实际 %s", got)
+	}
 	if got := DefaultCapability("unknown-tool"); got != CapabilityDestructive {
 		t.Fatalf("未知工具应失败关闭，实际 %s", got)
 	}

@@ -61,6 +61,16 @@ func TestSystemAgentRolesSeedCanonicalIdentityAndPrompt(t *testing.T) {
 		reviewerRole.Prompt != vulnerabilityReviewerPrompt {
 		t.Fatalf("漏洞审核初始状态错误: %+v", reviewerRole)
 	}
+	writerRole, err := db.GetAgentRole(ctx, SystemVulnerabilityWriterID)
+	if err != nil {
+		t.Fatalf("读取漏洞编写失败: %v", err)
+	}
+	if writerRole.Name != SystemVulnerabilityWriterName || !writerRole.Enabled || !writerRole.Builtin ||
+		writerRole.Prompt != vulnerabilityWriterPrompt ||
+		!SystemAgentEditableForRole(*writerRole) ||
+		SystemAgentDisableableForRole(*writerRole) {
+		t.Fatalf("漏洞编写初始状态错误: %+v", writerRole)
+	}
 	policyRole, err := db.GetAgentRole(ctx, SystemMissionPolicyAgentID)
 	if err != nil {
 		t.Fatalf("读取安全审核失败: %v", err)
@@ -74,9 +84,9 @@ func TestSystemAgentRolesSeedCanonicalIdentityAndPrompt(t *testing.T) {
 		name   string
 		prompt string
 	}{
+		{SystemVulnerabilityWriterID, SystemVulnerabilityWriterName, vulnerabilityWriterPrompt},
 		{SystemDeepPathPlannerID, SystemDeepPathPlannerName, deepPathPlannerAgentPrompt},
 		{SystemDeepPathWorkerID, SystemDeepPathWorkerName, deepPathWorkerAgentPrompt},
-		{SystemDeepPathSubAgentID, SystemDeepPathSubAgentName, pentSubAgentPrompt},
 	} {
 		role, err := db.GetAgentRole(ctx, expected.id)
 		if err != nil {
@@ -95,7 +105,6 @@ func TestSystemAgentRolesSeedCanonicalIdentityAndPrompt(t *testing.T) {
 	}{
 		{SystemDeepPathPlannerID, SystemDeepPathPlannerName, deepPathPlannerAgentPrompt},
 		{SystemDeepPathWorkerID, SystemDeepPathWorkerName, deepPathWorkerAgentPrompt},
-		{SystemDeepPathSubAgentID, SystemDeepPathSubAgentName, pentSubAgentPrompt},
 	} {
 		got := service.systemAgentPrompt(ctx, expected.id, expected.name, "fallback")
 		if got != expected.prompt {
@@ -146,6 +155,76 @@ func TestEditableVulnerabilityReviewerPromptPersists(t *testing.T) {
 	}
 	if !SystemAgentDisableableForRole(*stored) {
 		t.Fatalf("漏洞审核角色应允许停用")
+	}
+}
+
+func TestVulnerabilityWriterPromptSeedUpgradePreservesCustomization(t *testing.T) {
+	db, err := database.Open(filepath.Join(t.TempDir(), "vulnerability-writer-prompt.db"))
+	if err != nil {
+		t.Fatalf("打开数据库失败: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ctx := context.Background()
+	if err := EnsureSystemAgentRoles(ctx, db); err != nil {
+		t.Fatalf("初始化系统 Agent 失败: %v", err)
+	}
+	role, err := db.GetAgentRole(ctx, SystemVulnerabilityWriterID)
+	if err != nil {
+		t.Fatalf("读取漏洞编写 Agent 失败: %v", err)
+	}
+	oldPrompt := strings.Replace(
+		vulnerabilityWriterPrompt,
+		"只写实际依赖如需要普通账户、管理员权限、目标开启什么配置等",
+		"只写实际依赖",
+		1,
+	)
+	role.Prompt = oldPrompt
+	if err := db.UpdateAgentRole(ctx, *role); err != nil {
+		t.Fatalf("写入旧版 Prompt 失败: %v", err)
+	}
+	if err := EnsureSystemAgentRoles(ctx, db); err != nil {
+		t.Fatalf("升级旧版 Prompt 失败: %v", err)
+	}
+	upgraded, err := db.GetAgentRole(ctx, SystemVulnerabilityWriterID)
+	if err != nil || upgraded.Prompt != vulnerabilityWriterPrompt {
+		t.Fatalf("旧版 Prompt 未升级: %+v err=%v", upgraded, err)
+	}
+
+	customPrompt := vulnerabilityWriterPrompt + "\n\n自定义补充：仅整理已验证证据。"
+	upgraded.Prompt = customPrompt
+	if err := db.UpdateAgentRole(ctx, *upgraded); err != nil {
+		t.Fatalf("写入自定义 Prompt 失败: %v", err)
+	}
+	if err := EnsureSystemAgentRoles(ctx, db); err != nil {
+		t.Fatalf("再次初始化失败: %v", err)
+	}
+	preserved, err := db.GetAgentRole(ctx, SystemVulnerabilityWriterID)
+	if err != nil || preserved.Prompt != customPrompt {
+		t.Fatalf("自定义 Prompt 不应被覆盖: %+v err=%v", preserved, err)
+	}
+}
+
+func TestLegacyDeepPathSubAgentRoleIsRetired(t *testing.T) {
+	db, err := database.Open(filepath.Join(t.TempDir(), "legacy-deep-path-subagent.db"))
+	if err != nil {
+		t.Fatalf("打开数据库失败: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ctx := context.Background()
+	now := time.Now().UTC()
+	if err := db.CreateAgentRole(ctx, database.AgentRole{
+		ID: legacyDeepPathSubAgentID, Name: "Deep Path 子 Agent",
+		Prompt: pentSubAgentPrompt, Builtin: true, Enabled: true,
+		CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("创建旧角色失败: %v", err)
+	}
+	if err := EnsureSystemAgentRoles(ctx, db); err != nil {
+		t.Fatalf("执行系统角色迁移失败: %v", err)
+	}
+	legacy, err := db.GetAgentRoleIncludingDeleted(ctx, legacyDeepPathSubAgentID)
+	if err != nil || legacy == nil || !legacy.Deleted {
+		t.Fatalf("旧 Deep Path 子 Agent 应被删除: %+v err=%v", legacy, err)
 	}
 }
 
@@ -295,37 +374,44 @@ func TestDeepPathAgentPromptsContainOperationalContracts(t *testing.T) {
 			name:   "planner",
 			prompt: deepPathPlannerAgentPrompt,
 			phrases: []string{
-				"核心职责",
-				"执行流程",
-				"规划优先级",
-				"假设契约",
+				"任务图变化时被频繁唤醒",
+				"硬底线",
+				"允许产出 0 个假设",
+				"project_prove_goal",
 				"project_plan_hypotheses",
+				"asset_id",
+				"parent_ids",
+				"dimension",
+				"technique",
+				"rationale",
 				"expected_evidence",
-				"写回与去重",
-				"禁止事项",
-				"停止条件",
-				"输出格式",
+				"priority",
+				"required",
+				"Planner 不做执行",
+				"本轮 planning_task 如下",
 			},
 		},
 		{
 			name:   "worker",
 			prompt: deepPathWorkerAgentPrompt,
 			phrases: []string{
-				"执行前检查",
-				"执行流程",
-				"证据标准",
+				"唯一职责是完成这一条意图",
+				"边发现边写回",
+				"project_insert_assets",
+				"project_record_fact",
+				"project_report_finding",
+				"vulnerability_type=\"弱口令\"",
+				"project_complete_hypothesis",
+				"observed",
+				"inferred",
 				"状态映射",
 				"project_start_hypothesis",
-				"project_complete_hypothesis",
-				"没有成果",
-				"没有下一步思路",
-				"不是检查项上限",
 				"tested_clean",
 				"suspicious",
 				"confirmed",
-				"禁止事项",
-				"停止条件",
-				"输出格式",
+				"install-python-package",
+				"停止与返回",
+				"不得通过 shell、Python、MCP、子 Agent 或等价工具绕过",
 			},
 		},
 	}
@@ -337,6 +423,36 @@ func TestDeepPathAgentPromptsContainOperationalContracts(t *testing.T) {
 			if !strings.Contains(check.prompt, phrase) {
 				t.Fatalf("%s Prompt 缺少关键契约 %q", check.name, phrase)
 			}
+		}
+	}
+}
+
+func TestMissionPolicyPromptOnlyDescribesEnforcedBoundaries(t *testing.T) {
+	if len([]rune(missionPolicyAgentPrompt)) > 1200 {
+		t.Fatalf("安全策略 Prompt 仍然过长: %d", len([]rune(missionPolicyAgentPrompt)))
+	}
+	for _, expected := range []string{
+		"当前用户",
+		"当前项目授权范围",
+		"网络目标",
+		"人工审批",
+		"敏感凭据",
+		"工具被拒绝时应说明具体原因并停止该操作",
+		"你不需要额外制定安全流程",
+	} {
+		if !strings.Contains(missionPolicyAgentPrompt, expected) {
+			t.Fatalf("安全策略 Prompt 缺少真实边界 %q", expected)
+		}
+	}
+	for _, forbidden := range []string{
+		"strings_out",
+		"Planner",
+		"Worker",
+		"Shell 命令出现语法",
+		"完成任务后立即停止",
+	} {
+		if strings.Contains(missionPolicyAgentPrompt, forbidden) {
+			t.Fatalf("安全策略 Prompt 不应包含平台工作流程 %q", forbidden)
 		}
 	}
 }
@@ -359,6 +475,52 @@ func TestRetestAgentPromptContainsRequiredOutputContract(t *testing.T) {
 	} {
 		if !strings.Contains(retestAgentPrompt, phrase) {
 			t.Fatalf("漏洞复测 Agent Prompt 缺少: %s", phrase)
+		}
+	}
+}
+
+func TestPlannerAndWorkerPreferPreloadedContext(t *testing.T) {
+	for name, prompt := range map[string]string{
+		"planner": deepPathPlannerAgentPrompt,
+		"worker":  deepPathWorkerAgentPrompt,
+	} {
+		if !strings.Contains(prompt, "状态包") {
+			t.Fatalf("%s Prompt 未要求优先使用预加载态势: %s", name, prompt)
+		}
+	}
+	if !strings.Contains(deepPathPlannerAgentPrompt, "按需查询") {
+		t.Fatalf("Planner Prompt 未要求按需查询缺失信息")
+	}
+	if !strings.Contains(deepPathPlannerAgentPrompt, "不重复全量查询") {
+		t.Fatalf("Planner Prompt 未限制重复全量查询")
+	}
+	if strings.Contains(deepPathPlannerAgentPrompt, "validation_steps") {
+		t.Fatalf("Planner Prompt 不应引用不存在的 validation_steps 字段")
+	}
+}
+
+func TestPlannerAndWorkerUseDivergentThinkingWithoutFixedWorkflow(t *testing.T) {
+	for name, prompt := range map[string]string{
+		"planner": deepPathPlannerAgentPrompt,
+		"worker":  deepPathWorkerAgentPrompt,
+	} {
+		for _, phrase := range []string{"扩散与变换思维", "无论当前是否已经取得成果", "本质不同"} {
+			if !strings.Contains(prompt, phrase) {
+				t.Fatalf("%s Prompt 缺少扩散思维准则 %q", name, phrase)
+			}
+		}
+		if strings.Contains(prompt, "成果自查") || strings.Contains(prompt, "必须回答三个问题") {
+			t.Fatalf("%s Prompt 不应把扩散思维写成固定检查流程", name)
+		}
+	}
+	for _, phrase := range []string{"普遍性", "深入性", "扩散之后必须负责收敛"} {
+		if !strings.Contains(deepPathPlannerAgentPrompt, phrase) {
+			t.Fatalf("Planner Prompt 缺少全局扩散要求 %q", phrase)
+		}
+	}
+	for _, phrase := range []string{"取得成果时", "没有成果或受阻时", "不自行扩大任务范围"} {
+		if !strings.Contains(deepPathWorkerAgentPrompt, phrase) {
+			t.Fatalf("Worker Prompt 缺少局部扩散边界 %q", phrase)
 		}
 	}
 }

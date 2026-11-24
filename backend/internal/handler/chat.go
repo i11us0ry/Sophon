@@ -150,9 +150,9 @@ func (h *ChatHandler) CreateConversation(c *gin.Context) {
 		conversation.AssetID = valid
 	}
 	if roleID := strings.TrimSpace(request.RoleID); roleID != "" {
-		resolved, ok := h.resolveRoleID(c.Request.Context(), roleID)
+		resolved, ok := h.resolveTaskProfileID(c.Request.Context(), roleID)
 		if !ok {
-			badRequest(c, "invalid_agent_role", "角色不存在或未启用")
+			badRequest(c, "invalid_agent_role", "任务模板不存在或未启用")
 			return
 		}
 		conversation.AgentRoleID = resolved
@@ -162,6 +162,84 @@ func (h *ChatHandler) CreateConversation(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusCreated, conversationResponse(conversation))
+}
+
+func (h *ChatHandler) UpdateConversationProject(c *gin.Context) {
+	user := middleware.UserFromContext(c)
+	if user == nil {
+		unauthorized(c)
+		return
+	}
+	conversation, ok := h.conversationForRequest(c)
+	if !ok {
+		return
+	}
+	var request struct {
+		ProjectID string `json:"projectId"`
+	}
+	if err := c.ShouldBindJSON(&request); err != nil {
+		badRequest(c, "invalid_request", "请求格式错误")
+		return
+	}
+	projectID := strings.TrimSpace(request.ProjectID)
+	if projectID == "" {
+		badRequest(c, "project_required", "请选择项目")
+		return
+	}
+	if _, err := h.db.GetActiveProject(c.Request.Context(), projectID, user.ID); err != nil {
+		if errors.Is(err, database.ErrProjectInactive) {
+			c.JSON(http.StatusConflict, gin.H{
+				"code":    "project_inactive",
+				"message": "项目当前状态不允许执行 Agent 工作",
+			})
+			return
+		}
+		badRequest(c, "invalid_project", "项目不存在")
+		return
+	}
+	if h.manager != nil {
+		if _, active := h.manager.ActiveConversations(user.ID)[conversation.ID]; active {
+			c.JSON(http.StatusConflict, gin.H{
+				"code":    "conversation_busy",
+				"message": "对话正在运行，不能切换项目",
+			})
+			return
+		}
+	}
+	updated, err := h.db.UpdateConversationProjectIfEmpty(
+		c.Request.Context(),
+		conversation.ID,
+		user.ID,
+		projectID,
+	)
+	if err != nil {
+		switch {
+		case errors.Is(err, database.ErrConversationNotEmpty):
+			c.JSON(http.StatusConflict, gin.H{
+				"code":    "conversation_not_empty",
+				"message": "对话已有消息，请新建对话后再切换项目",
+			})
+		case errors.Is(err, database.ErrConversationNotEditable):
+			c.JSON(http.StatusConflict, gin.H{
+				"code":    "conversation_not_editable",
+				"message": "当前对话不允许切换项目",
+			})
+		default:
+			internalError(c, "update_conversation_project_failed", "更新对话项目失败")
+		}
+		return
+	}
+	auditCtx, cancel := context.WithTimeout(context.WithoutCancel(c.Request.Context()), 3*time.Second)
+	defer cancel()
+	_ = h.db.AddAuditLog(auditCtx, database.AuditLog{
+		UserID:       user.ID,
+		Action:       "conversation.project.update",
+		ResourceType: "conversation",
+		ResourceID:   conversation.ID,
+		Result:       "success",
+		Detail:       fmt.Sprintf("from=%s to=%s", conversation.ProjectID, projectID),
+	})
+	c.JSON(http.StatusOK, conversationResponse(*updated))
 }
 
 func (h *ChatHandler) ListConversations(c *gin.Context) {
@@ -419,7 +497,12 @@ func (h *ChatHandler) StopConversation(c *gin.Context) {
 	if !ok {
 		return
 	}
-	cancelled := h.manager.CancelConversation(conversation.ID, conversation.OwnerUserID)
+	cancelled, jobsCancelled := cancelConversationWork(
+		h.manager,
+		h.agent,
+		conversation.ID,
+		conversation.OwnerUserID,
+	)
 	campaignStopped := false
 	if conversation.Kind == "batch_child" &&
 		strings.TrimSpace(conversation.ParentConversationID) == "" &&
@@ -432,6 +515,7 @@ func (h *ChatHandler) StopConversation(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"cancelled":       cancelled,
+		"jobsCancelled":   jobsCancelled,
 		"campaignStopped": campaignStopped,
 	})
 }
@@ -538,6 +622,61 @@ func (h *ChatHandler) Resume(c *gin.Context) {
 	h.streamTask(c, taskItem, conversation.ID, assistantMessage.ID)
 }
 
+func (h *ChatHandler) ResumeOrchestration(c *gin.Context) {
+	user := middleware.UserFromContext(c)
+	if user == nil {
+		unauthorized(c)
+		return
+	}
+	conversation, ok := h.conversationForRequest(c)
+	if !ok {
+		return
+	}
+	if strings.TrimSpace(conversation.ProjectID) == "" {
+		badRequest(c, "project_required", "请先为对话绑定项目")
+		return
+	}
+	if strings.TrimSpace(conversation.Kind) == "batch_parent" {
+		c.JSON(http.StatusConflict, gin.H{
+			"code":    "batch_parent_read_only",
+			"message": "批量任务父对话只用于汇总",
+		})
+		return
+	}
+	if _, err := h.db.GetActiveProject(
+		c.Request.Context(),
+		conversation.ProjectID,
+		user.ID,
+	); err != nil {
+		if errors.Is(err, database.ErrProjectInactive) {
+			c.JSON(http.StatusConflict, gin.H{
+				"code":    "project_inactive",
+				"message": err.Error(),
+			})
+			return
+		}
+		badRequest(c, "invalid_project", "项目不存在")
+		return
+	}
+	resumed, err := h.agent.ResumeConversationOrchestration(
+		c.Request.Context(),
+		conversation.ID,
+		user.ID,
+	)
+	if err != nil {
+		internalError(c, "resume_orchestration_failed", "恢复 Planner/Worker 编排失败")
+		return
+	}
+	if !resumed {
+		c.JSON(http.StatusConflict, gin.H{
+			"code":    "no_paused_orchestration",
+			"message": "当前会话没有可恢复的 Planner/Worker 编排",
+		})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"resumed": true})
+}
+
 func (h *ChatHandler) ListMessages(c *gin.Context) {
 	conversation, ok := h.conversationForRequest(c)
 	if !ok {
@@ -601,6 +740,7 @@ func (h *ChatHandler) ListMessages(c *gin.Context) {
 		c.Request.Context(),
 		conversation.ID,
 		messageIDs,
+		database.AgentSessionID(conversation.ID, database.AgentRoleMain, "", ""),
 	)
 	reasoningMode := strings.TrimSpace(c.Query("includeReasoning"))
 	includeReasoning := reasoningMode == "1" || reasoningMode == "summary"
@@ -671,6 +811,7 @@ func (h *ChatHandler) ListProcessDetails(c *gin.Context) {
 	hasMore := false
 	limit := clampQueryInt(c.Query("limit"), 200, 1, 500)
 	offset := clampQueryInt(c.Query("offset"), 0, 0, 1000000)
+	sessionID := strings.TrimSpace(c.Query("sessionId"))
 	var err error
 	if len(messageIDs) > 0 {
 		details, total, hasMore, err = h.db.ListProcessDetailsByMessageIDsPage(
@@ -679,6 +820,7 @@ func (h *ChatHandler) ListProcessDetails(c *gin.Context) {
 			messageIDs,
 			limit,
 			offset,
+			sessionID,
 		)
 	} else {
 		details, err = h.db.ListProcessDetails(c.Request.Context(), conversation.ID, limit)
@@ -729,10 +871,79 @@ func (h *ChatHandler) ListProcessDetails(c *gin.Context) {
 	})
 }
 
+func (h *ChatHandler) ListAgentSessions(c *gin.Context) {
+	conversation, ok := h.conversationForRequest(c)
+	if !ok {
+		return
+	}
+	items, err := h.db.ListAgentSessions(c.Request.Context(), conversation.ID)
+	if err != nil {
+		internalError(c, "list_agent_sessions_failed", "读取 Agent 会话失败")
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"items": items})
+}
+
+func (h *ChatHandler) ListAgentSessionDetails(c *gin.Context) {
+	conversation, ok := h.conversationForRequest(c)
+	if !ok {
+		return
+	}
+	sessionID := strings.TrimSpace(c.Query("sessionId"))
+	if sessionID == "" || len(sessionID) > 256 {
+		badRequest(c, "invalid_session_id", "sessionId 参数不合法")
+		return
+	}
+	limit := clampQueryInt(c.Query("limit"), 100, 1, 500)
+	before, err := strconv.ParseInt(strings.TrimSpace(c.DefaultQuery("before", "0")), 10, 64)
+	if err != nil || before < 0 {
+		badRequest(c, "invalid_before", "before 参数不合法")
+		return
+	}
+	details, total, hasMore, err := h.db.ListAgentSessionDetailsPage(
+		c.Request.Context(),
+		conversation.ID,
+		sessionID,
+		limit,
+		before,
+	)
+	if err != nil {
+		internalError(c, "list_agent_session_details_failed", "读取 Agent 会话历史失败")
+		return
+	}
+	items := make([]gin.H, 0, len(details))
+	for _, detail := range details {
+		items = append(items, gin.H{
+			"id":             detail.ID,
+			"sequence":       detail.Sequence,
+			"eventType":      detail.EventType,
+			"message":        detail.Message,
+			"data":           detail.Data,
+			"messageId":      detail.MessageID,
+			"sessionId":      detail.SessionID,
+			"conversationId": detail.ConversationID,
+			"createdAt":      detail.CreatedAt,
+		})
+	}
+	nextBefore := int64(0)
+	if len(details) > 0 {
+		nextBefore = details[0].Sequence
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"items":      items,
+		"total":      total,
+		"hasMore":    hasMore,
+		"nextBefore": nextBefore,
+	})
+}
+
 type agentTraceEntry struct {
 	AgentID       string   `json:"agentId"`
 	AgentName     string   `json:"agentName"`
 	AgentKind     string   `json:"agentKind"`
+	ParentAgentID string   `json:"parentAgentId"`
+	IntentID      string   `json:"intentId"`
+	HypothesisID  string   `json:"hypothesisId"`
 	WorkerFocus   string   `json:"workerFocus"`
 	AllowedSkills []string `json:"allowedSkills"`
 	Task          string   `json:"task"`
@@ -761,6 +972,15 @@ func buildAgentTraceSummary(details []database.ProcessDetail) gin.H {
 		}
 		if value := traceText(detail.Data["agentKind"]); value != "" {
 			entry.AgentKind = value
+		}
+		if value := traceText(detail.Data["parentAgentId"]); value != "" {
+			entry.ParentAgentID = value
+		}
+		if value := traceText(detail.Data["intentId"]); value != "" {
+			entry.IntentID = value
+		}
+		if value := traceText(detail.Data["hypothesisId"]); value != "" {
+			entry.HypothesisID = value
 		}
 		if value := traceText(detail.Data["workerFocus"]); value != "" {
 			entry.WorkerFocus = value
@@ -1287,13 +1507,15 @@ func (h *ChatHandler) CancelTask(c *gin.Context) {
 		unauthorized(c)
 		return
 	}
-	if !h.manager.Cancel(c.Param("taskId"), user.ID) {
+	snapshot, ok := h.manager.Get(c.Param("taskId"), user.ID)
+	if !ok || !h.manager.Cancel(c.Param("taskId"), user.ID) {
 		c.JSON(http.StatusNotFound, gin.H{
 			"code":    "task_not_found",
 			"message": "任务不存在",
 		})
 		return
 	}
+	_, _ = cancelConversationWork(h.manager, h.agent, snapshot.ConversationID, user.ID)
 	c.Status(http.StatusNoContent)
 }
 
@@ -1311,7 +1533,7 @@ func (h *ChatHandler) DeleteConversation(c *gin.Context) {
 		})
 		return
 	}
-	h.manager.CancelConversation(conversationID, user.ID)
+	_, _ = cancelConversationWork(h.manager, h.agent, conversationID, user.ID)
 	_ = h.db.ReleaseZhiziLeaseByConversation(c.Request.Context(), conversationID)
 	deleted, err := h.db.DeleteConversations(
 		c.Request.Context(),
@@ -1331,7 +1553,7 @@ func (h *ChatHandler) DeleteConversation(c *gin.Context) {
 	}
 	h.removeConversationFiles(conversationID)
 	h.removeConversationWorkspace(conversationID)
-	h.manager.CancelConversation(conversationID, user.ID)
+	_, _ = cancelConversationWork(h.manager, h.agent, conversationID, user.ID)
 	c.Status(http.StatusNoContent)
 }
 
@@ -1359,7 +1581,7 @@ func (h *ChatHandler) BatchDeleteConversations(c *gin.Context) {
 			continue
 		}
 		ownedIDs = append(ownedIDs, id)
-		h.manager.CancelConversation(id, user.ID)
+		_, _ = cancelConversationWork(h.manager, h.agent, id, user.ID)
 	}
 	if len(ownedIDs) == 0 {
 		c.JSON(http.StatusOK, gin.H{"deleted": 0})
@@ -1371,7 +1593,7 @@ func (h *ChatHandler) BatchDeleteConversations(c *gin.Context) {
 		return
 	}
 	for _, id := range ownedIDs {
-		h.manager.CancelConversation(id, user.ID)
+		_, _ = cancelConversationWork(h.manager, h.agent, id, user.ID)
 		_ = h.db.ReleaseZhiziLeaseByConversation(c.Request.Context(), id)
 		h.removeConversationFiles(id)
 		h.removeConversationWorkspace(id)
@@ -1483,7 +1705,42 @@ func (h *ChatHandler) runWithOptions(
 	)
 	if err != nil {
 		errorMessage := err.Error()
-		if strings.Contains(strings.ToLower(errorMessage), "llm_gateway") ||
+		if agentpkg.IsLLMContentPolicyError(err) {
+			notice := "上游模型网关拒绝了请求内容（内容安全策略），已自动压缩最后一次工具结果并重试一次仍失败。请更换模型提供方或进一步压缩上下文，任务进度已保留。"
+			_ = h.db.UpdateMessageContent(
+				context.Background(),
+				assistantMessageID,
+				notice,
+				"",
+			)
+			errorMessage = notice
+			taskItem.Publish(task.Event{
+				Type:    "response",
+				Message: notice,
+				Data: map[string]interface{}{
+					"finalized":     false,
+					"stoppedReason": "llm_content_policy_rejected",
+				},
+			})
+		} else if agentpkg.IsLLMQuotaError(err) {
+			notice := "模型网关提示 API Key 余额不足，请检查 Key 余额或切换可用 Key。任务进度已保留，可点击“继续执行”。"
+			_ = h.db.UpdateMessageContent(
+				context.Background(),
+				assistantMessageID,
+				notice,
+				"",
+			)
+			errorMessage = notice
+			taskItem.Publish(task.Event{
+				Type:    "response",
+				Message: notice,
+				Data: map[string]interface{}{
+					"finalized":     false,
+					"stoppedReason": "llm_balance_insufficient",
+				},
+			})
+		} else if agentpkg.IsLLMGatewayError(err) ||
+			strings.Contains(strings.ToLower(errorMessage), "llm_gateway") ||
 			strings.Contains(errorMessage, "模型网关") ||
 			strings.Contains(strings.ToLower(errorMessage), "bad gateway") {
 			notice := "模型网关暂时不可用，自动重试后仍失败。任务进度已保留，可点击“继续执行”。"
@@ -1611,9 +1868,9 @@ func (h *ChatHandler) resolveConversation(
 	}
 	if request.RoleID != nil {
 		roleID := strings.TrimSpace(*request.RoleID)
-		resolved, ok := h.resolveRoleID(ctx, roleID)
+		resolved, ok := h.resolveTaskProfileID(ctx, roleID)
 		if !ok {
-			return nil, fmt.Errorf("角色不存在或未启用")
+			return nil, fmt.Errorf("任务模板不存在或未启用")
 		}
 		conversation.AgentRoleID = resolved
 	}
@@ -1707,6 +1964,21 @@ func (h *ChatHandler) resolveRoleID(ctx context.Context, roleID string) (string,
 	return role.ID, true
 }
 
+func (h *ChatHandler) resolveTaskProfileID(ctx context.Context, roleID string) (string, bool) {
+	roleID = strings.TrimSpace(roleID)
+	if roleID == "" {
+		return "", true
+	}
+	role, err := h.db.GetAgentRole(ctx, roleID)
+	if err != nil || !role.Enabled {
+		return "", false
+	}
+	if _, isSystem := agentpkg.SystemAgentDefinitionForRole(*role); isSystem {
+		return "", false
+	}
+	return role.ID, true
+}
+
 func (h *ChatHandler) applyConversationRole(
 	ctx context.Context,
 	conversation *database.Conversation,
@@ -1716,17 +1988,39 @@ func (h *ChatHandler) applyConversationRole(
 	if roleID == nil {
 		return nil
 	}
-	resolved, ok := h.resolveRoleID(ctx, strings.TrimSpace(*roleID))
+	if currentID := strings.TrimSpace(conversation.AgentRoleID); currentID != "" {
+		if currentRole, err := h.db.GetAgentRole(ctx, currentID); err == nil {
+			if _, isSystem := agentpkg.SystemAgentDefinitionForRole(*currentRole); isSystem {
+				requestedID := strings.TrimSpace(*roleID)
+				if requestedID == "" || requestedID == currentID {
+					return nil
+				}
+				return errInvalidAgentRole
+			}
+		}
+	}
+	resolved, ok := h.resolveTaskProfileID(ctx, strings.TrimSpace(*roleID))
 	if !ok {
 		return errInvalidAgentRole
 	}
 	if conversation.AgentRoleID == resolved {
 		return nil
 	}
+	previousRoleID := conversation.AgentRoleID
 	if err := h.db.SetConversationAgentRole(ctx, conversation.ID, userID, resolved); err != nil {
 		return err
 	}
 	conversation.AgentRoleID = resolved
+	auditCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+	defer cancel()
+	_ = h.db.AddAuditLog(auditCtx, database.AuditLog{
+		UserID:       userID,
+		Action:       "conversation.task_profile.update",
+		ResourceType: "conversation",
+		ResourceID:   conversation.ID,
+		Result:       "success",
+		Detail:       fmt.Sprintf("from=%s to=%s", previousRoleID, resolved),
+	})
 	return nil
 }
 

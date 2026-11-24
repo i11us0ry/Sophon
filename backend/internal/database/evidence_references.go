@@ -171,11 +171,6 @@ func validateEvidenceArtifactReference(
 		return invalidEvidenceReference("artifact 根目录未配置: %s", item)
 	}
 
-	base := filepath.Join(artifactRoot, "data", "conversation_artifacts")
-	resolvedBase, err := filepath.EvalSymlinks(base)
-	if err != nil {
-		return invalidEvidenceReference("artifact 根目录不可用: %s", item)
-	}
 	absolute, err := filepath.Abs(value)
 	if err != nil {
 		return invalidEvidenceReference("证据文件路径不合法: %s", item)
@@ -184,16 +179,30 @@ func validateEvidenceArtifactReference(
 	if err != nil {
 		return invalidEvidenceReference("证据文件不存在: %s", item)
 	}
-	relative, err := filepath.Rel(resolvedBase, resolvedPath)
-	if err != nil ||
-		relative == "." ||
-		relative == ".." ||
-		strings.HasPrefix(relative, ".."+string(os.PathSeparator)) {
-		return invalidEvidenceReference("证据文件不在会话 artifact 目录: %s", item)
+	conversationID := ""
+	for _, base := range []string{
+		filepath.Join(artifactRoot, "data", "conversation_artifacts"),
+		filepath.Join(artifactRoot, "tmp", "workspace", "projects", projectID, "conversations"),
+	} {
+		resolvedBase, resolveErr := filepath.EvalSymlinks(base)
+		if resolveErr != nil {
+			continue
+		}
+		relative, relErr := filepath.Rel(resolvedBase, resolvedPath)
+		if relErr != nil ||
+			relative == "." ||
+			relative == ".." ||
+			strings.HasPrefix(relative, ".."+string(os.PathSeparator)) {
+			continue
+		}
+		parts := strings.Split(filepath.ToSlash(relative), "/")
+		if len(parts) >= 2 && strings.TrimSpace(parts[0]) != "" {
+			conversationID = parts[0]
+			break
+		}
 	}
-	parts := strings.Split(filepath.ToSlash(relative), "/")
-	if len(parts) < 2 || strings.TrimSpace(parts[0]) == "" {
-		return invalidEvidenceReference("证据文件不在会话 artifact 目录: %s", item)
+	if conversationID == "" {
+		return invalidEvidenceReference("证据文件不在允许的会话 artifact 或项目工作区目录: %s", item)
 	}
 	info, err := os.Stat(resolvedPath)
 	if err != nil || info.IsDir() {
@@ -206,7 +215,7 @@ func validateEvidenceArtifactReference(
 		ctx,
 		`SELECT owner_user_id, project_id
 		 FROM conversations WHERE id = ?`,
-		parts[0],
+		conversationID,
 	).Scan(&conversationOwnerID, &conversationProjectID)
 	if err != nil ||
 		conversationOwnerID != userID ||

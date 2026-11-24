@@ -31,7 +31,9 @@ agent:
   context_max_chars: 24000
   context_max_tokens: 0 # 0=按 context_max_chars 估算；>0 时按估算 token 数裁剪历史
   max_iterations: 40 # Agent ReAct 最大迭代轮数；0=不限
+  max_duration_seconds: 0 # 整轮 Agent 最长运行时间；0=不限
   max_turn_tokens: 50000000 # 单轮累计 token 上限；0=不限，最高可配置 100000000
+  max_tool_calls: 0 # 单轮工具调用上限；0=不限
   max_hypotheses: 200 # 项目活跃测试假设上限；0=不限
   subagent_max_concurrency: 2 # Planner/Worker 子 Agent 最大并发数
   subagent_max_tool_calls: 80 # 单个 Planner/Worker 最大工具调用次数
@@ -73,8 +75,6 @@ hitl:
     - exec
     - execute-python-script
     - install-python-package
-    - metasploit
-    - msfvenom
     - impacket
     - netexec
     - hydra

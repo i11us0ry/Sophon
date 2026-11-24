@@ -1,77 +1,31 @@
 import { defineStore } from 'pinia'
 
-import { apiDelete, apiGet, apiPost, apiPut, apiStream, apiUpload } from '../api/client'
+import {
+  apiDelete,
+  apiGet,
+  apiNamedEventStream,
+  apiPost,
+  apiPut,
+  apiStream,
+  apiUpload,
+} from '../api/client'
 import { translate } from '../i18n'
 
-const MESSAGE_WINDOW_SIZE = 80
+const MESSAGE_WINDOW_SIZE = 50
 const MESSAGE_PAGE_SIZE = 50
-const LIVE_STEP_WINDOW_SIZE = 500
+const LIVE_STEP_WINDOW_SIZE = 120
 // The API caps each response at 512 KiB, so keep the default page below that limit.
 const PROCESS_DETAIL_PAGE_SIZE = 100
-const AGENT_MODE_STORAGE_KEY = 'sophon.agentMode'
-const CONVERSATION_AGENT_MODE_STORAGE_KEY = 'sophon.agentModeByConversation'
-const CONVERSATION_AGENT_MODE_LIMIT = 200
 const MESSAGE_CACHE_CONVERSATION_LIMIT = 30
 let activeStreamController: AbortController | null = null
+let activeAgentEventsController: AbortController | null = null
 
 export type AgentMode = 'auto' | 'fast' | 'deep'
-
-function isAgentMode(value: unknown): value is AgentMode {
-  return value === 'auto' || value === 'fast' || value === 'deep'
-}
-
-function normalizeAgentMode(value: unknown): AgentMode {
-  return value === 'fast' || value === 'deep' ? value : 'deep'
-}
 
 function stringList(value: unknown): string[] {
   return Array.isArray(value)
     ? value.map((item) => String(item || '').trim()).filter(Boolean)
     : []
-}
-
-function readStoredAgentMode(): AgentMode {
-  try {
-    const mode = window.localStorage.getItem(AGENT_MODE_STORAGE_KEY)
-    if (mode === 'fast' || mode === 'deep') {
-      return mode
-    }
-    return 'deep'
-  } catch {
-    return 'deep'
-  }
-}
-
-function readConversationAgentModes(): Record<string, AgentMode> {
-  try {
-    const raw = window.localStorage.getItem(CONVERSATION_AGENT_MODE_STORAGE_KEY)
-    if (!raw) {
-      return {}
-    }
-    const parsed: unknown = JSON.parse(raw)
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      return {}
-    }
-    const result: Record<string, AgentMode> = {}
-    for (const [conversationId, mode] of Object.entries(parsed).slice(
-      -CONVERSATION_AGENT_MODE_LIMIT,
-    )) {
-      if (conversationId && isAgentMode(mode)) {
-        result[conversationId] = mode
-      }
-    }
-    return result
-  } catch {
-    return {}
-  }
-}
-
-function persistConversationAgentModes(modes: Record<string, AgentMode>) {
-  try {
-    window.localStorage.setItem(CONVERSATION_AGENT_MODE_STORAGE_KEY, JSON.stringify(modes))
-  } catch {
-    // 本地存储不可用时仍保留当前页面内的会话模式。
-  }
 }
 
 export interface Conversation {
@@ -284,6 +238,12 @@ export interface AgentStep {
   parentAgentId?: string
   intentId?: string
   hypothesisId?: string
+  attempt?: number
+  maxAttempts?: number
+  streamAttempt?: number
+  maxStreamAttempts?: number
+  retryReason?: string
+  recoveryReason?: string
   capabilityMode?: string
   workerFocus?: string
   allowedSkills?: string[]
@@ -296,17 +256,50 @@ export interface AgentStep {
 
 export interface ProcessDetail {
   id: string
+  sequence?: number
   eventType: string
   message: string
   data?: Record<string, unknown>
   messageId?: string
+  sessionId?: string
   createdAt: string
+}
+
+export type AgentSessionRole = 'mainagent' | 'planner' | 'worker' | 'system'
+export type AgentSessionStatus =
+  | 'idle'
+  | 'running'
+  | 'waiting'
+  | 'completed'
+  | 'failed'
+  | 'paused'
+  | 'stopped'
+  | 'blocked'
+  | 'exhausted'
+
+export interface AgentSession {
+  id: string
+  conversationId: string
+  role: AgentSessionRole
+  title: string
+  status: AgentSessionStatus
+  agentId: string
+  agentName: string
+  hypothesisId: string
+  parentSessionId: string
+  activityCount: number
+  createdAt: string
+  updatedAt: string
+  lastActivityAt: string
 }
 
 export interface AgentTraceEntry {
   agentId: string
   agentName: string
   agentKind: string
+  parentAgentId: string
+  intentId: string
+  hypothesisId: string
   workerFocus: string
   allowedSkills: string[]
   task: string
@@ -359,8 +352,7 @@ export const useChatStore = defineStore('chat', {
     rolesLoaded: false,
     selectedProjectId: '',
     selectedRoleId: '',
-    agentMode: readStoredAgentMode() as AgentMode,
-    agentModeByConversation: readConversationAgentModes(),
+    agentMode: 'deep' as AgentMode,
     messages: [] as ChatMessage[],
     messagesByConversation: {} as Record<string, ChatMessage[]>,
     processDetails: [] as ProcessDetail[],
@@ -378,6 +370,20 @@ export const useChatStore = defineStore('chat', {
         agentSummary?: AgentTraceSummary
       }
     >,
+    agentSessions: [] as AgentSession[],
+    agentSessionActivities: {} as Record<string, ProcessDetail[]>,
+    agentSessionMeta: {} as Record<
+      string,
+      {
+        loaded: boolean
+        loading: boolean
+        hasMore: boolean
+        nextBefore: number
+        total: number
+      }
+    >,
+    agentEventsConnected: false,
+    agentEventCursor: 0,
     liveSteps: [] as AgentStep[],
     reasoningText: '',
     liveReasoningByAgent: {} as Record<string, AgentStep>,
@@ -385,6 +391,7 @@ export const useChatStore = defineStore('chat', {
     pendingAttachments: [] as Attachment[],
     uploading: false,
     creatingConversation: false,
+    updatingConversationProject: false,
     campaignLoading: false,
     currentCampaignStatus: null as CampaignStatus | null,
     campaignGroups: [] as CampaignGroup[],
@@ -477,6 +484,23 @@ export const useChatStore = defineStore('chat', {
         // 保留“项目信息未加载”状态，由发送前校验给出明确提示。
       }
     },
+    async refreshSelectedProject() {
+      const projectID = this.selectedProjectId.trim()
+      if (!projectID) {
+        return
+      }
+      try {
+        const project = await apiGet<Project>(`/projects/${projectID}`)
+        const index = this.projects.findIndex((item) => item.id === projectID)
+        if (index >= 0) {
+          this.projects[index] = project
+        } else {
+          this.projects = [...this.projects, project]
+        }
+      } catch {
+        // 保留当前项目快照，发送和项目切换前仍有服务端校验。
+      }
+    },
     cacheMessages(conversationId = this.currentConversationId) {
       const id = conversationId.trim()
       if (!id) {
@@ -529,49 +553,10 @@ export const useChatStore = defineStore('chat', {
       return this.rolesLoaded ? { roleId: this.selectedRoleId } : {}
     },
     agentModeRequestPayload() {
-      return { agentMode: this.agentMode }
+      return { agentMode: 'deep' as AgentMode }
     },
-    rememberAgentMode(conversationId: string, mode: AgentMode) {
-      if (!conversationId) {
-        return
-      }
-      this.agentModeByConversation[conversationId] = normalizeAgentMode(mode)
-      const conversationIds = Object.keys(this.agentModeByConversation)
-      if (conversationIds.length > CONVERSATION_AGENT_MODE_LIMIT) {
-        for (const staleId of conversationIds.slice(
-          0,
-          conversationIds.length - CONVERSATION_AGENT_MODE_LIMIT,
-        )) {
-          delete this.agentModeByConversation[staleId]
-        }
-      }
-      persistConversationAgentModes(this.agentModeByConversation)
-    },
-    setAgentMode(mode: AgentMode) {
-      this.agentMode = normalizeAgentMode(mode)
-      if (this.currentConversationId) {
-        this.rememberAgentMode(this.currentConversationId, this.agentMode)
-        void this.persistConversationAgentMode(this.currentConversationId, this.agentMode)
-      }
-      try {
-        window.localStorage.setItem(AGENT_MODE_STORAGE_KEY, this.agentMode)
-      } catch {
-        // 本地存储不可用时仍保留本次页面会话内的选择。
-      }
-    },
-    async persistConversationAgentMode(conversationId: string, mode: AgentMode) {
-      try {
-        await apiPut(`/conversations/${conversationId}/agent-settings`, {
-          agentMode: mode,
-        })
-      } catch (error) {
-        this.error = error instanceof Error ? error.message : '保存 Agent 模式失败'
-      }
-    },
-    selectRole(roleId: string) {
+    selectTaskProfile(roleId: string) {
       this.selectedRoleId = roleId
-      const role = this.roles.find((item) => item.id === roleId)
-      this.setAgentMode(role?.defaultMode || 'auto')
     },
     async loadOlderConversations() {
       const cursor = this.conversationsNextCursor
@@ -687,10 +672,7 @@ export const useChatStore = defineStore('chat', {
       this.currentConversationId = conversationId
       this.error = ''
       this.selectedRoleId = conversation?.agentRoleId ?? ''
-      const role = this.roles.find((item) => item.id === this.selectedRoleId)
-      this.agentMode =
-        this.agentModeByConversation[conversationId] ??
-        normalizeAgentMode(role?.defaultMode)
+      this.agentMode = 'deep'
       this.selectedProjectId = conversation?.projectId ?? ''
       await this.ensureProjectOption(this.selectedProjectId)
       this.responseText = ''
@@ -706,12 +688,17 @@ export const useChatStore = defineStore('chat', {
       this.messages = (this.messagesByConversation[conversationId] ?? []).slice()
       this.processDetails = []
       this.processDetailMeta = {}
+      this.agentSessions = []
+      this.agentSessionActivities = {}
+      this.agentSessionMeta = {}
       this.messagesHasMore = false
       this.messagesNextCursor = ''
       this.messagesHasNewer = false
       this.messagesNextNewerCursor = ''
       this.messagesNeedsLatestRefresh = false
       await this.loadLatestMessages()
+      await this.loadAgentSessions()
+      this.startAgentEventStream(conversationId)
       await this.loadAttachments()
       await this.loadConversationHITL()
       await this.loadConversationAgentSettings()
@@ -812,15 +799,31 @@ export const useChatStore = defineStore('chat', {
         return
       }
       this.currentConversationId = conversationId
+      try {
+        const orchestration = await apiPost<{ resumed: boolean }>(
+          `/conversations/${conversationId}/orchestration/resume`,
+          {},
+        )
+        if (orchestration.resumed) {
+          await this.selectConversation(conversationId)
+          return
+        }
+      } catch {
+        // Fall through to the normal interrupted-run resume path.
+      }
       await this.runStream(`/conversations/${conversationId}/resume`, {})
       await this.loadResumableRun(conversationId)
     },
     async loadLatestMessages(): Promise<ChatMessage[]> {
       const conversationId = this.currentConversationId
       if (!conversationId) {
+        this.stopAgentEventStream()
         this.messages = []
         this.processDetails = []
         this.processDetailMeta = {}
+        this.agentSessions = []
+        this.agentSessionActivities = {}
+        this.agentSessionMeta = {}
         this.messagesHasMore = false
         this.messagesNextCursor = ''
         this.messagesHasNewer = false
@@ -991,7 +994,11 @@ export const useChatStore = defineStore('chat', {
         loadedStart: 0,
         total: 0,
       }
-      if (meta.loading || (!refresh && meta.loaded && !meta.hasMore)) {
+      if (
+        meta.loading ||
+        (!refresh && meta.loaded && !meta.hasMore) ||
+        (refresh && meta.loaded && totalHint > 0 && meta.total >= totalHint)
+      ) {
         return
       }
       this.processDetailMeta[messageId] = { ...meta, loading: true }
@@ -1014,7 +1021,7 @@ export const useChatStore = defineStore('chat', {
           truncated?: boolean
           agentSummary?: AgentTraceSummary
         }>(
-          `/conversations/${conversationId}/process-details?messageId=${encodeURIComponent(messageId)}&limit=${PROCESS_DETAIL_PAGE_SIZE}&offset=${offset}`,
+          `/conversations/${conversationId}/process-details?messageId=${encodeURIComponent(messageId)}&sessionId=${encodeURIComponent(`main:${conversationId}`)}&limit=${PROCESS_DETAIL_PAGE_SIZE}&offset=${offset}`,
         )
         if (this.currentConversationId !== conversationId) {
           return
@@ -1064,6 +1071,268 @@ export const useChatStore = defineStore('chat', {
           loaded: true,
         }
       }
+    },
+    async loadAgentSessions() {
+      const conversationId = this.currentConversationId
+      if (!conversationId) {
+        this.agentSessions = []
+        return
+      }
+      try {
+        const response = await apiGet<{ items: AgentSession[] }>(
+          `/conversations/${conversationId}/agent-sessions`,
+        )
+        if (this.currentConversationId === conversationId) {
+          this.agentSessions = response.items ?? []
+        }
+      } catch {
+        if (this.currentConversationId === conversationId) {
+          this.agentSessions = []
+        }
+      }
+    },
+    startAgentEventStream(conversationId: string) {
+      this.stopAgentEventStream()
+      const id = conversationId.trim()
+      if (!id) {
+        return
+      }
+      let cursor = 0
+      for (const items of Object.values(this.agentSessionActivities)) {
+        for (const item of items) {
+          cursor = Math.max(cursor, Number(item.sequence || 0))
+        }
+      }
+      this.agentEventCursor = cursor
+      const controller = new AbortController()
+      activeAgentEventsController = controller
+      void (async () => {
+        while (!controller.signal.aborted && this.currentConversationId === id) {
+          try {
+            const after = this.agentEventCursor
+            for await (const event of apiNamedEventStream(
+              `/conversations/${id}/agent-events?after=${after}`,
+              controller.signal,
+            )) {
+              if (this.currentConversationId !== id || controller.signal.aborted) {
+                return
+              }
+              this.agentEventsConnected = true
+              if (event.type === 'snapshot') {
+                const sessions = Array.isArray(event.data.sessions)
+                  ? (event.data.sessions as AgentSession[])
+                  : []
+                this.agentSessions = sessions
+                this.agentEventCursor = Number(event.data.cursor || this.agentEventCursor)
+              } else if (event.type === 'agent_batch') {
+                const sessions = Array.isArray(event.data.sessions)
+                  ? (event.data.sessions as AgentSession[])
+                  : []
+                if (sessions.length) {
+                  this.agentSessions = sessions
+                }
+                const items = Array.isArray(event.data.items)
+                  ? (event.data.items as ProcessDetail[])
+                  : []
+                this.mergeAgentEventDetails(items)
+                this.agentEventCursor = Number(event.data.cursor || this.agentEventCursor)
+              }
+            }
+          } catch (error) {
+            if (controller.signal.aborted || this.currentConversationId !== id) {
+              return
+            }
+          } finally {
+            if (activeAgentEventsController === controller) {
+              this.agentEventsConnected = false
+            }
+          }
+          if (controller.signal.aborted || this.currentConversationId !== id) {
+            return
+          }
+          await new Promise((resolve) => window.setTimeout(resolve, 3000))
+        }
+      })()
+    },
+    stopAgentEventStream() {
+      activeAgentEventsController?.abort()
+      activeAgentEventsController = null
+      this.agentEventsConnected = false
+    },
+    mergeAgentEventDetails(items: ProcessDetail[]) {
+      const bySession = new Map<string, ProcessDetail[]>()
+      for (const item of items) {
+        const sessionId = String(item.sessionId || '').trim()
+        if (!sessionId) {
+          continue
+        }
+        const current = bySession.get(sessionId) ?? []
+        current.push(item)
+        bySession.set(sessionId, current)
+      }
+      for (const [sessionId, incoming] of bySession) {
+        const existing = this.agentSessionActivities[sessionId] ?? []
+        const byID = new Map<string, ProcessDetail>()
+        for (const item of [...existing, ...incoming]) {
+          byID.set(item.id, item)
+        }
+        const merged = [...byID.values()].sort(
+          (left, right) =>
+            Number(left.sequence || 0) - Number(right.sequence || 0) ||
+            left.createdAt.localeCompare(right.createdAt) ||
+            left.id.localeCompare(right.id),
+        )
+        this.agentSessionActivities[sessionId] = merged
+        const meta = this.agentSessionMeta[sessionId] ?? {
+          loaded: true,
+          loading: false,
+          hasMore: true,
+          nextBefore: 0,
+          total: merged.length,
+        }
+        this.agentSessionMeta[sessionId] = {
+          ...meta,
+          loaded: true,
+          total: Math.max(meta.total, merged.length),
+        }
+      }
+    },
+    async loadAgentSessionDetails(sessionId: string, older = false, refresh = false) {
+      const conversationId = this.currentConversationId
+      sessionId = sessionId.trim()
+      if (!conversationId || !sessionId) {
+        return
+      }
+      const meta = this.agentSessionMeta[sessionId] ?? {
+        loaded: false,
+        loading: false,
+        hasMore: true,
+        nextBefore: 0,
+        total: 0,
+      }
+      if (meta.loading || (older && !meta.hasMore) || (!older && !refresh && meta.loaded)) {
+        return
+      }
+      this.agentSessionMeta[sessionId] = { ...meta, loading: true }
+      try {
+        const before = older ? meta.nextBefore : 0
+        const response = await apiGet<{
+          items: ProcessDetail[]
+          total: number
+          hasMore: boolean
+          nextBefore: number
+        }>(
+          `/conversations/${conversationId}/agent-session-details?sessionId=${encodeURIComponent(sessionId)}&before=${before}&limit=200`,
+        )
+        if (this.currentConversationId !== conversationId) {
+          return
+        }
+        const existing = this.agentSessionActivities[sessionId] ?? []
+        const byID = new Map<string, ProcessDetail>()
+        for (const item of [...existing, ...(response.items ?? [])]) {
+          byID.set(item.id, item)
+        }
+        const merged = [...byID.values()].sort(
+          (left, right) =>
+            Number(left.sequence || 0) - Number(right.sequence || 0) ||
+            left.createdAt.localeCompare(right.createdAt) ||
+            left.id.localeCompare(right.id),
+        )
+        this.agentSessionActivities[sessionId] = merged
+        this.agentSessionMeta[sessionId] = {
+          loaded: true,
+          loading: false,
+          hasMore: Boolean(response.hasMore),
+          nextBefore: Number(response.nextBefore || before),
+          total: Number(response.total || merged.length),
+        }
+      } catch {
+        this.agentSessionMeta[sessionId] = {
+          ...meta,
+          loading: false,
+          loaded: true,
+        }
+      }
+    },
+    applyLiveAgentSession(eventType: string, data: Record<string, unknown>) {
+      const id = String(data.sessionId || '').trim()
+      if (!id) {
+        return
+      }
+      const roleValue = String(data.sessionRole || data.agentKind || 'mainagent')
+      const role: AgentSessionRole =
+        roleValue === 'planner'
+          ? 'planner'
+          : roleValue === 'worker' || roleValue === 'subagent'
+            ? 'worker'
+            : roleValue === 'system'
+              ? 'system'
+              : 'mainagent'
+      let status = String(data.status || '') as AgentSessionStatus
+      if (!status) {
+        status =
+          eventType === 'subagent.completed'
+            ? 'completed'
+            : eventType === 'subagent.failed'
+              ? 'failed'
+              : 'running'
+      }
+      const now = new Date().toISOString()
+      const existing = this.agentSessions.find((item) => item.id === id)
+      const countableEvent = [
+        'reasoning',
+        'thinking',
+        'tool_call',
+        'tool_result',
+        'subagent.started',
+        'subagent.completed',
+        'subagent.failed',
+        'finalization',
+        'response',
+      ].includes(eventType)
+      const title =
+        String(data.sessionTitle || data.workerFocus || data.agentName || '').trim() ||
+        (role === 'planner'
+          ? '规划 Planner'
+          : role === 'worker'
+            ? 'Worker'
+            : role === 'system'
+              ? '系统事件'
+              : '主 Agent')
+      if (existing) {
+        existing.status = status
+        existing.title = title
+        if (countableEvent) existing.activityCount += 1
+        existing.lastActivityAt = now
+        existing.updatedAt = now
+      } else {
+        this.agentSessions.push({
+          id,
+          conversationId: this.currentConversationId || '',
+          role,
+          title,
+          status,
+          agentId: String(data.agentId || ''),
+          agentName: String(data.agentName || ''),
+          hypothesisId: String(data.hypothesisId || ''),
+          parentSessionId: String(data.parentSessionId || ''),
+          activityCount: countableEvent ? 1 : 0,
+          createdAt: now,
+          updatedAt: now,
+          lastActivityAt: now,
+        })
+      }
+      const order: Record<AgentSessionRole, number> = {
+        mainagent: 0,
+        planner: 1,
+        system: 2,
+        worker: 3,
+      }
+      this.agentSessions.sort(
+        (left, right) =>
+          order[left.role] - order[right.role] ||
+          right.lastActivityAt.localeCompare(left.lastActivityAt),
+      )
     },
     async loadAttachments() {
       if (!this.currentConversationId) {
@@ -1195,10 +1464,7 @@ export const useChatStore = defineStore('chat', {
         if (this.currentConversationId === conversationId) {
           this.autoContinue = response.autoContinue
           this.assetRestrictionEnabled = response.assetRestrictionEnabled
-          if (isAgentMode(response.agentMode)) {
-            this.agentMode = normalizeAgentMode(response.agentMode)
-            this.rememberAgentMode(conversationId, this.agentMode)
-          }
+          this.agentMode = 'deep'
         }
       } catch {
         // 读取失败时保持默认自动继续，不影响对话主流程
@@ -1284,25 +1550,68 @@ export const useChatStore = defineStore('chat', {
       if (!this.projectAllowsWork(this.selectedProjectId)) {
         return
       }
-      if (this.creatingConversation) {
+      if (this.creatingConversation || this.updatingConversationProject) {
         return
       }
       this.creatingConversation = true
       this.error = ''
       try {
-        const initialAgentMode = this.agentMode
         const conversation = await apiPost<Conversation>('/conversations', {
           title: '新对话',
           projectId: this.selectedProjectId,
           ...this.roleRequestPayload(),
         })
-        this.rememberAgentMode(conversation.id, initialAgentMode)
         this.conversations.unshift(conversation)
         await this.selectConversation(conversation.id)
       } catch (error) {
         this.error = error instanceof Error ? error.message : '创建对话失败'
       } finally {
         this.creatingConversation = false
+      }
+    },
+    async updateCurrentConversationProject(projectId = this.selectedProjectId) {
+      const targetProjectID = projectId.trim()
+      const conversationID = this.currentConversationId
+      if (
+        !conversationID ||
+        !targetProjectID ||
+        this.creatingConversation ||
+        this.updatingConversationProject ||
+        this.streaming
+      ) {
+        return false
+      }
+      const current = this.conversations.find((item) => item.id === conversationID)
+      if (!current || current.projectId === targetProjectID) {
+        this.selectedProjectId = current?.projectId ?? targetProjectID
+        return true
+      }
+      if (this.messages.length > 0 || current.lastUserMessage) {
+        return false
+      }
+      this.updatingConversationProject = true
+      this.error = ''
+      const previousProjectID = current.projectId ?? ''
+      try {
+        const updated = await apiPut<Conversation>(`/conversations/${conversationID}/project`, {
+          projectId: targetProjectID,
+        })
+        const index = this.conversations.findIndex((item) => item.id === conversationID)
+        if (index >= 0) {
+          this.conversations[index] = {
+            ...this.conversations[index],
+            ...updated,
+            lastUserMessage: current.lastUserMessage ?? '',
+          }
+        }
+        this.selectedProjectId = updated.projectId ?? targetProjectID
+        return true
+      } catch (error) {
+        this.selectedProjectId = previousProjectID
+        this.error = error instanceof Error ? error.message : '更新对话项目失败'
+        return false
+      } finally {
+        this.updatingConversationProject = false
       }
     },
     async loadConversationChildren(parentId: string, force = false) {
@@ -1476,6 +1785,7 @@ export const useChatStore = defineStore('chat', {
           if (eventConversationID !== streamConversationID) {
             continue
           }
+          this.applyLiveAgentSession(event.type, data)
           if (event.type === 'conversation') {
             this.taskId = String(data.taskId || '')
           } else if (event.type === 'response_delta') {
@@ -1548,6 +1858,8 @@ export const useChatStore = defineStore('chat', {
               parentAgentId: String(data.parentAgentId || ''),
               intentId: String(data.intentId || ''),
               hypothesisId: String(data.hypothesisId || ''),
+              attempt: Number(data.attempt || 0),
+              maxAttempts: Number(data.maxAttempts || 0),
               capabilityMode: String(data.capabilityMode || ''),
             })
             // 中间思考文本已实时写入回答缓冲，这里移除，避免污染最终回答。
@@ -1574,6 +1886,8 @@ export const useChatStore = defineStore('chat', {
               parentAgentId: String(data.parentAgentId || ''),
               intentId: String(data.intentId || ''),
               hypothesisId: String(data.hypothesisId || ''),
+              attempt: Number(data.attempt || 0),
+              maxAttempts: Number(data.maxAttempts || 0),
               capabilityMode: String(data.capabilityMode || ''),
             })
           } else if (event.type === 'tool_result') {
@@ -1592,6 +1906,8 @@ export const useChatStore = defineStore('chat', {
               parentAgentId: String(data.parentAgentId || ''),
               intentId: String(data.intentId || ''),
               hypothesisId: String(data.hypothesisId || ''),
+              attempt: Number(data.attempt || 0),
+              maxAttempts: Number(data.maxAttempts || 0),
               capabilityMode: String(data.capabilityMode || ''),
             })
           } else if (
@@ -1618,6 +1934,12 @@ export const useChatStore = defineStore('chat', {
               parentAgentId: String(data.parentAgentId || ''),
               intentId: String(data.intentId || ''),
               hypothesisId: String(data.hypothesisId || ''),
+              attempt: Number(data.attempt || 0),
+              maxAttempts: Number(data.maxAttempts || 0),
+              streamAttempt: Number(data.streamAttempt || 0),
+              maxStreamAttempts: Number(data.maxStreamAttempts || 0),
+              retryReason: String(data.retryReason || ''),
+              recoveryReason: String(data.recoveryReason || ''),
               capabilityMode: String(data.capabilityMode || ''),
               workerFocus: String(data.workerFocus || ''),
               allowedSkills: stringList(data.allowedSkills),
@@ -1695,6 +2017,7 @@ export const useChatStore = defineStore('chat', {
           } catch {
             // 刷新失败时保留当前显示
           }
+          await this.loadAgentSessions()
           await this.loadAttachments()
           await this.loadPendingHITL()
           await this.loadResumableRun(streamConversationID)
@@ -1702,7 +2025,7 @@ export const useChatStore = defineStore('chat', {
       }
     },
     async sendMessage(message: string) {
-      if (!message.trim() || this.streaming) {
+      if (!message.trim() || this.streaming || this.updatingConversationProject) {
         return
       }
       const current = this.conversations.find((item) => item.id === this.currentConversationId)

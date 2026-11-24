@@ -1,0 +1,13 @@
+name: hydra
+version: 9.7
+description: Parallel network login cracker built from the pinned upstream source
+tool_definition: hydra.yaml
+build:
+  url: https://codeload.github.com/vanhauser-thc/thc-hydra/tar.gz/6c11ce2dff19ce81630c12b001d821dcd4d1567c
+  sha256: 16c4fe4771519dae3c00aada5f3b4ad192d0c82c95db8fb131bddb028b8875d6
+  archive: tar.gz
+  strip_components: 1
+  recipe: hydra
+  destination: hydra
+  command: hydra
+  command_target: hydra

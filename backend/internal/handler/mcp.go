@@ -14,6 +14,7 @@ import (
 	"sophon/internal/mcpclient"
 	"sophon/internal/middleware"
 	"sophon/internal/policy"
+	"sophon/internal/toolcatalog"
 
 	"github.com/cloudwego/eino/schema"
 	"github.com/gin-gonic/gin"
@@ -24,6 +25,7 @@ type MCPHandler struct {
 	manager  *mcpclient.Manager
 	toolsDir string
 	agent    *agentpkg.Service
+	catalog  *toolcatalog.Catalog
 }
 
 func NewMCPHandler(
@@ -31,8 +33,13 @@ func NewMCPHandler(
 	manager *mcpclient.Manager,
 	toolsDir string,
 	agentService *agentpkg.Service,
+	catalogs ...*toolcatalog.Catalog,
 ) *MCPHandler {
-	return &MCPHandler{db: db, manager: manager, toolsDir: toolsDir, agent: agentService}
+	handler := &MCPHandler{db: db, manager: manager, toolsDir: toolsDir, agent: agentService}
+	if len(catalogs) > 0 {
+		handler.catalog = catalogs[0]
+	}
+	return handler
 }
 
 type mcpServerRequest struct {

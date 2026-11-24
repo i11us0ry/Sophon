@@ -143,6 +143,65 @@ func TestSettingsUpdateSavesMaxHypotheses(t *testing.T) {
 	}
 }
 
+func TestSettingsUpdateSavesUnlimitedWorkerToolCalls(t *testing.T) {
+	path := writeEnvLockTestConfig(t, "agent:\n  max_iterations: 40\n")
+	handler := &SettingsHandler{
+		cfg: config.Config{
+			ConfigPath:                path,
+			AgentMaxIterations:        40,
+			AgentSubagentMaxToolCalls: 80,
+		},
+		configPath: path,
+	}
+	recorder := performSettingsUpdate(t, handler, `{"agent":{"subagentMaxToolCalls":0}}`)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("期望 200，实际 %d: %s", recorder.Code, recorder.Body.String())
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("读取配置失败: %v", err)
+	}
+	if !strings.Contains(string(raw), "subagent_max_tool_calls: 0") {
+		t.Fatalf("Worker 工具调用不限配置未写入: %s", raw)
+	}
+	if handler.cfg.AgentSubagentMaxToolCalls != 0 {
+		t.Fatalf("Worker 工具调用预算未热更新: %d", handler.cfg.AgentSubagentMaxToolCalls)
+	}
+
+	recorder = performSettingsUpdate(t, handler, `{"agent":{"subagentMaxToolCalls":-1}}`)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("负 Worker 预算应返回 400，实际 %d: %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestSettingsUpdateSavesUnlimitedAgentMaxDuration(t *testing.T) {
+	path := writeEnvLockTestConfig(t, "agent:\n  max_iterations: 40\n")
+	handler := &SettingsHandler{
+		cfg: config.Config{
+			ConfigPath:              path,
+			AgentMaxIterations:      40,
+			AgentMaxDurationSeconds: 5400,
+		},
+		configPath: path,
+	}
+	recorder := performSettingsUpdate(t, handler, `{"agent":{"maxDurationSeconds":0}}`)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("期望 200，实际 %d: %s", recorder.Code, recorder.Body.String())
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("读取配置失败: %v", err)
+	}
+	if !strings.Contains(string(raw), "max_duration_seconds: 0") {
+		t.Fatalf("无限制运行时长未写入配置: %s", raw)
+	}
+
+	recorder = performSettingsUpdate(t, handler, `{"agent":{"maxDurationSeconds":-1}}`)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("负运行时长应返回 400，实际 %d: %s", recorder.Code, recorder.Body.String())
+	}
+}
+
 func TestSettingsUpdateSavesAgentConcurrencyAndUpdatesManager(t *testing.T) {
 	path := writeEnvLockTestConfig(t, "agent:\n  max_iterations: 40\n")
 	manager := task.NewManagerWithLimit(5)

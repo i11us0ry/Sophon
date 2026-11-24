@@ -2,6 +2,8 @@ package agent
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -78,6 +80,27 @@ func TestProjectSituationIncludesGoalsIntentsFactsFindings(t *testing.T) {
 	}
 }
 
+func TestProjectSituationReportsAttachmentsWithoutImposingWorkflow(t *testing.T) {
+	service, ctx := openProjectToolService(t, true)
+	if err := service.db.AddAttachment(ctx, database.Attachment{
+		ID:             "attachment-source",
+		ConversationID: "conv-tools",
+		FileName:       "WebSite.zip",
+		MimeType:       "application/zip",
+		StoragePath:    "conv-tools/attachment-source_WebSite.zip",
+		CreatedAt:      time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("创建源码附件失败: %v", err)
+	}
+	situation := service.projectSituationForContext(ctx, "project-tools", "user-1", "conv-tools")
+	if !strings.Contains(situation, "项目已有上传附件") {
+		t.Fatalf("项目无资产但有附件时应报告附件状态：\n%s", situation)
+	}
+	if strings.Contains(situation, "必须先调用 project_insert_assets 登记目标") {
+		t.Fatalf("源码审计模式不应要求先登记网络资产：\n%s", situation)
+	}
+}
+
 func TestProjectSituationTruncatesLongFact(t *testing.T) {
 	service, ctx := openProjectToolService(t, true)
 	longValue := strings.Repeat("数", 500)
@@ -118,7 +141,59 @@ func TestProjectSituationDoesNotReportFalsePentestAuthorization(t *testing.T) {
 	}
 }
 
-func TestProjectSituationExcludesAuditCellsFromCriticalMemory(t *testing.T) {
+func TestProjectSituationListsAuditWorkspaceArtifacts(t *testing.T) {
+	service, ctx := openProjectToolService(t, true)
+	workspace := filepath.Join(t.TempDir(), "tmp", "workspace", "conv-tools")
+	service.cfg.Storage.ArtifactRoot = filepath.Dir(filepath.Dir(filepath.Dir(workspace)))
+	auditOut := filepath.Join(workspace, "audit_out")
+	if err := os.MkdirAll(auditOut, 0o700); err != nil {
+		t.Fatalf("创建审计目录失败: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(auditOut, "Entry.txt"), []byte("bytecode"), 0o600); err != nil {
+		t.Fatalf("写入审计产物失败: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "sink_hits.json"), []byte(`{"hits":[]}`), 0o600); err != nil {
+		t.Fatalf("写入候选索引失败: %v", err)
+	}
+
+	situation := service.projectSituationForContext(ctx, "project-tools", "user-1", "conv-tools")
+	for _, want := range []string{
+		"Java 审计工作台",
+		"audit_out/",
+		"sink_hits.json",
+		"优先复用",
+	} {
+		if !strings.Contains(situation, want) {
+			t.Fatalf("态势包缺少审计工作台信息 %q：\n%s", want, situation)
+		}
+	}
+}
+
+func TestProjectSituationShowsLongRunningIntentAge(t *testing.T) {
+	service, ctx := openProjectToolService(t, true)
+	now := time.Now().UTC()
+	if err := service.db.CreateProjectGraphNode(ctx, database.GraphNode{
+		ID:         "intent-stale",
+		ProjectID:  "project-tools",
+		Kind:       "intent",
+		Title:      "已经否定的文件写入方向",
+		Status:     "open",
+		Confidence: 70,
+		CreatedAt:  now.Add(-3 * time.Hour),
+		UpdatedAt:  now.Add(-3 * time.Hour),
+	}); err != nil {
+		t.Fatalf("创建旧 intent 失败: %v", err)
+	}
+
+	situation := service.projectSituation(ctx, "project-tools", "user-1")
+	if !strings.Contains(situation, "当前意图：[open]") ||
+		!strings.Contains(situation, "已持续") ||
+		!strings.Contains(situation, "小时") {
+		t.Fatalf("态势包应显示长期未收敛 intent 的持续时间：\n%s", situation)
+	}
+}
+
+func TestProjectSituationExcludesAuditCellsFromCriticalContext(t *testing.T) {
 	service, ctx := openProjectToolService(t, true)
 	now := time.Now().UTC()
 	for _, fact := range []database.ProjectFact{
@@ -129,7 +204,7 @@ func TestProjectSituationExcludesAuditCellsFromCriticalMemory(t *testing.T) {
 		},
 		{
 			ID: "fact-audit-cell", ProjectID: "project-tools", Key: "business/audit-cell-test",
-			Summary: "审计矩阵单元不应进入强制记忆", FactType: "constraint",
+			Summary: "审计矩阵单元不应进入关键上下文", FactType: "constraint",
 			MemoryKind: "constraint", Priority: 90, Confidence: 90, CreatedAt: now, UpdatedAt: now,
 		},
 	} {
@@ -138,17 +213,17 @@ func TestProjectSituationExcludesAuditCellsFromCriticalMemory(t *testing.T) {
 		}
 	}
 	situation := service.projectSituation(ctx, "project-tools", "user-1")
-	start := strings.Index(situation, "强制记忆")
+	start := strings.Index(situation, "关键约束记忆")
 	end := strings.Index(situation, "事实索引")
 	if start < 0 || end <= start {
-		t.Fatalf("态势包缺少强制记忆或事实索引：\n%s", situation)
+		t.Fatalf("态势包缺少关键约束记忆或事实索引：\n%s", situation)
 	}
 	critical := situation[start:end]
 	if strings.Contains(critical, "business/audit-cell-test") {
-		t.Fatalf("审计矩阵单元不应进入强制记忆：\n%s", critical)
+		t.Fatalf("审计矩阵单元不应进入关键上下文：\n%s", critical)
 	}
 	if !strings.Contains(critical, "note/critical-control") {
-		t.Fatalf("普通关键事实应进入强制记忆：\n%s", critical)
+		t.Fatalf("普通关键事实应进入关键上下文：\n%s", critical)
 	}
 }
 
@@ -174,8 +249,11 @@ func TestMainAgentInstructionIncludesSituation(t *testing.T) {
 		t.Fatalf("模型消息为空")
 	}
 	system := messages[0].Content
-	if !strings.Contains(system, "项目写回纪律") {
-		t.Fatalf("稳定前缀应包含写回纪律：\n%s", system)
+	if !strings.Contains(system, "项目工具能力") {
+		t.Fatalf("稳定前缀应包含项目工具能力说明：\n%s", system)
+	}
+	if strings.Contains(system, "项目写回纪律（强制）") {
+		t.Fatalf("稳定前缀不应注入固定写回流程：\n%s", system)
 	}
 	state := lastStateMessage(t, messages)
 	for _, want := range []string{
@@ -209,7 +287,7 @@ func TestSubAgentInstructionIncludesSituation(t *testing.T) {
 		"当前项目任务态势包",
 		"事实索引",
 		"漏洞摘要",
-		"项目写回纪律",
+		"项目工具能力",
 	} {
 		if !strings.Contains(instruction, want) {
 			t.Fatalf("子 Agent 提示缺少 %q：\n%s", want, instruction)

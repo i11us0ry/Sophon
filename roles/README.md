@@ -1,69 +1,40 @@
-# 角色配置文件说明
+# Task Profile 配置文件说明
 
-本目录包含所有角色配置文件，每个角色定义了AI的行为模式与可用工具。
+本目录中的 YAML 是可选任务模板，不是 Agent 身份、权限或工具配置。
 
-## 创建新角色
+系统 Agent 的身份、执行模式、工具权限、技能读取权限和授权边界由平台固定逻辑决定。Task Profile 只提供领域方法、关注点和推荐方法包。
 
-创建新角色时，请在 `roles/` 目录下创建 YAML 文件，格式如下：
+## 创建任务模板
 
-**方式1：显式指定工具列表（推荐）**
 ```yaml
-name: 角色名称
-description: 角色描述
-user_prompt: 用户提示词（追加到用户消息前，用于引导AI行为）
+name: 任务模板名称
+description: 任务模板说明
+user_prompt: |
+  适用场景：说明该模板适用的任务类型。
+  方法建议：
+  1. 说明值得优先检查的方向。
+  2. 说明数据流、证据和误判边界。
+  3. 说明没有思路时可按需读取哪些全局方法包。
+  该模板只提供方法参考，不改变系统 Agent 身份、工具权限、执行模式或授权范围。
 icon: "图标（可选）"
 skills:
   - attack-surface-recon
   - pentest-verification
-tools:
-    # 添加你需要的工具...
-    # ⚠️ 重要：建议包含以下核心内置 MCP 工具（漏洞与知识库）
-    - record_vulnerability
-    - list_knowledge_risk_types
-    - search_knowledge_base
 enabled: true
 ```
 
-**方式2：不设置tools字段（使用所有已开启的工具）**
-```yaml
-name: 角色名称
-description: 角色描述
-user_prompt: 用户提示词（追加到用户消息前，用于引导AI行为）
-icon: "图标（可选）"
-skills:
-  - attack-surface-recon
-# 不设置tools字段，将默认使用所有MCP管理中已开启的工具
-enabled: true
-```
+## 字段说明
 
-## ⚠️ 重要提醒：核心内置 MCP 工具
+- `name`: 任务模板名称，必填。
+- `description`: 任务模板说明。
+- `user_prompt`: 方法提示，供 Main Agent 和 Planner 参考，不得写成业务角色身份或权限声明。
+- `icon`: 展示图标。
+- `skills`: 推荐方法包列表，不构成白名单、必读项或权限边界。
+- `enabled`: 是否允许新会话选择该模板。
+- `default_mode`: 仅为旧 YAML 兼容保留，不参与运行模式计算。
 
-**如果设置了 `tools` 字段，请务必在列表中包含以下工具（至少这三项）：**
+## Skill 访问
 
-1. **`record_vulnerability`** - 漏洞管理工具，用于记录发现的漏洞
-2. **`list_knowledge_risk_types`** - 知识库工具，列出可用的风险类型
-3. **`search_knowledge_base`** - 知识库工具，搜索知识库内容
+Skill 是全局方法包。任何会话和 Worker 都可以通过 `read_skill` 按需读取已存在的合法方法包，不受 Task Profile 绑定关系限制。
 
-按需还可加入 WebShell、批量任务等其它内置或外部工具（以 MCP 管理中已启用的为准）。
-
-**Skills（技能包）**：角色可通过 `skills` 字段绑定 `skills_dir` 下的技能包，会话中由内置 **`skill`** 工具按需加载。技能名称须为 `[a-zA-Z0-9_-]`，同名项会自动去重，单个角色最多绑定 50 个技能。
-
-内置角色首次同步时使用 YAML 中的技能绑定；已存在的角色保留用户在角色管理页面修改后的技能绑定。
-
-**注意**：如果不设置 `tools` 字段，系统会默认使用所有 MCP 管理中已开启的工具。为明确控制角色可用工具，建议显式设置 `tools` 字段。
-
-## 角色配置字段说明
-
-- **name**: 角色名称（必填）
-- **description**: 角色描述（必填）
-- **user_prompt**: 用户提示词，会追加到用户消息前，用于引导AI采用特定的测试方法和关注点（可选）
-- **icon**: 角色图标，支持Unicode emoji（可选）
-- **skills**: 技能包名称列表（可选）。技能目录必须位于配置的 `skills_dir` 下，且包含 `SKILL.md`
-- **tools**: 工具列表，指定该角色可用的工具（可选）
-  - **如果不设置 `tools` 字段**：默认会选中**全部MCP管理中已开启的工具**
-  - **如果设置了 `tools` 字段**：只使用列表中指定的工具（建议至少包含上述核心内置工具）
-- **enabled**: 是否启用该角色（必填，true/false）
-
-## 示例
-
-参考本目录下的其他角色文件，如 `渗透测试.yaml`、`Web应用扫描.yaml` 等。
+内置 Task Profile 首次同步时使用 YAML 中的推荐方法包；已存在的模板继续保留用户在 Agent 管理页面修改后的配置。旧版身份型内置 Prompt 会在检测到未修改的默认内容时迁移为方法包。

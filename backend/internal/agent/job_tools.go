@@ -25,6 +25,12 @@ const (
 
 var errToolJobStateChanged = errors.New("Job 状态已变化")
 
+type toolJobHandle struct {
+	cancel         context.CancelFunc
+	conversationID string
+	userID         string
+}
+
 func newJobTools(service *Service) []tool.BaseTool {
 	return []tool.BaseTool{service.jobTool()}
 }
@@ -78,6 +84,12 @@ func (s *Service) runJobStart(ctx context.Context, request jobToolRequest) (stri
 	if conversationID == "" || userID == "" {
 		return "", fmt.Errorf("Job 需要在有效会话上下文中启动")
 	}
+	projectID := strings.TrimSpace(execctx.ProjectID(ctx))
+	if projectID == "" {
+		if conversation, err := s.db.GetConversation(ctx, conversationID, userID); err == nil {
+			projectID = strings.TrimSpace(conversation.ProjectID)
+		}
+	}
 	agentID := "mainagent"
 	if info, ok := execctx.Subagent(ctx); ok && strings.TrimSpace(info.ID) != "" {
 		agentID = strings.TrimSpace(info.ID)
@@ -102,6 +114,7 @@ func (s *Service) runJobStart(ctx context.Context, request jobToolRequest) (stri
 		Steps:          steps,
 		Progress: map[string]interface{}{
 			"startedAt": time.Now().UTC().Format(time.RFC3339),
+			"projectId": projectID,
 		},
 	})
 	if err != nil {
@@ -135,8 +148,13 @@ func (s *Service) runJobCancel(ctx context.Context, request jobToolRequest) (str
 	if err != nil {
 		return "", err
 	}
-	if job.Status == database.ToolJobStatusCompleted {
+	switch job.Status {
+	case database.ToolJobStatusCompleted:
 		return renderToolJob(job, "Job 已完成，无需取消"), nil
+	case database.ToolJobStatusFailed:
+		return renderToolJob(job, "Job 已失败，不再改写为取消；修复问题后可调用 resume"), nil
+	case database.ToolJobStatusCancelled:
+		return renderToolJob(job, "Job 已取消，无需重复取消"), nil
 	}
 	s.cancelRunningToolJob(job.ID)
 	progress := cloneJobProgress(job.Progress)
@@ -284,27 +302,102 @@ func (s *Service) currentToolJob(ctx context.Context, id string) (*database.Tool
 	if job.ConversationID != strings.TrimSpace(execctx.ConversationID(ctx)) {
 		return nil, fmt.Errorf("Job 不属于当前会话")
 	}
+	if storedProjectID := jobProjectID(job); storedProjectID != "" {
+		currentProjectID := strings.TrimSpace(execctx.ProjectID(ctx))
+		if currentProjectID == "" {
+			conversation, err := s.db.GetConversation(
+				ctx,
+				job.ConversationID,
+				strings.TrimSpace(execctx.UserID(ctx)),
+			)
+			if err != nil {
+				return nil, fmt.Errorf("读取 Job 所属项目失败: %w", err)
+			}
+			currentProjectID = strings.TrimSpace(conversation.ProjectID)
+		}
+		if currentProjectID != "" && storedProjectID != currentProjectID {
+			return nil, fmt.Errorf("Job 不属于当前项目")
+		}
+	}
 	return job, nil
 }
 
 func (s *Service) startToolJob(parent context.Context, job database.ToolJob, startStep int) {
-	ctx, cancel := context.WithCancel(parent)
+	// Job 只继承会话、用户、项目和预算等 context value，不绑定单轮 Agent Run 的取消信号。
+	base := context.WithoutCancel(parent)
+	if projectID := jobProjectID(&job); projectID != "" {
+		base = execctx.WithProjectID(base, projectID)
+	}
+	var deadlineCancel context.CancelFunc
+	if deadline, ok := parent.Deadline(); ok {
+		base, deadlineCancel = context.WithTimeout(base, time.Until(deadline))
+	}
+	ctx, cancel := context.WithCancel(base)
+	handleCancel := func() {
+		cancel()
+		if deadlineCancel != nil {
+			deadlineCancel()
+		}
+	}
 	s.jobMu.Lock()
 	if s.jobs == nil {
-		s.jobs = map[string]context.CancelFunc{}
+		s.jobs = map[string]toolJobHandle{}
 	}
-	s.jobs[job.ID] = cancel
+	s.jobs[job.ID] = toolJobHandle{
+		cancel:         handleCancel,
+		conversationID: strings.TrimSpace(job.ConversationID),
+		userID:         strings.TrimSpace(job.UserID),
+	}
 	s.jobMu.Unlock()
 	go s.runToolJob(ctx, job, startStep)
 }
 
+func jobProjectID(job *database.ToolJob) string {
+	if job == nil || job.Progress == nil {
+		return ""
+	}
+	value, ok := job.Progress["projectId"]
+	if !ok || value == nil {
+		return ""
+	}
+	return strings.TrimSpace(fmt.Sprint(value))
+}
+
 func (s *Service) cancelRunningToolJob(id string) {
 	s.jobMu.Lock()
-	cancel := s.jobs[strings.TrimSpace(id)]
+	handle := s.jobs[strings.TrimSpace(id)]
 	s.jobMu.Unlock()
-	if cancel != nil {
+	if handle.cancel != nil {
+		handle.cancel()
+	}
+}
+
+// CancelConversationJobs 显式取消指定用户会话下的后台 Job。
+func (s *Service) CancelConversationJobs(conversationID, userID string) int {
+	if s == nil {
+		return 0
+	}
+	conversationID = strings.TrimSpace(conversationID)
+	userID = strings.TrimSpace(userID)
+	if conversationID == "" || userID == "" {
+		return 0
+	}
+	s.jobMu.Lock()
+	cancels := make([]context.CancelFunc, 0)
+	for id, handle := range s.jobs {
+		if handle.conversationID != conversationID || handle.userID != userID {
+			continue
+		}
+		if handle.cancel != nil {
+			cancels = append(cancels, handle.cancel)
+		}
+		delete(s.jobs, id)
+	}
+	s.jobMu.Unlock()
+	for _, cancel := range cancels {
 		cancel()
 	}
+	return len(cancels)
 }
 
 func (s *Service) runToolJob(ctx context.Context, job database.ToolJob, startStep int) {
@@ -346,6 +439,12 @@ func (s *Service) runToolJob(ctx context.Context, job database.ToolJob, startSte
 			map[string]interface{}{"command": job.Steps[index]},
 			nil,
 		)
+		if header, _, ok := parseToolResult(result); ok {
+			applyJobResultMetadata(progress, header)
+		}
+		if err == nil {
+			result, err = unwrapToolResult(result)
+		}
 		workerBudgetFromContext(ctx).recordCPUUsage(result)
 		if err != nil {
 			if ctx.Err() != nil {
@@ -368,6 +467,36 @@ func (s *Service) runToolJob(ctx context.Context, job database.ToolJob, startSte
 		}
 	}
 	s.finishToolJob(job, len(job.Steps), progress, lastResult, database.ToolJobStatusCompleted, "")
+}
+
+func applyJobResultMetadata(progress map[string]interface{}, header toolResultHeader) {
+	if progress == nil {
+		return
+	}
+	for _, key := range []string{
+		"lastToolStatus",
+		"lastErrorClass",
+		"lastRetryable",
+		"lastEvidenceRefs",
+		"lastArtifacts",
+		"lastNextActions",
+	} {
+		delete(progress, key)
+	}
+	progress["lastToolStatus"] = string(header.Status)
+	progress["lastRetryable"] = header.Retryable
+	if header.ErrorClass != "" {
+		progress["lastErrorClass"] = string(header.ErrorClass)
+	}
+	if len(header.EvidenceRefs) > 0 {
+		progress["lastEvidenceRefs"] = append([]string(nil), header.EvidenceRefs...)
+	}
+	if len(header.Artifacts) > 0 {
+		progress["lastArtifacts"] = append([]string(nil), header.Artifacts...)
+	}
+	if len(header.NextActions) > 0 {
+		progress["lastNextActions"] = append([]string(nil), header.NextActions...)
+	}
 }
 
 func (s *Service) updateToolJobProgress(

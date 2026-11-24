@@ -107,7 +107,7 @@ func (t *observedTool) InvokableRun(
 	if err != nil {
 		event.EventType = observability.TypeToolFailed
 		event.Success = observability.Bool(false)
-		event.ErrorCategory = observability.ErrorCategory(err.Error())
+		event.ErrorCategory = string(classifyToolResultError(ctx, err, err.Error()).Class)
 		event.Detail = truncateEventDetail(err.Error())
 	} else {
 		event.Success = observability.Bool(true)

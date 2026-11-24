@@ -33,7 +33,7 @@ func TestRunCaptureCarriesLoadedSkillAcrossSegments(t *testing.T) {
 	}
 }
 
-func TestFinalizationRequiresGoalsEvidenceAndCompletedTools(t *testing.T) {
+func TestFinalizationOnlyBlocksPendingToolCalls(t *testing.T) {
 	service, ctx := openProjectToolService(t, true)
 	now := time.Now().UTC()
 	if err := service.db.CreateProjectGraphNode(ctx, database.GraphNode{
@@ -62,67 +62,19 @@ func TestFinalizationRequiresGoalsEvidenceAndCompletedTools(t *testing.T) {
 		capture,
 	)
 	if decision.Allowed {
-		t.Fatalf("目标未完成、证据不足且工具未返回时不应允许最终化")
+		t.Fatalf("工具尚未返回时不应允许最终化")
 	}
 	reasons := strings.Join(decision.Reasons, "\n")
-	for _, want := range []string{"尚未返回结果", "目标未完成", "项目资产为空", "证据不足", "没有记录任何测试维度"} {
-		if !strings.Contains(reasons, want) {
-			t.Fatalf("最终化原因缺少 %q：%s", want, reasons)
+	if !strings.Contains(reasons, "尚未返回结果") {
+		t.Fatalf("最终化原因缺少未返回工具提示：%s", reasons)
+	}
+	for _, unexpected := range []string{"目标未完成", "项目资产为空", "没有记录任何测试维度"} {
+		if strings.Contains(reasons, unexpected) {
+			t.Fatalf("普通主 Agent 不应被项目级流程阻塞 %q：%s", unexpected, reasons)
 		}
 	}
 
 	capture.recordToolResult("call-1")
-	executionID := service.db.StartToolExecution(
-		ctx,
-		"conv-tools",
-		"user-1",
-		"exec",
-		map[string]interface{}{"command": "id"},
-	)
-	service.db.FinishToolExecution(ctx, executionID, "uid=0", nil)
-	if _, err := invokeProjectTool(t, service, ctx, "project_update_goal", map[string]interface{}{
-		"goal_id": "goal-final",
-		"status":  "met",
-	}); err != nil {
-		t.Fatalf("更新目标状态失败: %v", err)
-	}
-
-	decision = service.checkFinalization(
-		ctx,
-		"conv-tools",
-		"project-tools",
-		"user-1",
-		runStartedAt,
-		capture,
-	)
-	if decision.Allowed {
-		t.Fatalf("没有登记资产时不应允许最终化: %+v", decision)
-	}
-	if err := service.db.CreateAsset(ctx, database.Asset{
-		ID:          "asset-final",
-		ProjectID:   "project-tools",
-		OwnerUserID: "user-1",
-		Name:        "测试资产",
-		Kind:        "url",
-		Value:       "https://example.com",
-		Status:      "active",
-		Criticality: "medium",
-		CreatedAt:   now,
-		UpdatedAt:   now,
-	}); err != nil {
-		t.Fatalf("创建资产失败: %v", err)
-	}
-	if _, err := invokeProjectTool(t, service, ctx, "project_record_test", map[string]interface{}{
-		"asset_id":   "asset-final",
-		"dimension":  "SQL注入",
-		"status":     "tested_clean",
-		"result":     "参数化查询验证无注入",
-		"evidence":   "布尔对照响应一致",
-		"confidence": 90,
-	}); err != nil {
-		t.Fatalf("记录测试结果失败: %v", err)
-	}
-
 	decision = service.checkFinalization(
 		ctx,
 		"conv-tools",
@@ -132,19 +84,16 @@ func TestFinalizationRequiresGoalsEvidenceAndCompletedTools(t *testing.T) {
 		capture,
 	)
 	if !decision.Allowed {
-		t.Fatalf("目标完成且证据齐全后应允许最终化: %+v", decision)
-	}
-	if !decision.EvidenceVerified {
-		t.Fatalf("应记录已完成工具证据: %+v", decision)
+		t.Fatalf("工具返回后普通主 Agent 应立即允许收尾: %+v", decision)
 	}
 }
 
-func TestFinalizationPauseOnQuestionMode(t *testing.T) {
+func TestFinalizationDoesNotInjectQuestionPause(t *testing.T) {
 	service, ctx := openProjectToolService(t, true)
 	finalText := "如需我继续，可验证下一高价值方向。"
 	runStartedAt := time.Now().UTC().Add(-time.Second)
 
-	autoDecision := service.checkFinalization(
+	decision := service.checkFinalization(
 		execctx.WithAutoContinue(ctx, true),
 		"conv-tools",
 		"project-tools",
@@ -153,11 +102,11 @@ func TestFinalizationPauseOnQuestionMode(t *testing.T) {
 		&runCapture{},
 		finalText,
 	)
-	if autoDecision.PauseOnQuestion {
-		t.Fatalf("自动继续模式不应因提问暂停")
+	if !decision.Allowed || decision.PauseOnQuestion || decision.PendingUserConfirmation {
+		t.Fatalf("主 Agent 的最终措辞不应触发平台暂停: %+v", decision)
 	}
 
-	pauseDecision := service.checkFinalization(
+	decision = service.checkFinalization(
 		execctx.WithAutoContinue(ctx, false),
 		"conv-tools",
 		"project-tools",
@@ -166,8 +115,8 @@ func TestFinalizationPauseOnQuestionMode(t *testing.T) {
 		&runCapture{},
 		finalText,
 	)
-	if !pauseDecision.PauseOnQuestion || !pauseDecision.PendingUserConfirmation {
-		t.Fatalf("遇到问题暂停模式应识别提问并暂停: %+v", pauseDecision)
+	if !decision.Allowed || decision.PauseOnQuestion || decision.PendingUserConfirmation {
+		t.Fatalf("关闭自动继续也不应由最终措辞强制暂停: %+v", decision)
 	}
 }
 
@@ -325,7 +274,7 @@ func TestRunForcesSummaryWhenFinalTextIsEmpty(t *testing.T) {
 		ID:             "msg-final-user",
 		ConversationID: "conv-tools",
 		Role:           "user",
-		Content:        "执行安全测试 example.com",
+		Content:        "生成一份普通测试总结",
 		CreatedAt:      time.Now().UTC(),
 	}); err != nil {
 		t.Fatalf("创建用户消息失败: %v", err)
@@ -353,6 +302,99 @@ func TestRunForcesSummaryWhenFinalTextIsEmpty(t *testing.T) {
 	if !strings.HasPrefix(result, "强制总结已生成。") ||
 		!strings.Contains(result, "已达到 Agent 总迭代预算（1/1），本轮在强制总结后停止。") {
 		t.Fatalf("最终文本异常: %q", result)
+	}
+}
+
+func TestFinalizationPromptsRejectFalseDependencyBlockers(t *testing.T) {
+	rule := "不得把输入格式、路径、资源限制或工具实现错误写成“依赖缺失”"
+	for name, prompt := range map[string]string{
+		"finalization": finalizationSynthesisPrompt,
+		"iterations":   iterationBudgetSynthesisPrompt,
+		"tokens":       tokenBudgetSynthesisPrompt,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if !strings.Contains(prompt, rule) {
+				t.Fatalf("%s 缺少工具错误分类约束", name)
+			}
+		})
+	}
+}
+
+func TestTaskFinalizationRequiresAuditStateChange(t *testing.T) {
+	service, ctx := openProjectToolService(t, true)
+	runStartedAt := time.Now().UTC().Add(-time.Second)
+	if _, err := invokeProjectTool(t, service, ctx, "project_record_audit", map[string]interface{}{
+		"action":              "scope",
+		"included_categories": []string{"文件上传"},
+		"evidence":            "用户要求静态审计源码",
+	}); err != nil {
+		t.Fatalf("记录审计范围失败: %v", err)
+	}
+	capture := &runCapture{}
+	capture.recordToolCall("call-read-only", "exec")
+	capture.recordToolResult("call-read-only")
+	execution := missionExecution{
+		Plan:  missionPlan{Mode: missionModeGeneral},
+		Phase: missionPhaseGeneral,
+	}
+	decision := checkTaskOnlyFinalization(
+		service,
+		ctx,
+		"conv-tools",
+		"project-tools",
+		"user-1",
+		runStartedAt,
+		&finalizationDecision{Allowed: true},
+		capture,
+		execution,
+	)
+	if decision.Allowed ||
+		!strings.Contains(strings.Join(decision.Reasons, "\n"), "没有新增项目事实、审计单元、测试结果或漏洞") {
+		t.Fatalf("仅读取源码不应通过代码审计最终化: %+v", decision)
+	}
+
+	now := time.Now().UTC()
+	if err := service.db.CreateAsset(ctx, database.Asset{
+		ID:          "asset-final-audit",
+		ProjectID:   "project-tools",
+		OwnerUserID: "user-1",
+		Name:        "源码包",
+		Kind:        "host",
+		Value:       "source.zip",
+		Status:      "active",
+		Criticality: "medium",
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}); err != nil {
+		t.Fatalf("创建审计资产失败: %v", err)
+	}
+	if _, err := invokeProjectTool(t, service, ctx, "project_record_audit", map[string]interface{}{
+		"action":           "cell",
+		"asset_id":         "asset-final-audit",
+		"service":          "UploadService",
+		"entry":            "processUpload",
+		"shape":            "file-write",
+		"surface":          "spring-mvc",
+		"coverage_status":  "tested",
+		"conclusion_state": "NOT_EXPLOITABLE",
+		"result":           "物理文件名由 UUID 生成，原始文件名不参与路径",
+		"evidence":         "UploadService.java:120",
+	}); err != nil {
+		t.Fatalf("记录审计结论失败: %v", err)
+	}
+	decision = checkTaskOnlyFinalization(
+		service,
+		ctx,
+		"conv-tools",
+		"project-tools",
+		"user-1",
+		runStartedAt,
+		&finalizationDecision{Allowed: true},
+		capture,
+		execution,
+	)
+	if !decision.Allowed {
+		t.Fatalf("写入实质性审计单元后应允许最终化: %+v", decision)
 	}
 }
 
@@ -401,7 +443,7 @@ func TestFinalizationAllowsOpenOptionalHypotheses(t *testing.T) {
 	}
 }
 
-func TestFinalizationAutoContinuesOnActionableQuestion(t *testing.T) {
+func TestFinalizationDoesNotRequireContinueOnActionableQuestion(t *testing.T) {
 	service, ctx := openProjectToolService(t, true)
 	now := time.Now().UTC()
 	if err := service.db.CreateAsset(ctx, database.Asset{
@@ -432,18 +474,12 @@ func TestFinalizationAutoContinuesOnActionableQuestion(t *testing.T) {
 		capture,
 		"已写回事实和测试结果，未新增漏洞。需要我继续别的方向吗？",
 	)
-	if decision.Allowed {
-		t.Fatalf("仍有可执行目标时不应允许确认式提问结束任务: %+v", decision)
-	}
-	if !decision.PendingUserConfirmation {
-		t.Fatalf("应标记为确认式提问: %+v", decision)
-	}
-	if !strings.Contains(strings.Join(decision.Reasons, "\n"), "禁止询问用户是否继续") {
-		t.Fatalf("最终化原因应要求自动续跑: %+v", decision.Reasons)
+	if !decision.Allowed || decision.PendingUserConfirmation {
+		t.Fatalf("主 Agent 可选择在交付后结束，不应被强制续跑: %+v", decision)
 	}
 }
 
-func TestFinalizationBlocksUnresolvedBlockedIntent(t *testing.T) {
+func TestFinalizationIgnoresUnrelatedBlockedIntent(t *testing.T) {
 	service, ctx := openProjectToolService(t, true)
 	now := time.Now().UTC()
 	if err := service.db.CreateProjectGraphNode(ctx, database.GraphNode{
@@ -466,18 +502,12 @@ func TestFinalizationBlocksUnresolvedBlockedIntent(t *testing.T) {
 		time.Now().UTC().Add(-time.Second),
 		&runCapture{},
 	)
-	if decision.DerivableBlockedIntents != 1 {
-		t.Fatalf("应识别未派生替代路径的 blocked 意图: %+v", decision)
-	}
-	if decision.Allowed {
-		t.Fatalf("存在未处理的 blocked 意图时不应允许最终化: %+v", decision)
-	}
-	if !strings.Contains(strings.Join(decision.Reasons, "\n"), "blocked 意图尚未派生替代路径") {
-		t.Fatalf("最终化原因缺少 blocked 提示: %+v", decision.Reasons)
+	if !decision.Allowed || decision.DerivableBlockedIntents != 0 {
+		t.Fatalf("项目中的其他 blocked 意图不应阻塞当前请求: %+v", decision)
 	}
 }
 
-func TestFinalizationReportsCapacityBlockedIntent(t *testing.T) {
+func TestFinalizationIgnoresCapacityBlockedIntent(t *testing.T) {
 	service, ctx := openProjectToolService(t, true)
 	now := time.Now().UTC()
 	if err := service.db.CreateProjectGraphNode(ctx, database.GraphNode{
@@ -500,11 +530,8 @@ func TestFinalizationReportsCapacityBlockedIntent(t *testing.T) {
 		time.Now().UTC().Add(-time.Second),
 		&runCapture{},
 	)
-	if decision.CapacityBlockedIntents != 1 || decision.Allowed {
-		t.Fatalf("容量受限意图不应被当作已完成: %+v", decision)
-	}
-	if !strings.Contains(strings.Join(decision.Reasons, "\n"), "容量受限") {
-		t.Fatalf("最终化原因缺少容量受限提示: %+v", decision.Reasons)
+	if !decision.Allowed || decision.CapacityBlockedIntents != 0 {
+		t.Fatalf("容量受限意图不应阻塞当前请求: %+v", decision)
 	}
 }
 

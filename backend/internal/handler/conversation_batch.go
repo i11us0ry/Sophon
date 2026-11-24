@@ -1,7 +1,9 @@
 package handler
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"strings"
 
 	"sophon/internal/database"
@@ -9,6 +11,56 @@ import (
 
 	"github.com/gin-gonic/gin"
 )
+
+func (h *ChatHandler) PauseProjectCampaigns(
+	ctx context.Context,
+	projectID string,
+	userID string,
+) (int, error) {
+	items, err := h.db.ListRunningCampaignsByProject(ctx, projectID, userID)
+	if err != nil {
+		return 0, err
+	}
+	paused := 0
+	var pauseErrors []error
+	for _, item := range items {
+		if err := h.campaignScheduler().Pause(item.ID, item.OwnerUserID); err != nil {
+			pauseErrors = append(pauseErrors, fmt.Errorf("暂停 Campaign %s: %w", item.ID, err))
+			continue
+		}
+		if err := h.db.SetCampaignResumeOnStart(ctx, item.ID, item.OwnerUserID, true); err != nil {
+			pauseErrors = append(pauseErrors, fmt.Errorf("标记 Campaign %s 待恢复: %w", item.ID, err))
+			continue
+		}
+		paused++
+	}
+	return paused, errors.Join(pauseErrors...)
+}
+
+func (h *ChatHandler) ResumeProjectCampaigns(
+	ctx context.Context,
+	projectID string,
+	userID string,
+) (int, error) {
+	items, err := h.db.ListCampaignsForAutoResume(ctx)
+	if err != nil {
+		return 0, err
+	}
+	resumed := 0
+	var resumeErrors []error
+	for _, item := range items {
+		campaign, err := h.db.GetCampaign(ctx, item.ID, item.OwnerUserID)
+		if err != nil || campaign.ProjectID != projectID || campaign.OwnerUserID != userID {
+			continue
+		}
+		if err := h.campaignScheduler().Start(item.ID, item.OwnerUserID); err != nil {
+			resumeErrors = append(resumeErrors, fmt.Errorf("恢复 Campaign %s: %w", item.ID, err))
+			continue
+		}
+		resumed++
+	}
+	return resumed, errors.Join(resumeErrors...)
+}
 
 func (h *ChatHandler) StartCampaign(c *gin.Context) {
 	campaign, userID, ok := h.campaignForRequest(c)

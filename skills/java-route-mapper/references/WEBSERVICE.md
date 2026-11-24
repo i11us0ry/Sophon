@@ -2,7 +2,7 @@
 
 ## ⚠️ 核心原则：配置为王
 
-**CXF Web Service 的 URL 路径必须从配置文件中读取，绝对不能根据类名推断！**
+**CXF Web Service 的 URL 路径建议从配置文件中核对，避免只根据类名推断。**
 
 ---
 
@@ -90,7 +90,7 @@ public class UserServiceImpl {
 
 ---
 
-## 3. 解析步骤（强制执行）
+## 3. 解析步骤（可按需调整）
 
 ### 步骤 1: 查找所有配置文件
 
@@ -103,7 +103,7 @@ find . -name "cxf*.xml"
 
 ### 步骤 2: 解析 <jaxws:endpoint> 配置
 
-**必须提取的信息：**
+**建议提取的信息：**
 
 ```xml
 <jaxws:endpoint
@@ -158,7 +158,7 @@ endpoint id: userService
 ```
 类名: UserServiceImpl
 驼峰转换: userService
-这个可能是巧合！必须读取配置确认！
+这个可能是巧合，建议读取配置确认。
 ```
 
 ---
@@ -320,7 +320,7 @@ def parse_cxf_webservice_config(app_context_path):
 
 1. **address 属性是唯一真实来源**
 2. **类名和 endpoint id 可能是误导**
-3. **必须读取配置文件，不能假设**
+3. **建议读取配置文件，避免只凭名称假设**
 4. **记录配置来源便于验证**
 5. **Servlet映射影响完整URL**
 

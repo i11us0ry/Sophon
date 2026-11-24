@@ -97,13 +97,8 @@ func TestReadSkillNotRequireHITL(t *testing.T) {
 	}
 }
 
-func TestReadSkillRestrictedToRoleSkills(t *testing.T) {
+func TestReadSkillAvailableWithoutTaskProfile(t *testing.T) {
 	dir := t.TempDir()
-	db, err := database.Open(filepath.Join(dir, "skills.db"))
-	if err != nil {
-		t.Fatalf("打开数据库失败: %v", err)
-	}
-	defer db.Close()
 	skillsDir := filepath.Join(dir, "skills")
 	for _, name := range []string{"allowed-skill", "unbound-skill", "subset-other"} {
 		skillDir := filepath.Join(skillsDir, name)
@@ -115,91 +110,29 @@ func TestReadSkillRestrictedToRoleSkills(t *testing.T) {
 		}
 	}
 	ctx := context.Background()
-	now := time.Now().UTC()
-	if err := db.UpsertAgentRole(ctx, database.AgentRole{
-		ID: "role-bound", Name: "绑定角色", Description: "测试", Prompt: "测试",
-		DefaultMode: "auto", Skills: []string{"allowed-skill"}, Builtin: true,
-		Enabled: true, CreatedAt: now, UpdatedAt: now,
-	}); err != nil {
-		t.Fatalf("创建角色失败: %v", err)
-	}
-	if err := db.CreateConversation(ctx, database.Conversation{
-		ID: "conv-bound", OwnerUserID: "user-1", Title: "测试",
-		AgentRoleID: "role-bound", CreatedAt: now, UpdatedAt: now,
-	}); err != nil {
-		t.Fatalf("创建对话失败: %v", err)
-	}
-	service := &Service{db: db, cfg: config.Config{SkillsDir: skillsDir}}
+	service := &Service{cfg: config.Config{SkillsDir: skillsDir}}
 	reader := newSkillReaderTool(service).(tool.InvokableTool)
-	roleCtx := execctx.WithConversationID(ctx, "conv-bound")
-	roleCtx = execctx.WithUserID(roleCtx, "user-1")
-	if _, err := reader.InvokableRun(roleCtx, `{"name":"allowed-skill"}`); err != nil {
-		t.Fatalf("应允许读取角色绑定技能: %v", err)
+	if _, err := reader.InvokableRun(ctx, `{"name":"unbound-skill"}`); err != nil {
+		t.Fatalf("无 Task Profile 时应允许按需读取方法包: %v", err)
 	}
-	if _, err := reader.InvokableRun(roleCtx, `{"name":"unbound-skill"}`); err == nil {
-		t.Fatalf("应拒绝读取角色未绑定技能")
-	}
-	if _, err := reader.InvokableRun(ctx, `{"name":"allowed-skill"}`); err == nil {
-		t.Fatalf("缺少角色会话上下文时应拒绝读取技能")
-	}
-
-	if err := db.UpsertAgentRole(ctx, database.AgentRole{
-		ID: "role-subset", Name: "Worker 技能子集", Description: "测试", Prompt: "测试",
-		DefaultMode: "auto", Skills: []string{"allowed-skill", "subset-other"}, Builtin: true,
-		Enabled: true, CreatedAt: now, UpdatedAt: now,
-	}); err != nil {
-		t.Fatalf("创建 Worker 技能子集角色失败: %v", err)
-	}
-	if err := db.CreateConversation(ctx, database.Conversation{
-		ID: "conv-subset", OwnerUserID: "user-1", Title: "测试",
-		AgentRoleID: "role-subset", CreatedAt: now, UpdatedAt: now,
-	}); err != nil {
-		t.Fatalf("创建 Worker 技能子集对话失败: %v", err)
-	}
-	workerCtx := execctx.WithConversationID(ctx, "conv-subset")
+	workerCtx := execctx.WithConversationID(ctx, "conv-worker")
 	workerCtx = execctx.WithUserID(workerCtx, "user-1")
 	workerCtx = execctx.WithSubagent(workerCtx, execctx.SubagentInfo{
 		ID: "worker-1", Kind: "worker", Mode: subagentModeReadOnly, Depth: 1,
 		WorkerFocus: "路由鉴权", AllowedSkills: []string{"allowed-skill"},
 	})
 	if _, err := reader.InvokableRun(workerCtx, `{"name":"allowed-skill"}`); err != nil {
-		t.Fatalf("应允许 Worker 读取本次分配技能: %v", err)
+		t.Fatalf("应允许 Worker 读取推荐方法包: %v", err)
 	}
-	if _, err := reader.InvokableRun(workerCtx, `{"name":"subset-other"}`); err == nil {
-		t.Fatalf("应拒绝读取角色绑定但未分配给 Worker 的技能")
+	if _, err := reader.InvokableRun(workerCtx, `{"name":"subset-other"}`); err != nil {
+		t.Fatalf("推荐列表不应成为 Worker 读取白名单: %v", err)
 	}
-
-	for _, test := range []struct {
-		id      string
-		enabled bool
-		skills  []string
-	}{
-		{id: "role-no-skills", enabled: true, skills: []string{}},
-		{id: "role-disabled", enabled: false, skills: []string{"allowed-skill"}},
-	} {
-		if err := db.UpsertAgentRole(ctx, database.AgentRole{
-			ID: test.id, Name: test.id, Description: "测试", Prompt: "测试",
-			DefaultMode: "auto", Skills: test.skills, Builtin: true,
-			Enabled: test.enabled, CreatedAt: now, UpdatedAt: now,
-		}); err != nil {
-			t.Fatalf("创建角色 %s 失败: %v", test.id, err)
-		}
-		conversationID := "conv-" + test.id
-		if err := db.CreateConversation(ctx, database.Conversation{
-			ID: conversationID, OwnerUserID: "user-1", Title: "测试",
-			AgentRoleID: test.id, CreatedAt: now, UpdatedAt: now,
-		}); err != nil {
-			t.Fatalf("创建角色 %s 的对话失败: %v", test.id, err)
-		}
-		testCtx := execctx.WithConversationID(ctx, conversationID)
-		testCtx = execctx.WithUserID(testCtx, "user-1")
-		if _, err := reader.InvokableRun(testCtx, `{"name":"allowed-skill"}`); err == nil {
-			t.Fatalf("角色 %s 不应读取未授权技能", test.id)
-		}
+	if _, err := reader.InvokableRun(ctx, `{"name":"missing-skill"}`); err == nil {
+		t.Fatal("不存在的方法包应返回错误")
 	}
 }
 
-func TestDelegatedRoleBriefIncludesFullPrompt(t *testing.T) {
+func TestTaskProfileBriefIncludesMethodPrompt(t *testing.T) {
 	ctx := context.Background()
 	db, err := database.Open(filepath.Join(t.TempDir(), "role-brief.db"))
 	if err != nil {
@@ -207,9 +140,9 @@ func TestDelegatedRoleBriefIncludesFullPrompt(t *testing.T) {
 	}
 	defer db.Close()
 	now := time.Now().UTC()
-	prompt := "只允许静态分析，禁止联网和执行项目代码。"
+	prompt := "先建立路由与参数映射，再追踪危险 Sink。"
 	if err := db.UpsertAgentRole(ctx, database.AgentRole{
-		ID: "role-brief", Name: "代码审计", Description: "静态审计",
+		ID: "role-brief", Name: "代码审计方法", Description: "审计方法",
 		Prompt: prompt, DefaultMode: "auto", Skills: []string{},
 		Builtin: true, Enabled: true, CreatedAt: now, UpdatedAt: now,
 	}); err != nil {
@@ -223,13 +156,15 @@ func TestDelegatedRoleBriefIncludesFullPrompt(t *testing.T) {
 	}
 	roleCtx := execctx.WithConversationID(ctx, "conv-brief")
 	roleCtx = execctx.WithUserID(roleCtx, "user-1")
-	brief := (&Service{db: db}).delegatedRoleBrief(roleCtx)
-	if !strings.Contains(brief, prompt) || !strings.Contains(brief, "本次 Worker 可用技能：无") {
-		t.Fatalf("子 Agent 角色简报缺少完整约束: %q", brief)
+	brief := (&Service{db: db}).taskProfileBrief(roleCtx)
+	if !strings.Contains(brief, prompt) ||
+		!strings.Contains(brief, "不改变系统 Agent 身份") ||
+		strings.Contains(brief, "当前业务角色") {
+		t.Fatalf("Task Profile 简报语义错误: %q", brief)
 	}
 }
 
-func TestRoleInstructionInjectsBlockScalarSkillSummary(t *testing.T) {
+func TestTaskProfileInstructionInjectsBlockScalarSkillSummary(t *testing.T) {
 	dir := t.TempDir()
 	db, err := database.Open(filepath.Join(dir, "test.db"))
 	if err != nil {
@@ -264,7 +199,7 @@ func TestRoleInstructionInjectsBlockScalarSkillSummary(t *testing.T) {
 	}
 
 	service := &Service{db: db, cfg: config.Config{SkillsDir: skillsDir}}
-	instruction := service.roleInstruction(ctx, "role-skillfix")
+	instruction := service.taskProfileInstruction(ctx, "role-skillfix")
 	if !strings.Contains(instruction, "第一行说明 第二行说明") {
 		t.Fatalf("角色提示词未注入块标量技能描述: %q", instruction)
 	}
@@ -274,12 +209,9 @@ func TestRoleInstructionInjectsBlockScalarSkillSummary(t *testing.T) {
 	if !strings.Contains(instruction, readSkillToolName) {
 		t.Fatalf("角色提示词未提示 read_skill 工具: %q", instruction)
 	}
-	if !strings.Contains(instruction, "禁止通过 exec、cat 或技能目录文件路径读取") {
-		t.Fatalf("角色提示词未禁止通过文件路径读取技能: %q", instruction)
-	}
-	for _, want := range []string{"仅用于补充思路", "没有成果", "漏洞覆盖上限"} {
+	for _, want := range []string{"不是白名单", "没有成果", "漏洞覆盖上限", "不改变系统 Agent 身份"} {
 		if !strings.Contains(instruction, want) {
-			t.Fatalf("角色提示词缺少技能兜底语义 %q: %q", want, instruction)
+			t.Fatalf("任务模板缺少方法包语义 %q: %q", want, instruction)
 		}
 	}
 }

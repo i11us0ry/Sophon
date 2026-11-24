@@ -68,6 +68,57 @@ func TestSetConversationTitleIfDefault(t *testing.T) {
 	}
 }
 
+func TestUpdateConversationProjectIfEmpty(t *testing.T) {
+	db := openConversationTestDB(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	for _, projectID := range []string{"project-a", "project-b"} {
+		if err := db.CreateProject(ctx, Project{
+			ID:          projectID,
+			OwnerUserID: "user-1",
+			Name:        projectID,
+			Status:      "active",
+			CreatedAt:   now,
+			UpdatedAt:   now,
+		}); err != nil {
+			t.Fatalf("创建项目失败: %v", err)
+		}
+	}
+	if err := db.CreateConversation(ctx, Conversation{
+		ID:          "conv-project-switch",
+		OwnerUserID: "user-1",
+		ProjectID:   "project-a",
+		AssetID:     "old-asset",
+		Title:       "新对话",
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}); err != nil {
+		t.Fatalf("创建对话失败: %v", err)
+	}
+	updated, err := db.UpdateConversationProjectIfEmpty(
+		ctx,
+		"conv-project-switch",
+		"user-1",
+		"project-b",
+	)
+	if err != nil {
+		t.Fatalf("空对话改绑项目失败: %v", err)
+	}
+	if updated.ProjectID != "project-b" || updated.AssetID != "" {
+		t.Fatalf("空对话项目或资产未正确更新: %+v", updated)
+	}
+
+	addTestMessage(t, db, "msg-project-switch", "conv-project-switch", "user", "hello")
+	if _, err := db.UpdateConversationProjectIfEmpty(
+		ctx,
+		"conv-project-switch",
+		"user-1",
+		"project-a",
+	); !errors.Is(err, ErrConversationNotEmpty) {
+		t.Fatalf("已有消息的对话不应允许改绑项目: %v", err)
+	}
+}
+
 func TestResetAssistantMessageClearsContentAndDetails(t *testing.T) {
 	db := openConversationTestDB(t)
 	ctx := context.Background()

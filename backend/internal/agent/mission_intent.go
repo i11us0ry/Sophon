@@ -62,26 +62,6 @@ var (
 	missionAppArtifactPattern     = regexp.MustCompile(`(?i)(/[A-Za-z0-9._~@+/-]+\.(?:apk|ipa|app))\b`)
 	missionVulnerabilityIDPattern = regexp.MustCompile(`(?i)\b(?:vul|vulnerability|finding)[-_][a-z0-9-]{3,}\b|(?:\b[a-f0-9]{16,64}\b)`)
 	missionWildcardIPv4Pattern    = regexp.MustCompile(`^(\d{1,3})\.(\d{1,3})\.\*\.\*$`)
-	missionDeniedPathPatterns     = []*regexp.Regexp{
-		regexp.MustCompile(`^/opt/sophon/config\.yml$`),
-		regexp.MustCompile(`^/opt/sophon/config\.yml\.bak\.[^/]+$`),
-		regexp.MustCompile(`^/opt/sophon/\.env$`),
-		regexp.MustCompile(`^/opt/sophon/deploy/\.env[^/]*$`),
-		regexp.MustCompile(`^/opt/sophon/data/\.sophon-job-key$`),
-		regexp.MustCompile(`^/opt/sophon/data/sophon\.db[^/]*$`),
-		regexp.MustCompile(`^/opt/sophon/data/observability(?:/.*)?$`),
-		regexp.MustCompile(`^/opt/sophon/backend(?:/.*)?$`),
-		regexp.MustCompile(`^/opt/sophon/deploy(?:/.*)?$`),
-		regexp.MustCompile(`^/opt/sophon/roles(?:/.*)?$`),
-		regexp.MustCompile(`^/opt/sophon/roles\.bak\.[^/]+(?:/.*)?$`),
-		regexp.MustCompile(`^/opt/sophon/skills(?:/.*)?$`),
-		regexp.MustCompile(`^/opt/sophon/skills\.bak\.[^/]+(?:/.*)?$`),
-		regexp.MustCompile(`^/opt/sophon/tools(?:/.*)?$`),
-		regexp.MustCompile(`^/opt/sophon/tools\.bak\.[^/]+(?:/.*)?$`),
-		regexp.MustCompile(`^/opt/sophon/scripts(?:/.*)?$`),
-		regexp.MustCompile(`^/opt/sophon/thirdTools(?:/.*)?$`),
-		regexp.MustCompile(`^/opt/sophon/mcp-servers(?:/.*)?$`),
-	}
 )
 
 type missionPlan struct {
@@ -107,6 +87,7 @@ type missionPlan struct {
 	ProjectScopeQuote  string   `json:"project_scope_quote,omitempty"`
 	ProjectScope       bool     `json:"project_scope,omitempty"`
 	WriteTools         []string `json:"write_tools,omitempty"`
+	Coordinated        bool     `json:"coordinated,omitempty"`
 	Confidence         float64  `json:"confidence"`
 	Reason             string   `json:"reason,omitempty"`
 	Source             string   `json:"source,omitempty"`
@@ -419,6 +400,16 @@ func (s *Service) resolveMissionPlan(
 		if plan.Mode == missionModeClarify {
 			return plan
 		}
+		if plan.Mode == missionModeAgent {
+			plan = s.coordinateMainAgentPlan(
+				ctx,
+				userID,
+				project.ID,
+				conversation.ID,
+				plan,
+				plan.Objective+"\n"+resumeMessage,
+			)
+		}
 		if plan.Mode != missionModeClarify {
 			plan.Source = "resume"
 			return plan
@@ -429,6 +420,7 @@ func (s *Service) resolveMissionPlan(
 			Mode:         missionModePentest,
 			Tasks:        []string{missionModePentest},
 			ProjectScope: true,
+			Coordinated:  true,
 			Confidence:   100,
 			Reason:       "批量任务由 Campaign 显式调度",
 			Source:       "campaign",
@@ -462,7 +454,172 @@ func (s *Service) resolveMissionPlan(
 		return plan
 	}
 	message = s.missionMessageWithAttachments(ctx, conversationID, message)
-	return directMainAgentPlan(project, conversation, assets, message)
+	return s.coordinatedDirectMainAgentPlan(
+		ctx,
+		userID,
+		project.ID,
+		project,
+		conversation,
+		assets,
+		message,
+	)
+}
+
+func (s *Service) coordinatedDirectMainAgentPlan(
+	ctx context.Context,
+	userID string,
+	projectID string,
+	project database.Project,
+	conversation database.Conversation,
+	assets []database.Asset,
+	message string,
+) missionPlan {
+	plan := directMainAgentPlan(project, conversation, assets, message)
+	return s.coordinateMainAgentPlan(
+		ctx,
+		userID,
+		projectID,
+		conversation.ID,
+		plan,
+		message,
+	)
+}
+
+func (s *Service) coordinateMainAgentPlan(
+	ctx context.Context,
+	_ string,
+	projectID string,
+	conversationID string,
+	plan missionPlan,
+	_ string,
+) missionPlan {
+	if plan.Mode != missionModeAgent {
+		return plan
+	}
+	coordinatedRuntime := false
+	if s != nil {
+		if handle := s.orchestrationFor(conversationID); handle != nil {
+			status, _ := handle.snapshot()["status"].(string)
+			coordinatedRuntime = status == database.AgentOrchestrationRunning ||
+				status == database.AgentOrchestrationPaused
+		}
+		if !coordinatedRuntime && s.db != nil {
+			if records, err := s.db.ListRecoverableAgentOrchestrations(ctx); err == nil {
+				for _, record := range records {
+					if record.ConversationID == conversationID &&
+						record.ProjectID == projectID &&
+						(record.Status == database.AgentOrchestrationRunning ||
+							record.Status == database.AgentOrchestrationPaused) {
+						coordinatedRuntime = true
+						break
+					}
+				}
+			}
+		}
+		if !coordinatedRuntime && s.db != nil {
+			if active, err := s.db.CountActiveProjectHypothesesForConversation(
+				ctx,
+				projectID,
+				conversationID,
+			); err == nil && active > 0 {
+				coordinatedRuntime = true
+			}
+		}
+	}
+	if len(normalizeMissionTargets(plan.PentestTargets)) == 0 && !coordinatedRuntime {
+		return plan
+	}
+	plan.Coordinated = true
+	reason := "目标任务预测比较复杂时启用 Planner/Worker 协调"
+	if strings.TrimSpace(plan.Reason) == "" {
+		plan.Reason = reason
+	} else {
+		plan.Reason = strings.TrimSpace(plan.Reason) + "；" + reason
+	}
+	return plan
+}
+
+func (s *Service) projectSourceInputs(
+	ctx context.Context,
+	userID string,
+	projectID string,
+	conversationID string,
+) []string {
+	roots, _ := s.projectSourceRoots(ctx, projectID, userID)
+	if len(roots) > 0 {
+		return roots
+	}
+	if s == nil || s.db == nil {
+		return nil
+	}
+	root := strings.TrimSpace(s.configSnapshot().Storage.ArtifactRoot)
+	if root == "" {
+		return nil
+	}
+	conversations, err := s.db.ListProjectConversations(ctx, projectID, userID)
+	if err != nil {
+		return nil
+	}
+	sort.SliceStable(conversations, func(i, j int) bool {
+		return conversations[i].ID == conversationID && conversations[j].ID != conversationID
+	})
+	const maxScannedEntries = 5000
+	scanned := 0
+	for _, conversation := range conversations {
+		paths, pathErr := s.agentWorkspacePathsFor(projectID, conversation.ID)
+		if pathErr != nil {
+			continue
+		}
+		bases := []string{filepath.Join(root, "chat_uploads", conversation.ID)}
+		bases = append(bases, paths.conversationDirs()...)
+		for _, base := range bases {
+			if info, statErr := os.Stat(base); statErr != nil || !info.IsDir() {
+				continue
+			}
+			found := ""
+			walkErr := filepath.WalkDir(base, func(path string, entry os.DirEntry, walkErr error) error {
+				if walkErr != nil || entry == nil {
+					return nil
+				}
+				if entry.Type()&os.ModeSymlink != 0 {
+					if entry.IsDir() {
+						return filepath.SkipDir
+					}
+					return nil
+				}
+				if entry.IsDir() {
+					return nil
+				}
+				scanned++
+				if scanned > maxScannedEntries {
+					return filepath.SkipAll
+				}
+				if isLikelySourceFile(path) {
+					found = filepath.Dir(path)
+					return filepath.SkipAll
+				}
+				return nil
+			})
+			if walkErr != nil && walkErr != filepath.SkipAll {
+				continue
+			}
+			if found != "" {
+				return []string{found}
+			}
+		}
+	}
+	return nil
+}
+
+func isLikelySourceFile(path string) bool {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".go", ".js", ".ts", ".tsx", ".jsx", ".java", ".py", ".rb", ".php",
+		".c", ".h", ".cc", ".cpp", ".hpp", ".cs", ".rs", ".swift", ".kt", ".kts",
+		".scala", ".sh", ".sql", ".html", ".htm", ".aspx", ".ashx", ".asmx", ".sln", ".csproj":
+		return true
+	default:
+		return false
+	}
 }
 
 func directMainAgentPlan(
@@ -639,7 +796,7 @@ func (s *Service) manualRetestRoleMissionPlan(
 		MaxToolCalls:       boundedFindingMaxToolCalls,
 		Bounded:            true,
 		Confidence:         100,
-		Reason:             "当前角色为漏洞复测且消息绑定了当前项目中的有效 finding ID",
+		Reason:             "系统 Agent 为漏洞复测且消息绑定了当前项目中的有效 finding ID",
 		Source:             "retest_role",
 	}, true
 }
@@ -956,6 +1113,16 @@ func normalizeProjectWriteTools(values []string) []string {
 func isExtendedMissionMode(mode string) bool {
 	switch mode {
 	case missionModeCodeAudit, missionModeCodeValidate, missionModeRetest, missionModeAppValidation:
+		return true
+	default:
+		return false
+	}
+}
+
+func missionModeUsesCoordinator(mode string) bool {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case missionModeCodeAudit, missionModeCodeValidate, missionModePentest,
+		missionModeAppValidation:
 		return true
 	default:
 		return false
@@ -1327,184 +1494,6 @@ func (s *Service) validateMissionVulnerabilityIDs(
 		return clarifyMissionPlan("漏洞复测需要明确且属于当前项目的漏洞 ID")
 	}
 	return plan
-}
-
-func (s *Service) validateMissionInputPaths(ctx context.Context, conversationID string, plan missionPlan) missionPlan {
-	if s == nil {
-		return plan
-	}
-	root := strings.TrimSpace(s.configSnapshot().Storage.ArtifactRoot)
-	if root == "" {
-		if len(plan.SourceRoots) > 0 || len(plan.AppArtifacts) > 0 {
-			return clarifyMissionPlan("当前存储根目录未配置，无法校验源码或 App 路径")
-		}
-		return plan
-	}
-	root, err := filepath.Abs(root)
-	if err != nil {
-		return clarifyMissionPlan("无法解析存储根目录")
-	}
-	workspace := filepath.Join(root, "tmp", "workspace", strings.TrimSpace(conversationID))
-	uploads := filepath.Join(root, "chat_uploads")
-	attachmentPaths := map[string]bool{}
-	if s.db != nil {
-		if items, err := s.db.ListAttachments(ctx, conversationID); err == nil {
-			for _, item := range items {
-				attachmentPaths[filepath.Clean(filepath.Join(uploads, item.StoragePath))] = true
-			}
-		}
-	}
-	within := func(base string, absolute string) bool {
-		if resolved, err := filepath.EvalSymlinks(base); err == nil {
-			base = resolved
-		}
-		if resolved, err := filepath.EvalSymlinks(absolute); err == nil {
-			absolute = resolved
-		}
-		rel, err := filepath.Rel(base, absolute)
-		return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))
-	}
-	validate := func(raw string, wantDir bool, allowedRoots []string) (string, error) {
-		path := strings.TrimSpace(raw)
-		if path == "" {
-			return "", fmt.Errorf("路径为空")
-		}
-		if !filepath.IsAbs(path) {
-			candidates := []string{
-				filepath.Join(workspace, path),
-				filepath.Join(uploads, path),
-			}
-			path = candidates[0]
-			for _, candidate := range candidates {
-				if _, statErr := os.Stat(candidate); statErr == nil {
-					path = candidate
-					break
-				}
-			}
-		}
-		absolute, err := filepath.Abs(path)
-		if err != nil {
-			return "", err
-		}
-		if resolved, resolveErr := filepath.EvalSymlinks(absolute); resolveErr == nil {
-			absolute = resolved
-		}
-		allowed := false
-		for _, allowedRoot := range allowedRoots {
-			if within(allowedRoot, absolute) {
-				allowed = true
-				break
-			}
-		}
-		if !allowed {
-			return "", fmt.Errorf("路径不在当前会话工作区或上传目录")
-		}
-		info, err := os.Stat(absolute)
-		if err != nil {
-			return "", err
-		}
-		if wantDir && !info.IsDir() && !missionSourceArchiveOrFile(absolute) {
-			return "", fmt.Errorf("源码路径不是目录或源码文件")
-		}
-		if !wantDir && !info.Mode().IsRegular() {
-			return "", fmt.Errorf("App 包路径不是文件")
-		}
-		if !info.IsDir() && within(uploads, absolute) && !attachmentPaths[absolute] {
-			if !s.missionProjectUploadAllowed(ctx, conversationID, uploads, absolute) {
-				return "", fmt.Errorf("文件不属于当前项目上传范围")
-			}
-		}
-		return absolute, nil
-	}
-	resolvedSources := make([]string, 0, len(plan.SourceRoots))
-	var sourceErr error
-	for _, sourceRoot := range plan.SourceRoots {
-		resolved, err := validate(sourceRoot, true, []string{workspace, uploads})
-		if err != nil {
-			if sourceErr == nil {
-				sourceErr = err
-			}
-			continue
-		}
-		resolvedSources = append(resolvedSources, resolved)
-	}
-	if len(plan.SourceRoots) > 0 && len(resolvedSources) == 0 {
-		return clarifyMissionPlan("源码路径不可用：" + sourceErr.Error())
-	}
-	plan.SourceRoots = normalizeUniqueStrings(resolvedSources)
-	resolvedArtifacts := make([]string, 0, len(plan.AppArtifacts))
-	var artifactErr error
-	for _, appArtifact := range plan.AppArtifacts {
-		resolved, err := validate(appArtifact, false, []string{workspace, uploads})
-		if err != nil {
-			if artifactErr == nil {
-				artifactErr = err
-			}
-			continue
-		}
-		resolvedArtifacts = append(resolvedArtifacts, resolved)
-	}
-	if len(plan.AppArtifacts) > 0 && len(resolvedArtifacts) == 0 {
-		return clarifyMissionPlan("App 包路径不可用：" + artifactErr.Error())
-	}
-	plan.AppArtifacts = normalizeUniqueStrings(resolvedArtifacts)
-	return plan
-}
-
-func (s *Service) missionProjectUploadAllowed(
-	ctx context.Context,
-	currentConversationID string,
-	uploads string,
-	absolute string,
-) bool {
-	if s == nil || s.db == nil || currentConversationID == "" {
-		return false
-	}
-	if resolved, err := filepath.EvalSymlinks(uploads); err == nil {
-		uploads = resolved
-	}
-	if resolved, err := filepath.EvalSymlinks(absolute); err == nil {
-		absolute = resolved
-	}
-	relative, err := filepath.Rel(uploads, absolute)
-	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(os.PathSeparator)) {
-		return false
-	}
-	parts := strings.Split(filepath.ToSlash(relative), "/")
-	if len(parts) < 2 {
-		return false
-	}
-	targetConversationID := strings.TrimSpace(parts[0])
-	if targetConversationID == "" || targetConversationID == currentConversationID {
-		return false
-	}
-	userID := strings.TrimSpace(execctx.UserID(ctx))
-	if userID == "" {
-		return false
-	}
-	current, err := s.db.GetConversation(ctx, currentConversationID, userID)
-	if err != nil || current == nil || strings.TrimSpace(current.ProjectID) == "" {
-		return false
-	}
-	target, err := s.db.GetConversation(ctx, targetConversationID, userID)
-	if err != nil || target == nil || target.ProjectID != current.ProjectID {
-		return false
-	}
-	return true
-}
-
-func missionSourceArchiveOrFile(path string) bool {
-	ext := strings.ToLower(filepath.Ext(path))
-	switch ext {
-	case ".zip", ".tar", ".tgz", ".gz", ".bz2", ".xz", ".7z", ".rar",
-		".go", ".js", ".ts", ".tsx", ".jsx", ".java", ".py", ".rb", ".php",
-		".c", ".h", ".cc", ".cpp", ".hpp", ".cs", ".rs", ".swift", ".kt",
-		".kts", ".scala", ".sh", ".sql", ".yaml", ".yml", ".json", ".xml",
-		".txt", ".md":
-		return true
-	default:
-		return false
-	}
 }
 
 func clarifyMissionPlan(reason string) missionPlan {
@@ -1900,61 +1889,15 @@ func missionProgressPayload(plan missionPlan, phase string, values map[string]in
 }
 
 func missionPlanGuidance(plan missionPlan, phase string) string {
-	var builder strings.Builder
-	builder.WriteString("\n\n【服务端任务意图边界】\n")
-	builder.WriteString("意图模式：" + plan.Mode + "；执行阶段：" + phase + "。\n")
-	switch plan.Mode {
-	case missionModeAgent:
-		builder.WriteString("由你直接理解并执行用户请求。缺少历史上下文或材料位置时，主动调用 search_project_history 或 discover_project_sources；" +
-			"不要要求用户重复提供已经上传的项目源码路径。执行仍受项目授权范围和工具策略约束。\n")
-	case missionModeAssetInventory:
-		builder.WriteString("本轮只允许读取和分析当前项目内的资产、事实、漏洞、测试覆盖和攻击路径，给出资产整理结果与继续测试优先级。" +
-			"禁止发起网络探测、漏洞扫描、渗透测试或调用子 Agent；完成分析后立即结束。\n")
-	case missionModeGeneral:
-		builder.WriteString("本轮只处理用户要求的普通项目任务。禁止把任务扩展成渗透测试，禁止调用网络扫描和子 Agent；完成回答后立即结束。\n")
-	case missionModeCodeAudit:
-		if plan.boundedFindingAudit() {
-			builder.WriteString("本轮只核验已有漏洞 " + strings.Join(plan.FindingIDs, "、") +
-				" 是否真实存在。目标：" + plan.Objective + "；完成条件：" + plan.CompletionCriteria +
-				"。不得扩展到其他漏洞、其他入口或自动派生后续意图；证据足够后立即给出 confirmed、refuted 或 insufficient_evidence 结论并停止。\n")
-		} else {
-			builder.WriteString("本轮优先审计用户明确提供的源码目录或源码包。源码包必须先解压到当前会话工作区；网络请求仅允许访问活动项目授权范围内的目标；只生成带文件、行号和数据流证据的候选结论。\n")
-		}
-	case missionModeCodeValidate:
-		if phase == missionPhaseSourceAudit {
-			builder.WriteString("当前优先执行源码审计。网络请求仅允许访问活动项目授权范围内的目标；先形成候选问题、复现条件和目标映射。\n")
-		} else {
-			builder.WriteString("源码审计已完成。现在只验证已映射到明确授权运行时目标的候选漏洞：" +
-				formatMissionTargets(plan) + "。没有运行时证据不得标记 confirmed。\n")
-		}
-	case missionModeRetest:
-		builder.WriteString("本轮只复测明确指定的漏洞：" + strings.Join(plan.VulnerabilityIDs, "、") +
-			"；复测任务 ID：" + strings.Join(plan.RetestIDs, "、") +
-			"。只重放原漏洞最小 PoC，不探索其他漏洞或资产；结束时必须调用 project_retest_finding。\n")
-	case missionModeAppValidation:
-		switch phase {
-		case missionPhaseAppStatic:
-			builder.WriteString("当前优先对用户提供的 App 包执行静态分析；网络请求仅允许访问活动项目授权范围内的目标。\n")
-		case missionPhaseAppRuntime:
-			builder.WriteString("当前只执行 App 动态运行验证，必须使用指定包和测试设备/模拟器，不得修改非测试数据。\n")
-		case missionPhaseBackendValidate:
-			builder.WriteString("当前只验证 App 对应的明确授权后端目标：" + formatMissionTargets(plan) + "。\n")
-		}
-	case missionModeProjectWrite:
-		builder.WriteString("本轮只执行用户明确要求的项目数据修改。允许使用项目写工具，但禁止网络探测、渗透测试和子 Agent；完成后立即结束。\n")
-	case missionModeClarify:
-		builder.WriteString("用户意图或测试范围不明确。不得执行工具，只要求用户补充明确任务和授权目标。\n")
-	case missionModePentest:
-		builder.WriteString("本轮只执行用户明确授权的渗透任务。测试目标：" + formatMissionTargets(plan) + "。禁止扩展到其他资产。\n")
-	case missionModeMixed:
-		if phase == missionPhaseAsset {
-			builder.WriteString("当前只执行资产整理阶段。禁止网络探测和渗透测试；资产整理完成后由平台移交给渗透阶段。\n")
-		} else {
-			builder.WriteString("资产阶段已完成。现在只渗透用户明确指定的目标：" + formatMissionTargets(plan) + "。禁止测试其他资产。\n")
-		}
+	_ = phase
+	if plan.Coordinated {
+		return "\n\n【执行上下文】\n" +
+			"当前任务由 Planner/Worker 协同执行。你负责观察、操舵、审核关键结果和向人工汇总；" +
+			"不得亲自运行命令、脚本、扫描器或 MCP 工具，也不得重复 Worker 已经执行的工作。"
 	}
-	builder.WriteString("完成任务后停止，不得因为项目中还存在其他未测试资产而自行继续。\n")
-	return builder.String()
+	return "\n\n【执行上下文】\n" +
+		"当前用户、项目、目标、附件、finding 和项目状态仅作为上下文。" +
+		"你可以直接执行，也可以按需调用 Planner、Worker 或其他子 Agent；执行流程由你决定。"
 }
 
 func formatMissionTargets(plan missionPlan) string {
@@ -1973,32 +1916,42 @@ func formatMissionTargets(plan missionPlan) string {
 	return strings.Join(plan.PentestTargets, "、")
 }
 
-func agentInstructionForMission(mode string, plan missionPlan, phase string) string {
-	instruction := agentInstructionForMode(mode) + missionPlanGuidance(plan, phase)
-	if normalizeAgentMode(mode) == agentModeDeep && phase == missionPhasePentest && plan.allowsPentest() {
-		instruction += "\nDeep Path 阶段要求：必须通过 pent_agent_execute 把渗透任务交给受限子 Agent，" +
-			"task 参数中完整包含本轮明确目标和完成条件；主 Agent 不得自行扩展到目标列表之外的资产。"
+func agentInstructionForMission(
+	ctx context.Context,
+	mode string,
+	plan missionPlan,
+	phase string,
+) string {
+	_ = ctx
+	if !plan.Coordinated {
+		return agentInstructionForMode(mode) + missionPlanGuidance(plan, phase)
 	}
-	if normalizeAgentMode(mode) == agentModeDeep &&
-		plan.Mode == missionModeCodeAudit &&
-		phase == missionPhaseSourceAudit {
-		instruction += "\n代码审计多 Agent 职责边界：" +
-			"主 Agent 只负责项目协调、规划调度和结果汇总，必须先调用 pent_agent_plan_hypotheses，" +
-			"再使用 project_list_hypotheses 获取工作单元，并逐个调用 pent_agent_execute_hypothesis。" +
-			"主 Agent 无权直接调用 exec、execute-python-script、read_skill 或通用 pent_agent_execute；" +
-			"源码解压、索引、扫描、IL 分析和漏洞取证全部由 Worker 完成。"
+	var builder strings.Builder
+	builder.WriteString(coordinatedMainAgentPrompt)
+	if objective := strings.TrimSpace(plan.Objective); objective != "" {
+		builder.WriteString("\n\n当前任务目标：")
+		builder.WriteString(objective)
 	}
-	return instruction
+	if targets := formatMissionTargets(plan); targets != "" && targets != "未指定" {
+		builder.WriteString("\n当前目标范围：")
+		builder.WriteString(targets)
+	}
+	builder.WriteString(missionPlanGuidance(plan, phase))
+	return builder.String()
 }
 
 func (s *Service) mainAgentInstruction(ctx context.Context) string {
 	instruction := defaultSystemPrompt
 	if execution, ok := missionExecutionFromContext(ctx); ok {
 		instruction = agentInstructionForMission(
+			ctx,
 			execution.AgentMode,
 			execution.Plan,
 			execution.Phase,
 		)
+	}
+	if agentPrompt := s.conversationSystemAgentPrompt(ctx); strings.TrimSpace(agentPrompt) != "" {
+		instruction = agentPrompt + "\n\n" + instruction
 	}
 	if policyPrompt := s.systemAgentPrompt(
 		ctx,
@@ -2008,7 +1961,8 @@ func (s *Service) mainAgentInstruction(ctx context.Context) string {
 	); strings.TrimSpace(policyPrompt) != "" {
 		instruction += "\n\n" + policyPrompt
 	}
-	if s != nil && s.db != nil {
+	execution, coordinated := missionExecutionFromContext(ctx)
+	if s != nil && s.db != nil && (!coordinated || !execution.Plan.Coordinated) {
 		conversationID := strings.TrimSpace(execctx.ConversationID(ctx))
 		userID := strings.TrimSpace(execctx.UserID(ctx))
 		if conversationID != "" && userID != "" {
@@ -2019,6 +1973,32 @@ func (s *Service) mainAgentInstruction(ctx context.Context) string {
 		}
 	}
 	return withPlatformVerificationWorkflow(instruction)
+}
+
+func (s *Service) conversationSystemAgentPrompt(ctx context.Context) string {
+	if s == nil || s.db == nil {
+		return ""
+	}
+	conversationID := strings.TrimSpace(execctx.ConversationID(ctx))
+	userID := strings.TrimSpace(execctx.UserID(ctx))
+	if conversationID == "" || userID == "" {
+		return ""
+	}
+	conversation, err := s.db.GetConversation(ctx, conversationID, userID)
+	if err != nil {
+		return ""
+	}
+	switch strings.TrimSpace(conversation.AgentRoleID) {
+	case SystemRetestAgentID:
+		return s.systemAgentPrompt(
+			ctx,
+			SystemRetestAgentID,
+			SystemRetestAgentName,
+			retestAgentPrompt,
+		)
+	default:
+		return ""
+	}
 }
 
 func zhiziExecutionPriorityGuidance(nodeName string) string {
@@ -2033,10 +2013,10 @@ func zhiziExecutionPriorityGuidance(nodeName string) string {
 		builder.WriteString("当前会话已绑定可用的智子分身 VPS。\n")
 	}
 	builder.WriteString("1. shell 命令、Python、脚本、扫描器、文件处理、上传下载和网络请求，必须首先选择 zhizi_exec、zhizi_python、zhizi_upload、zhizi_download。\n")
-	builder.WriteString("2. 不得在没有尝试智子工具的情况下直接选择本地 exec、execute-python-script 或本地网络工具。\n")
-	builder.WriteString("3. 只有智子工具明确失败、租约不可用，或任务必须访问 Sophon 本地控制面数据时，才允许使用本地工具。\n")
-	builder.WriteString("4. 使用本地 exec 或 execute-python-script 前，必须确认并说明智子无法完成该操作。\n")
-	builder.WriteString("5. 项目元数据、read_skill、read_artifact、project_* 等控制面操作仍按原规则使用，不要要求用户复制 SSH 凭据。")
+	builder.WriteString("2. 当前会话的本地 exec、execute-python-script、install-python-package、java_decompile 和其余 sophon-tool-runner 工具已被禁用，调用会被拒绝。\n")
+	builder.WriteString("3. 智子工具失败时只报告错误或重试智子工具，不得回退到本地 shell、本地扫描器或其他本地执行工具。\n")
+	builder.WriteString("4. 项目元数据、read_skill、read_artifact、project_* 等控制面操作仍可本地执行；这些工具不用于运行命令或扫描。\n")
+	builder.WriteString("5. 不要要求用户提供 SSH 凭据；智子连接由当前对话租约管理。")
 	return builder.String()
 }
 
@@ -2053,6 +2033,7 @@ func (s *Service) missionSourceAccessGuidance(ctx context.Context) string {
 	if root == "" || conversationID == "" {
 		return ""
 	}
+	projectID := strings.TrimSpace(execctx.ProjectID(ctx))
 	var builder strings.Builder
 	builder.WriteString("\n\n源码输入访问规则：")
 	builder.WriteString("可直接读取同一用户、同一项目下所有对话的上传文件；禁止读取其他项目、其他用户、/opt/sophon 根目录、父目录或非授权系统路径。\n")
@@ -2060,8 +2041,12 @@ func (s *Service) missionSourceAccessGuidance(ctx context.Context) string {
 	builder.WriteString(filepath.Join(root, "chat_uploads"))
 	builder.WriteString("\n- 当前会话上传目录：")
 	builder.WriteString(filepath.Join(root, "chat_uploads", conversationID))
-	builder.WriteString("\n- 工作区：")
-	builder.WriteString(filepath.Join(root, "tmp", "workspace", conversationID))
+	if paths, pathErr := s.agentWorkspacePathsFor(projectID, conversationID); pathErr == nil {
+		builder.WriteString("\n- 当前项目工作区：")
+		builder.WriteString(paths.ProjectRoot)
+		builder.WriteString("\n- 当前会话工作区：")
+		builder.WriteString(paths.ConversationRoot)
+	}
 	builder.WriteString("\n- 已授权源码：")
 	builder.WriteString(strings.Join(execution.Plan.SourceRoots, "、"))
 	for _, source := range execution.Plan.SourceRoots {
@@ -2077,50 +2062,7 @@ func (s *Service) missionSourceAccessGuidance(ctx context.Context) string {
 }
 
 func continuationPromptForMission(ctx context.Context, decision finalizationDecision) string {
-	execution, ok := missionExecutionFromContext(ctx)
-	if !ok {
-		return decision.continuationPrompt()
-	}
-	if execution.Plan.Mode == missionModeAssetInventory ||
-		(execution.Plan.Mode == missionModeMixed && execution.Phase == missionPhaseAsset) {
-		return "【资产阶段检查点】本轮只允许继续分析当前项目资产和攻击路径。" +
-			"先调用 project_list(resource=\"assets\") 获取真实资产列表，再读取事实、漏洞、测试覆盖、图谱和 Next Targets，给出可继续挖掘的资产优先级。" +
-			"如用户提供了新资产，可调用 project_insert_assets 登记。" +
-			"禁止调用 exec、Python、MCP 网络工具或渗透子 Agent。完成资产整理后给出最终答复并结束。"
-	}
-	if execution.Plan.Mode == missionModeGeneral {
-		return "【普通任务检查点】只继续完成用户要求的查询、解释或文档任务，禁止扩展为渗透测试。" +
-			"完成后给出最终答复并结束。"
-	}
-	if execution.Plan.Mode == missionModeProjectWrite {
-		return "【项目写操作检查点】只继续执行用户明确要求的项目数据修改，禁止调用网络探测或渗透子 Agent。" +
-			"写操作完成后给出最终答复并结束。"
-	}
-	if execution.Phase == missionPhaseSourceAudit || execution.Phase == missionPhaseAppStatic {
-		if execution.Plan.boundedFindingAudit() {
-			return "【漏洞真实性核验检查点】只核验漏洞 " +
-				strings.Join(execution.Plan.FindingIDs, "、") +
-				"。不得扩大源码范围、扫描其他漏洞或派生后续意图。证据足够后输出 confirmed、refuted 或 insufficient_evidence 并停止。"
-		}
-		if execution.Plan.Mode == missionModeCodeAudit &&
-			execution.AgentMode == agentModeDeep {
-			return "【代码审计协调检查点】主 Agent 不得自行执行源码分析。" +
-				"先调用 pent_agent_plan_hypotheses 建立工作单元，再用 project_list_hypotheses 获取假设，" +
-				"通过 pent_agent_execute_hypothesis 分派 Worker，并汇总 Worker 写回的候选和证据。"
-		}
-		return "【本地分析检查点】优先继续读取和分析用户指定的本地源码或 App 包；网络请求仅允许访问活动项目授权范围内的目标。" +
-			"给出带文件和行号证据的结论后结束当前阶段。"
-	}
-	if execution.Plan.Mode == missionModeRetest {
-		return "【复测检查点】只继续复测原漏洞：" +
-			strings.Join(execution.Plan.VulnerabilityIDs, "、") +
-			"。不得探索其他漏洞，完成后必须调用 project_retest_finding 写回复测结果。"
-	}
-	if execution.Plan.Mode == missionModeCodeValidate || execution.Plan.Mode == missionModeAppValidation {
-		return "【运行时验证检查点】只验证当前阶段明确授权的目标：" +
-			formatMissionTargets(execution.Plan) +
-			"。没有有效运行时证据时不得确认漏洞；完成当前阶段后结束。"
-	}
+	_ = ctx
 	return decision.continuationPrompt()
 }
 
@@ -2137,36 +2079,13 @@ func combineMissionOutput(assetSummary string, finalText string) string {
 	}
 }
 
-func resumePromptForMission(plan missionPlan, phase string) string {
-	switch plan.Mode {
-	case missionModeAssetInventory:
-		return "【系统恢复请求】继续未完成的资产整理任务。只处理资产，不执行渗透测试；完成后结束。"
-	case missionModeMixed:
-		if phase == missionPhaseAsset {
-			return "【系统恢复请求】继续未完成的资产整理阶段。禁止渗透；资产阶段完成后再由平台移交。"
-		}
-		return "【系统恢复请求】继续未完成的目标限定渗透任务。只测试：" + formatMissionTargets(plan) + "；不要扩展到其他资产。"
-	case missionModeCodeAudit:
-		return "【系统恢复请求】继续未完成的代码审计任务。优先分析指定源码目录；网络请求仅允许访问活动项目授权范围内的目标。"
-	case missionModeCodeValidate:
-		if phase == missionPhaseSourceAudit {
-			return "【系统恢复请求】继续未完成的源码审计阶段。优先本地分析；网络请求仅允许访问活动项目授权范围内的目标。"
-		}
-		return "【系统恢复请求】继续未完成的代码漏洞验证阶段。只测试：" +
-			formatMissionTargets(plan) + "；没有运行时证据不得确认漏洞。"
-	case missionModeRetest:
-		return "【系统恢复请求】继续未完成的漏洞复测：" +
-			strings.Join(plan.VulnerabilityIDs, "、") +
-			"；复测任务 ID：" + strings.Join(plan.RetestIDs, "、") +
-			"；不要扩展到其他漏洞或资产。"
-	case missionModeAppValidation:
-		return "【系统恢复请求】继续未完成的 App 验证阶段：" + phase +
-			"；不得更换 App 包或扩大后端目标范围。"
-	case missionModeGeneral:
-		return "【系统恢复请求】继续未完成的普通项目任务，不要扩展成渗透测试。"
-	default:
-		return "【系统恢复请求】继续未完成的限定范围渗透任务。只测试：" + formatMissionTargets(plan) + "；不要扩展到其他资产。"
+func resumePromptForMission(plan missionPlan, _ string) string {
+	context := ""
+	if targets := formatMissionTargets(plan); targets != "" {
+		context = " 当前目标：" + targets + "。"
 	}
+	return "【系统恢复请求】继续完成当前用户请求。" + context +
+		" 如无更多必要工作，直接总结结果并结束。"
 }
 
 func missionClarificationMessage(plan missionPlan) string {
@@ -2218,7 +2137,8 @@ func localAnalysisToolAllowed(name string) bool {
 	if !strings.HasPrefix(name, "project_") {
 		switch name {
 		case "exec", "execute-python-script", "mcp_use_tool", "read_artifact", readSkillToolName,
-			searchProjectHistoryToolName, discoverProjectSourcesToolName:
+			searchProjectHistoryToolName, discoverProjectSourcesToolName,
+			orchestratorControlToolName:
 			return true
 		default:
 			return !missionToolIsNetworkCapable(name, nil)
@@ -2230,6 +2150,7 @@ func localAnalysisToolAllowed(name string) bool {
 		"project_next_targets", "project_plan_hypotheses", "project_list_hypotheses",
 		"project_start_hypothesis", "project_complete_hypothesis", "project_record_test",
 		"project_add_intent", "project_update_intent", "project_update_goal",
+		"project_add_goal", "project_add_hint",
 		"project_memory_graph", "project_query_memory", "project_graph_overview",
 		"project_graph_node", "project_sync_graph":
 		return true
@@ -2244,8 +2165,75 @@ func mainCodeAuditCoordinatorToolAllowed(name string) bool {
 		name == searchProjectHistoryToolName || name == discoverProjectSourcesToolName {
 		return true
 	}
+	if name == "exec" || name == "execute-python-script" {
+		return true
+	}
 	if strings.HasPrefix(name, "project_") || name == "read_artifact" {
 		return true
+	}
+	return false
+}
+
+func coordinatedMainToolAllowed(name string) bool {
+	name = strings.ToLower(strings.TrimSpace(name))
+	switch name {
+	case searchProjectHistoryToolName, discoverProjectSourcesToolName,
+		"read_artifact", orchestratorControlToolName:
+		return true
+	}
+	switch name {
+	case "project_add_intent", "project_update_intent", "project_update_goal",
+		"project_add_goal", "project_add_hint", "project_record_fact":
+		return true
+	}
+	return coordinatedProjectReadToolAllowed(name)
+}
+
+func plannerRoleToolAllowed(name string) bool {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name == plannerTodoListToolName || name == plannerTodoUpdateToolName {
+		return true
+	}
+	switch name {
+	case "project_plan_hypotheses", "project_plan_frontier", "read_artifact",
+		"project_prove_goal",
+		searchProjectHistoryToolName, discoverProjectSourcesToolName,
+		orchestratorControlToolName:
+		return true
+	}
+	return coordinatedProjectReadToolAllowed(name)
+}
+
+func workerRoleToolAllowed(name string) bool {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if !strings.HasPrefix(name, "project_") {
+		return true
+	}
+	switch name {
+	case "project_start_hypothesis", "project_complete_hypothesis",
+		"project_record_fact", "project_record_audit", "project_report_finding",
+		"project_update_finding", "project_verify_finding", "project_record_test",
+		"project_retest_finding", "project_record_link", "project_upsert_entity",
+		"project_link_entities", "project_insert_assets":
+		return true
+	}
+	return coordinatedProjectReadToolAllowed(name)
+}
+
+func coordinatedProjectReadToolAllowed(name string) bool {
+	name = strings.ToLower(strings.TrimSpace(name))
+	switch name {
+	case "project_next_targets", "project_asset_card", "project_fact_audit":
+		return true
+	}
+	for _, prefix := range []string{
+		"project_list", "project_get", "project_query", "project_memory",
+		"project_graph_overview", "project_graph_node", "project_conversation_",
+		"project_campaign_overview", "project_campaign_frontier",
+	} {
+		if strings.HasPrefix(name, prefix) {
+			return true
+		}
 	}
 	return false
 }
@@ -2332,36 +2320,19 @@ func (s *Service) activeToolsForMission(
 	ctx context.Context,
 	mode string,
 	plan missionPlan,
-	phase string,
+	_ string,
 ) []tool.BaseTool {
-	if plan.Mode == missionModeClarify {
-		return nil
-	}
 	items := s.activeToolsForMode(ctx, mode)
+	if !plan.Coordinated {
+		return items
+	}
 	filtered := make([]tool.BaseTool, 0, len(items))
 	for _, item := range items {
+		if item == nil {
+			continue
+		}
 		info, err := item.Info(ctx)
-		if err != nil || info == nil || !missionToolAllowed(plan, phase, info.Name) {
-			continue
-		}
-		if isZhiziToolName(info.Name) && !s.hasActiveZhiziLease(ctx) {
-			continue
-		}
-		if normalizeAgentMode(mode) == agentModeDeep &&
-			plan.Mode == missionModeCodeAudit &&
-			phase == missionPhaseSourceAudit &&
-			!mainCodeAuditCoordinatorToolAllowed(info.Name) {
-			continue
-		}
-		if normalizeAgentMode(mode) == agentModeDeep &&
-			phase == missionPhasePentest &&
-			!isSubAgentEntryToolName(info.Name) &&
-			!strings.HasPrefix(info.Name, "project_") &&
-			info.Name != readSkillToolName &&
-			info.Name != "read_artifact" &&
-			info.Name != searchProjectHistoryToolName &&
-			info.Name != discoverProjectSourcesToolName &&
-			info.Name != internetSearchToolName {
+		if err != nil || info == nil || !coordinatedMainToolAllowed(info.Name) {
 			continue
 		}
 		filtered = append(filtered, item)
@@ -2391,61 +2362,12 @@ func (s *Service) missionToolDecision(
 		return true, ""
 	}
 	plainName := s.plainToolName(toolName)
-	if completed, _, _ := missionObjectiveCompletion(ctx); completed {
-		switch {
-		case isSubAgentEntryToolName(plainName):
-			return false, "明确目标已完成，禁止继续启动新的子 Agent"
-		case plainName == "exec",
-			plainName == "execute-python-script",
-			plainName == "mcp_use_tool",
-			isZhiziToolName(plainName):
-			return false, "明确目标已完成，禁止继续执行新的工具任务"
-		}
-	}
-	if execution.AgentMode == agentModeDeep &&
-		execution.Plan.Mode == missionModeCodeAudit &&
-		execution.Phase == missionPhaseSourceAudit {
-		if _, inSubagent := execctx.Subagent(ctx); !inSubagent &&
-			!mainCodeAuditCoordinatorToolAllowed(plainName) {
-			return false, "代码审计主 Agent 只负责规划和调度；源码分析必须通过 Planner/Worker 执行"
-		}
-	}
-	if plainName == "project_list" || plainName == "project_get" {
-		resource, _ := args["resource"].(string)
-		if allowed, reason := projectReadResourceMissionDecision(execution, plainName, resource); !allowed {
+	if s.isLocalExecutionTool(plainName) {
+		if blocked, reason := s.localExecutionBlockedByZhizi(ctx); blocked {
 			return false, reason
 		}
-	}
-	if execution.AgentMode == agentModeDeep &&
-		execution.Phase == missionPhasePentest {
-		if _, inSubagent := execctx.Subagent(ctx); !inSubagent &&
-			!isSubAgentEntryToolName(plainName) &&
-			!strings.HasPrefix(plainName, "project_") &&
-			plainName != readSkillToolName &&
-			plainName != "read_artifact" &&
-			plainName != searchProjectHistoryToolName &&
-			plainName != discoverProjectSourcesToolName &&
-			plainName != internetSearchToolName {
-			return false, "Deep Path 渗透阶段必须通过 pent_agent_execute 交给受限子 Agent 执行"
-		}
-	}
-	if !missionToolAllowed(execution.Plan, execution.Phase, plainName) {
-		return false, fmt.Sprintf(
-			"当前意图阶段 %s/%s 不允许调用工具 %s",
-			execution.Plan.Mode,
-			execution.Phase,
-			plainName,
-		)
 	}
 	networkCapable := missionToolIsNetworkCapable(plainName, args)
-	if !missionStageAllowsNetwork(execution.Phase) &&
-		!networkCapable &&
-		!isZhiziToolName(plainName) {
-		if allowed, reason := missionLocalPathsAllowed(args); !allowed {
-			return false, reason
-		}
-		return true, ""
-	}
 	if !execctx.AssetRestrictionEnabled(ctx) {
 		return true, ""
 	}
@@ -2478,40 +2400,22 @@ func (s *Service) missionToolDecision(
 }
 
 func projectReadResourceMissionDecision(
-	execution missionExecution,
+	_ missionExecution,
 	toolName string,
 	resource string,
 ) (bool, string) {
 	resource = strings.ToLower(strings.TrimSpace(resource))
-	var legacyName string
 	var ok bool
 	switch toolName {
 	case "project_list":
-		legacyName, ok = legacyProjectListToolName(resource)
+		_, ok = legacyProjectListToolName(resource)
 	case "project_get":
-		legacyName, ok = legacyProjectGetToolName(resource)
+		_, ok = legacyProjectGetToolName(resource)
 	default:
 		return true, ""
 	}
 	if !ok {
 		return false, fmt.Sprintf("%s 必须指定有效的 resource", toolName)
-	}
-	if !missionToolAllowed(execution.Plan, execution.Phase, toolName) {
-		return false, fmt.Sprintf(
-			"当前意图阶段 %s/%s 不允许调用工具 %s",
-			execution.Plan.Mode,
-			execution.Phase,
-			toolName,
-		)
-	}
-	if !missionToolAllowed(execution.Plan, execution.Phase, legacyName) {
-		return false, fmt.Sprintf(
-			"当前意图阶段 %s/%s 不允许调用 %s resource=%s",
-			execution.Plan.Mode,
-			execution.Phase,
-			toolName,
-			resource,
-		)
 	}
 	return true, ""
 }
@@ -2525,77 +2429,6 @@ func authorizeProjectReadResource(ctx context.Context, toolName, resource string
 		return fmt.Errorf("Mission Policy 拒绝执行 %s：%s", toolName, reason)
 	}
 	return nil
-}
-
-func missionLocalPathsAllowed(args map[string]interface{}) (bool, string) {
-	var content strings.Builder
-	collectProbeStrings(args, &content)
-	text := strings.TrimSpace(content.String())
-	if text == "" {
-		return true, ""
-	}
-	for _, match := range missionSourcePathPattern.FindAllStringSubmatchIndex(text, -1) {
-		if len(match) < 4 || match[2] < 0 || match[3] <= match[2] {
-			continue
-		}
-		value := strings.TrimSpace(text[match[2]:match[3]])
-		if missionPathDenied(value) {
-			if skillName := missionSkillNameFromPath(value); skillName != "" {
-				return false, fmt.Sprintf(
-					"技能文件不能通过 exec 读取；请调用 read_skill(name=%q)",
-					skillName,
-				)
-			}
-			return false, fmt.Sprintf(
-				"本地路径命中敏感路径拒绝清单：%s；该路径禁止访问",
-				value,
-			)
-		}
-	}
-	return true, ""
-}
-
-func missionPathDenied(value string) bool {
-	value = strings.TrimSpace(value)
-	if !filepath.IsAbs(value) {
-		return false
-	}
-	candidates := []string{value}
-	if resolved, err := filepath.EvalSymlinks(value); err == nil && resolved != value {
-		candidates = append(candidates, resolved)
-	}
-	for _, candidate := range candidates {
-		candidate = filepath.ToSlash(filepath.Clean(candidate))
-		for _, pattern := range missionDeniedPathPatterns {
-			if pattern.MatchString(candidate) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func missionSkillNameFromPath(value string) string {
-	value = strings.TrimSpace(value)
-	if !filepath.IsAbs(value) {
-		return ""
-	}
-	candidates := []string{value}
-	if resolved, err := filepath.EvalSymlinks(value); err == nil && resolved != value {
-		candidates = append(candidates, resolved)
-	}
-	for _, candidate := range candidates {
-		candidate = filepath.ToSlash(filepath.Clean(candidate))
-		const prefix = "/opt/sophon/skills/"
-		if !strings.HasPrefix(candidate, prefix) || !strings.HasSuffix(candidate, "/SKILL.md") {
-			continue
-		}
-		parts := strings.Split(strings.TrimPrefix(candidate, prefix), "/")
-		if len(parts) == 2 && parts[0] != "" {
-			return parts[0]
-		}
-	}
-	return ""
 }
 
 func missionToolIsNetworkCapable(toolName string, args map[string]interface{}) bool {

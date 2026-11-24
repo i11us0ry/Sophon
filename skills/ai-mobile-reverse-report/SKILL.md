@@ -1,87 +1,52 @@
 ---
 name: ai-mobile-reverse-report
 description: >-
-  Android App 授权逆向的 Phase 6 报告交付。用于汇总前五阶段证据，生成一致的 Findings、复现步骤、风险统计、修复建议和可复核安全报告。
+  Android App 安全报告方法。用于汇总已有证据，组织一致的 Findings、复现步骤、风险统计、修复建议和可复核说明。
 metadata:
   tags: [移动安全, app逆向, 漏洞报告, findings]
 ---
 
 # Agent: Reporter（渗透报告汇总 Agent）
 
-## 角色定义
+## 适用场景
 
-你是移动安全交付 Agent，负责汇总 Phase 1-5 的全部结果，输出标准化、可交付、可复核的渗透测试报告与结构化 Findings，确保分析过程、证据链与结论表述前后一致。
+适合已有代码、流量、Native、验证或项目事实，需要统一汇总项目信息、漏洞状态、风险统计、复现材料、修复建议和 Findings。
 
-**核心原则**：
-- 报告必须完整覆盖测试范围、测试过程、漏洞详情、弱加密问题、验证设计结果和修复建议。
-- 主报告负责汇总和重点展示，全量明细文档负责完整保留接口、敏感信息、native 发现等内容。
-- 统计数字、严重级别、漏洞编号、复现步骤和证据位置必须保持一致，不允许前后矛盾。
-- 所有结论必须来源于 Phase 1-5 的实际产物，不得补造证据、截图、测试结果或运行时日志。
+## 不适用场景
 
-## 安全边界（必须遵守）
+## 核心判断
 
-- 仅做本地汇总与报告生成，严禁发送任何网络请求。
-- 不得篡改前序发现的严重级别和证据含义。
-- 不得删除关键发现以换取简洁性。
-- 不得把“需验证”问题写成“已确认”漏洞。
-- 不得补造不存在的截图、POC 结果或运行时日志。
+报告质量取决于可追溯性和一致性，而不是篇幅。每条 Finding 都应能回指代码、流量、Native 或验证证据。
 
-## 路径约定
+## 证据标准
 
-- 用户提供的输出目录、报告导出目录、补充材料目录，可以使用真实路径。
-- 本仓库内部的规则文件、模板、附件说明若被引用，一律以 `ai-mobile-reverse-skills/` 为根目录描述。
-- 不在本 Agent 中写入任何个人机器绝对路径。
-- 本阶段默认读取 `{output_dir}/step1/` 到 `{output_dir}/step5/` 的前序产物，并写入 `{output_dir}/step6/`；旧版根目录平铺文件只作为兼容兜底读取。
+- 可确认：Finding 能引用明确来源文件、位置和状态，且与前序产物一致。
+- 待验证：前序证据存在缺口，或静态线索尚未经过 Phase 5 验证。
+- 判为否：找不到来源、与前序结论冲突、只有推测，或把待验证结果写成已确认。
 
-## 启动前置条件（硬性门控，不满足则立即终止）
+## 决策树
 
-1. `{output_dir}/step1/file_inventory.json` 必须存在。
-2. 以下文件中至少存在 4 类：
-   - `api_endpoints.json`
-   - `protocol_map.json`
-   - `crypto_native_analysis.json`
-   - `jni_analysis.json`
-   - `secrets_report.json`
-   - `vuln_analysis.json`
-   - `validation_cases.json`
-   - `test_plan.md`
-3. 若条件不满足，立即终止并说明缺失阶段，不得强行生成“完整报告”。
+- 检查已有材料和覆盖范围。
+- 归并 Findings：按同一根因、资源和影响去重。
+- 对齐状态：逐条核对 confirmed、needs_validation 和证据引用。
+- 生成统计：从结构化 Findings 反算，避免手工数字漂移。
+- 一致性失败：修正引用和状态后再完成报告。
 
-## 输入
+## 常见误判
 
-读取 `{output_dir}/step1/` 到 `{output_dir}/step5/` 下所有可用结果文件，包括但不限于：
+- 为了报告完整而补写不存在的请求、截图或运行结果。
+- 把漏洞标题相似但根因不同的条目错误合并。
+- 主报告结论与 `vuln_analysis.json`、`findings.json` 状态不一致。
+- 漏掉未执行阶段或用“无发现”代替“未覆盖”。
+- 在报告中暴露真实密钥、Token 或个人机器绝对路径。
 
-- `step1/file_inventory.json`
-- `step1/tech_stack.json`
-- `step1/entrypoints.json`
-- `step2/api_endpoints.json`
-- `step2/protocol_map.json`
-- `step2/traffic_alignment.json`
-- `step4/jsbridge_analysis.json`
-- `step3/jni_analysis.json`
-- `step3/crypto_native_analysis.json`
-- `step4/secrets_report.json`
-- `step4/vuln_analysis.json`
-- `step4/risk_matrix.json`
-- `step5/validation_cases.json`
-- `step5/test_plan.md`
-- `step5/repro_steps.md`
+## 方法定位
 
-若当前由 Phase 5 自动衔接进入本阶段，则默认继承以下参数，无需再次向用户重复索取：
-
-- `{output_dir}`
-- `{target_name}`
-- `report_type`
-- `include_appendix`
-
-说明：
-
-- `secrets_report.json` 与 `jsbridge_analysis.json` 属于 Phase 4 的补充结构化产物
-- 若对应线索存在，Reporter 应优先消费这两个文件，而不是在报告阶段重新从 `raw_*.json` 手工归并
+从当前会话已有的接口、代码、流量、Native、验证和项目事实中整理报告。材料不足时只陈述能够支持的范围和缺口，不使用固定阶段产物清单作为启动门槛。
 
 ## 执行步骤
 
-### Step 1: 汇总 Phase 1-5 结果
+### 汇总已有结果
 
 提取并整理以下信息。
 
@@ -107,15 +72,10 @@ metadata:
 - 测试周期
 
 #### 1.3 流程执行摘要
-- Phase 1：APK 静态侦察完成情况与核心发现
-- Phase 2：流量 + 代码对齐完成情况与核心发现
-- Phase 3：SO / JNI 深度分析完成情况与核心发现
-- Phase 4：弱加密与高风险漏洞筛查完成情况与核心发现
-- Phase 5：最小验证 POC 设计完成情况与核心发现
+- 静态侦察、协议映射、Native、风险分析和最小验证的实际覆盖与核心发现
 
 要求：
-- 每个阶段至少说明“输入材料、完成程度、核心发现、待验证项”。
-- 若某阶段未执行完成，必须写明原因，不得伪装成“无发现”。
+- 可说明材料、完成程度、核心发现和待验证项，避免把未覆盖写成无发现。
 
 #### 1.4 风险统计
 - 漏洞总数
@@ -132,10 +92,7 @@ metadata:
 
 ### Step 2: 生成主报告
 
-写入：
-- `{output_dir}/step6/security_report.md`
-
-主报告必须覆盖以下章节。
+主报告可按复核需要组织以下内容。
 
 #### 2.1 项目概述
 
@@ -193,10 +150,9 @@ metadata:
   - 如适用，包含代码示例或配置调整方案
 
 同时要求：
-- `Critical`、`High` 级别漏洞必须完整展开，不允许只列标题。
 - `Medium`、`Low` 可使用简表 + 必要说明，但仍必须保留最基本的证据和修复项。
 - `需验证` 的漏洞必须明确写出“缺失的验证条件”和“建议的验证动作”。
-- 若漏洞依赖 Phase 5 的验证设计，必须引用对应测试计划或复现步骤文件。
+- 若漏洞依赖 Phase 5 的验证设计，可引用对应测试计划或复现步骤文件。
 
 #### 2.4 弱加密与风险汇总
 
@@ -215,7 +171,7 @@ metadata:
 
 #### 2.5 安全加固总结
 
-必须分项输出：
+可分项输出：
 - 加密 / 签名机制优化方案
 - 认证授权机制强化建议
 - 数据存储与传输安全加固
@@ -244,36 +200,28 @@ metadata:
 - 测试用例清单应区分正常 / 边界 / 异常场景。
 - 若存在未执行或未覆盖区域，必须明确说明原因。
 
-### Step 3: 生成全量明细
-
-写入：
-- `{output_dir}/step6/api_endpoints_full.md`
-- `{output_dir}/step6/secrets_full.md`
-- `{output_dir}/step6/native_findings_full.md`
+### Step 3: 整理附录明细
 
 要求如下。
 
-#### 3.1 api_endpoints_full.md
+#### 3.1 接口明细
 - 覆盖 `api_endpoints.json` 中所有接口
 - 包含 URL、方法、来源文件、风险敏感标记、鉴权情况、参数摘要
 - 对登录、支付、上传、下载、用户资料、设备绑定等高价值接口做显式标记
 - 不允许只保留高危接口摘要
 
-#### 3.2 secrets_full.md
+#### 3.2 敏感信息明细
 - 覆盖 `secrets_report.json` 中所有发现
 - 包含类型、值（按策略展示）、位置、严重级别、说明
 - 包含测试环境 URL、内网 IP、证书文件、调试残留、疑似硬编码配置等聚合结果
 - 对可能是占位值或示例值的条目，应明确标记为低置信度
 
-#### 3.3 native_findings_full.md
+#### 3.3 Native 明细
 - 覆盖 `jni_analysis.json` 与 `crypto_native_analysis.json` 的关键发现
 - 包含 JNI 绑定、SO 名称、算法、参数来源、native 防护逻辑、与 Java 层的关联关系
 - 若存在反调试、签名校验、Frida 检测等逻辑，也必须纳入说明
 
-### Step 4: 生成结构化 Findings
-
-写入：
-- `{output_dir}/step6/findings.json`
+### Step 4: 结构化归纳（可选）
 
 要求：
 - 所有高风险漏洞都必须进入 Findings。
@@ -289,7 +237,7 @@ metadata:
   - `remediation`
   - `phase`
 
-参考结构：
+如需结构化记录，可参考以下字段，具体结构由运行时决定：
 
 ```json
 {
@@ -331,25 +279,17 @@ metadata:
 4. `secrets_full.md` 条目数应覆盖 `secrets_report.json`。
 5. `native_findings_full.md` 应覆盖 `jni_analysis.json` 与 `crypto_native_analysis.json`。
 6. `需验证` 问题不得在主报告中写成“已确认”。
-7. 主报告中的复现步骤、POC 脚本引用与 `validation_cases.json`、`test_plan.md`、`repro_steps.md` 必须一致。
+7. 主报告中的复现步骤、POC 引用和验证证据应相互一致。
 
 若任一检查不通过，必须修正对应章节或文件。
 
-## 完成标志
-
-- 主报告已生成。
-- 全量明细已生成。
-- Findings 已生成。
-- 报告结构完整覆盖 Phase 1-5 结果。
-- 主报告、全量明细、结构化 Findings 三者统计一致。
-
-## 自检清单
+## 归纳检查
 
 1. 报告中明确写出测试范围、测试环境、测试周期。
-2. 报告中明确写出 Phase 1-5 执行情况和核心发现。
+2. 报告中明确写出实际覆盖范围、材料和核心发现。
 3. 漏洞详情包含编号、名称、严重性、状态、影响范围、描述、利用条件、攻击路径、复现步骤、代码证据、修复建议。
 4. 弱加密与高风险漏洞有单独汇总章节。
 5. 安全加固总结覆盖加密、认证、数据安全、WebView / JSBridge、组件安全和开发规范。
 6. 附录包含工具清单、复现脚本合集、测试用例清单和中间产物清单。
 7. 没有遗漏高危漏洞，也没有把待验证问题写成已确认。
-8. 所有统计数字、漏洞编号、严重级别与引用文件保持一致。
+8. 所有统计数字、漏洞编号、严重级别与证据引用保持一致。

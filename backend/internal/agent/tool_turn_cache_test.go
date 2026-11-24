@@ -35,6 +35,14 @@ func TestSemanticWriteKeyKeepsDifferentOutcomes(t *testing.T) {
 	}
 }
 
+func TestPlannerPlanningInvalidatesNoProgressCircuit(t *testing.T) {
+	for _, name := range []string{"project_plan_hypotheses", "planner_todo_update"} {
+		if !isTurnWriteTool(name) {
+			t.Fatalf("%s 应归类为状态写操作，以便成功后解除熔断", name)
+		}
+	}
+}
+
 func TestTurnToolCacheKindScopesReadsByArguments(t *testing.T) {
 	a := turnToolCacheKind("project_list", `{"resource":"facts","limit":10,"asset_id":"a"}`)
 	b := turnToolCacheKind("project_list", `{"asset_id":"a","limit":10,"resource":"facts"}`)
@@ -153,5 +161,17 @@ func TestProbeResultIncludesEvidenceReference(t *testing.T) {
 	)
 	if !strings.Contains(result, "tool:"+id) {
 		t.Fatalf("探测结果缺少证据引用: %s", result)
+	}
+}
+
+func TestProbeReplayTTLForLocalReads(t *testing.T) {
+	if got := probeReplayTTLFor("exec", `{"command":"cd \"$SOPHON_WORKSPACE\" && sed -n '1,80p' app.txt"}`); got != localReadReplayTTL {
+		t.Fatalf("本地只读命令应使用长缓存，实际 %s", got)
+	}
+	if got := probeReplayTTLFor("exec", `{"command":"grep -n secret app.txt > out.txt"}`); got != probeReplayTTL {
+		t.Fatalf("带写入重定向的命令不应使用长缓存，实际 %s", got)
+	}
+	if got := probeReplayTTLFor("exec", `{"command":"curl https://example.com"}`); got != probeReplayTTL {
+		t.Fatalf("网络探测不应使用本地读缓存，实际 %s", got)
 	}
 }

@@ -5,11 +5,44 @@ metadata:
 description: Java 组件版本漏洞检测工具。扫描 pom.xml、build.gradle 或 jar 文件中的第三方依赖，匹配已知漏洞规则（CVE）并生成漏洞检测报告。适用于：(1) Java 项目依赖安全审计，(2) 识别 Log4j、Fastjson、Shiro、Spring 等高危组件漏洞，(3) jar 包反编译后的依赖提取。支持按目录层级分组输出，支持通过 CFR 反编译 .class/.jar 文件提取依赖信息。
 ---
 
-> Sophon 运行说明：默认只使用本地规则 `references/java-vulnerability.yaml`。OSV.dev 在线查询会产生网络请求，只有用户明确授权后才能执行。禁止自动安装 PyYAML、requests 或其他依赖；依赖缺失时说明阻塞，不修改系统环境。
-
 # Java 组件漏洞扫描器
 
 扫描 Java 项目依赖中的已知漏洞，支持 130+ 条 CVE 规则，按模块分组输出，并由 AI 生成漏洞触发点检查结果。
+
+## 适用场景
+
+适合已知 Java 项目依赖、JAR/WAR 或构建文件，需要匹配组件版本漏洞并判断当前项目是否真正使用到相关组件和入口。
+
+## 不适用场景
+
+只有组件版本命中、没有实际使用位置或入口证据时，不应直接生成可利用漏洞。联网查询是否可用由运行时决定。
+
+## 核心判断
+
+扫描结果回答“依赖是否命中已知漏洞规则”，漏洞结论还要回答“该组件是否被项目使用、相关功能是否可达、攻击前置条件是否满足”。
+
+## 证据标准
+
+- 依赖命中需要提供模块、组件、版本、CVE 和规则依据。
+- 可利用判断需要额外提供使用位置、入口、配置或调用证据。
+- 版本无法准确提取时标记不确定，不猜测。
+- 扫描结果、在线数据库结果和 AI 推断必须分层。
+
+## 决策树
+
+- 依赖版本明确且规则命中：检查组件是否实际存在和使用。
+- 组件未使用或不可达：降低结论等级。
+- 组件可达且存在受影响入口：进入专项验证或标记待验证。
+- 版本不确定：先反编译或读取元数据。
+- 无命中：记录扫描范围和规则版本，不宣称绝对安全。
+
+## 常见误判
+
+- 把传递依赖版本当成实际加载版本。
+- 把 version range 命中当成可利用。
+- 把 CVE 描述直接写成当前项目影响。
+- 忽略容器自带组件或 shaded/fat jar。
+- 把扫描器“无命中”当成不存在漏洞。
 
 ## 工作流程
 
@@ -23,19 +56,11 @@ description: Java 组件版本漏洞检测工具。扫描 pom.xml、build.gradle
 
 ### 2. 处理 jar/class 文件（需要反编译时）
 
-当目标是 `.jar` 或 `.class` 文件且无法直接提取依赖信息时，使用 CFR 反编译器（详见 `java-shared/DECOMPILE_STRATEGY.md`）：
-
-```bash
-# 反编译单个文件
-java -jar {CFR_JAR} /path/to/file.jar --outputdir {output_path}/decompiled
-
-# 反编译目录
-find /path/to/classes -name "*.class" | xargs java -jar {CFR_JAR} --outputdir {output_path}/decompiled
-```
+当目标是 `.jar` 或 `.class` 文件且无法直接提取依赖信息时，可优先从 JAR 文件名、`META-INF/MANIFEST.MF`、`META-INF/maven/**/pom.properties` 和包元数据提取。元数据不足时，再按当前环境可用的能力选择反编译工具或字节码检索方式。
 
 ### 3. 执行漏洞扫描
 
-运行扫描脚本，报告自动保存到 `{项目名}_audit/vuln_report/` 目录：
+如当前环境已有依赖扫描脚本或规则库，可选择使用；没有时也可直接从构建文件和包元数据提取组件信息。
 
 ```bash
 python3 scripts/scan_dependencies.py <目标路径> \
@@ -62,7 +87,7 @@ python3 scripts/scan_dependencies.py <目标路径> \
 
 ### 5. AI 漏洞触发点分析（重要）
 
-扫描完成后，**必须**基于扫描结果，按照 `references/OUTPUT_TEMPLATE.md` 模板填充完整报告（**单个文件**）。
+扫描完成后，应基于扫描结果，按照 `references/OUTPUT_TEMPLATE.md` 模板填充完整报告（**单个文件**）。
 
 #### 分析步骤
 
@@ -76,14 +101,7 @@ python3 scripts/scan_dependencies.py <目标路径> \
    - 识别文件上传、JSON/XML 解析、用户输入处理等关键入口
    - 结合 java-route-mapper 技能（如已加载）获取完整路由信息
 4. 提取检测到的**唯一漏洞组件**列表（去重）
-5. **按模板填充报告**，每个漏洞的详情区块必须包含：
-   - 触发条件
-   - 危险代码模式（java 代码块）
-   - 攻击向量
-   - 受影响的路由/接口
-   - 代码搜索命令（bash 代码块）
-   - 修复建议
-6. 使用 Write 工具将完整报告写入 **单个文件**
+5. 对每个候选漏洞，继续判断触发条件、危险代码模式、攻击向量、受影响入口和修复方向。
 
 #### 环境识别方法
 
@@ -155,24 +173,4 @@ python3 scripts/scan_dependencies.py /path/to/webapp \
 # 3. AI 自动读取报告并追加触发点检查结果
 ```
 
-### 输出报告结构
-
-> **输出约束（不可违反）：**
-> 1. **输出为单个文件** — 不得拆分为多个文件
-> 2. 文件命名格式: `{project_name}_vuln_report_{YYYYMMDD_HHMMSS}.md`
-> 3. 必须严格按照 `references/OUTPUT_TEMPLATE.md` 模板填充输出
-> 4. 不得增删章节、不得调整章节顺序
-
-**输出模板**: [references/OUTPUT_TEMPLATE.md](references/OUTPUT_TEMPLATE.md)
-
-```
-{project_name}_audit/vuln_report/
-└── {project_name}_vuln_report_{YYYYMMDD_HHMMSS}.md   ← 仅此 1 个文件
-    ├── 1. 扫描概述
-    ├── 2. 风险统计
-    ├── 3. 组件漏洞映射表
-    ├── 4. 漏洞详情（含触发条件、危险代码、攻击向量、搜索命令）
-    └── 5. 审计结论
-```
-
-通用输出规范参考: [java-shared/OUTPUT_STANDARD.md](../java-shared/OUTPUT_STANDARD.md)
+扫描结果可选择写回项目事实、审计单元或漏洞记录；本技能不规定固定文件、章节或命名。

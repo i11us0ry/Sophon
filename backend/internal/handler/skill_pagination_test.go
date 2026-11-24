@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 
+	"sophon/internal/skillaudit"
+
 	"github.com/gin-gonic/gin"
 )
 
@@ -61,6 +63,25 @@ func TestListSkillsPaginatesSearchesAndSorts(t *testing.T) {
 	if recorder.Code != http.StatusOK ||
 		!containsJSONString(recorder.Body.Bytes(), "gamma") {
 		t.Fatalf("技能搜索失败: %d %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestSkillTemplateUsesMethodologySections(t *testing.T) {
+	content := skillTemplate("demo-skill", "demo methodology")
+	result := skillaudit.AuditContent("demo-skill", content, "skills/demo-skill/SKILL.md")
+	if !result.Compliant {
+		t.Fatalf("新建 Skill 默认模板不符合方法论标准: %+v", result.Issues)
+	}
+	for _, want := range []string{
+		"## 适用场景",
+		"## 核心判断",
+		"## 证据标准",
+		"## 决策树",
+		"## 可选工具与示例",
+	} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("方法论模板缺少 %q:\n%s", want, content)
+		}
 	}
 }
 

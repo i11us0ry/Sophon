@@ -2,9 +2,13 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"sophon/internal/database"
 	"sophon/internal/execctx"
@@ -25,21 +29,13 @@ const (
 	situationTotalRunes      = 7000
 )
 
-// projectWritebackGuidance 是注入主 Agent 与子 Agent 的写回纪律（对齐 Sophon 的「边渗透边记录」）。
+// projectWritebackGuidance 只说明可用的项目工具能力，不规定执行顺序。
 const projectWritebackGuidance = `
 
-项目写回纪律（强制）：
-- 新域名、IP、URL、端口或主机立即用 project_insert_assets 登记，类型只能是 domain/ip/url/port/host。
-- 一个主题只维护一条事实，使用稳定 category/slug key，只写新增认知；事实存环境与攻击链，测试结果用 project_record_test，可交付漏洞用 project_report_finding。
-- 测试前用 project_plan_hypotheses 建假设；Worker 用 project_start_hypothesis 领取，用 project_complete_hypothesis 完成。达到假设上限后只写事实和测试结果。
-- 每项测试后用 project_record_test 写结论和 evidence_refs（tool:/fact:/artifact:/conversation:）；未发现漏洞也必须写 tested_clean 和负向证据。
-- 确认漏洞先用 project_report_finding 写规范 vulnerability_type、title_impact、description、preconditions、完整 poc/HTTP 数据包、evidence、impact、recommendation、residual_notes 和 asset_id；证据必填，复测备注无则写“无”，复现步骤末尾必须包含“利用脚本（优先 Python）”及 Python 代码块；高危以上缺任一字段或 PoC 不完整时不得上报。
-- 主动验证的测试结果、漏洞证据或复测备注必须记录适用的 WP-1 等价表达覆盖、WP-2 最小必要条件、WP-3 外部先验与根因映射；不适用项写原因，禁止只写“已检查”。
-- 代码审计先用 project_record_audit(action=scope) 写明纳入和排除类别；按 service×entry×shape×surface 建矩阵，未测单元格记 not_audited，实测后回写 tested/not_applicable。零记录只能写未审计，不得写成已排除。
-- 发现漏检形态后用 project_record_audit(action=rescan) 生成同类跨分发面回扫单元；阶段切换或中断前用 action=checkpoint 写下一步首个动作。
-- 收尾先清除或说明 not_audited 单元格，并抽查一条 tested_clean 旧结论的证据是否仍成立。
-- 新攻击方向先 project_add_intent，完成后 project_update_intent；目标达成或失效时更新 project_update_goal。
-- 摘要只作索引，需要全文时调用 project_list(resource=facts/findings) 或 project_get(resource=graph_node)。`
+项目工具能力（按需使用，不是完成条件）：
+- project_* 工具可读取或维护当前项目的资产、事实、测试、漏洞、审计记录、意图、目标和攻击链。
+- 需要完整上下文时可使用 project_list(resource=facts/findings) 或 project_get(resource=graph_node) 读取明细。
+- 工具参数以实际 schema 为准；是否使用、何时使用和执行顺序由你根据用户请求决定。`
 
 func (s *Service) projectSituation(ctx context.Context, projectID, userID string) string {
 	return s.projectSituationForContext(ctx, projectID, userID, "")
@@ -135,11 +131,16 @@ func (s *Service) projectSituationForContext(
 
 		currentIntent, hasCurrent := selectCurrentIntent(intents)
 		if hasCurrent {
+			age := formatSituationAge(currentIntent.UpdatedAt)
+			if age != "" {
+				age = "，已持续 " + age
+			}
 			builder.WriteString(fmt.Sprintf(
-				"当前意图：[%s] %s（id %s）\n",
+				"当前意图：[%s] %s（id %s%s）\n",
 				currentIntent.Status,
 				currentIntent.Title,
 				currentIntent.ID,
+				age,
 			))
 		} else {
 			builder.WriteString("当前意图：无运行中或开放意图\n")
@@ -155,11 +156,16 @@ func (s *Service) projectSituationForContext(
 					builder.WriteString(fmt.Sprintf("- …（另有 %d 条）\n", len(todos)-situationTodoLimit))
 					break
 				}
+				age := formatSituationAge(node.UpdatedAt)
+				if age != "" {
+					age = "，已持续 " + age
+				}
 				builder.WriteString(fmt.Sprintf(
-					"- [%s] %s（id %s）\n",
+					"- [%s] %s（id %s%s）\n",
 					node.Status,
 					truncateProjectText(node.Title, situationTextRune),
 					node.ID,
+					age,
 				))
 			}
 		}
@@ -171,6 +177,9 @@ func (s *Service) projectSituationForContext(
 		)
 		builder.WriteString("最近网络探测账本（最近 90 分钟，按 Host/Path/Method 聚合）：\n")
 		builder.WriteString(formatProbeLedger(groups))
+	}
+	if workspace := s.auditWorkspaceSituation(projectID, conversationID); workspace != "" {
+		builder.WriteString(workspace)
 	}
 
 	credentials := make([]database.ProjectFact, 0)
@@ -232,10 +241,10 @@ func (s *Service) projectSituationForContext(
 		}
 	}
 	if len(criticalFacts) > 0 {
-		builder.WriteString("强制记忆（必须优先遵守）：\n")
+		builder.WriteString("关键约束记忆（仅作为上下文）：\n")
 		for index, fact := range criticalFacts {
 			if index >= situationFactIndexLimit {
-				builder.WriteString(fmt.Sprintf("- …（另有 %d 条强制记忆）\n", len(criticalFacts)-situationFactIndexLimit))
+				builder.WriteString(fmt.Sprintf("- …（另有 %d 条关键约束记忆）\n", len(criticalFacts)-situationFactIndexLimit))
 				break
 			}
 			builder.WriteString(fmt.Sprintf(
@@ -316,7 +325,7 @@ func (s *Service) projectSituationForContext(
 		builder.WriteString("漏洞摘要：无\n")
 	}
 
-	// 覆盖率与未覆盖队列：直接驱动 Agent 优先处理未覆盖目标（资产/意图/证据缺口）。
+	// 覆盖率与候选目标只作为项目状态，不规定 Agent 的下一步动作。
 	if coverage, coverageErr := s.db.ProjectCoverage(ctx, projectID, userID); coverageErr == nil {
 		builder.WriteString(fmt.Sprintf(
 			"覆盖率：资产观测 %d/%d（%.0f%%），完整覆盖 %d/%d（%.0f%%），部分覆盖 %d，阻断 %d，可疑 %d，未测试资产 %d，测试 %d/%d（%.0f%%），必需/可选未完成测试 %d/%d，可疑测试 %d，证据缺口 %d，待办/运行意图 %d/%d\n",
@@ -341,15 +350,19 @@ func (s *Service) projectSituationForContext(
 			coverage.IntentsRunning,
 		))
 		if coverage.AssetsTotal == 0 {
-			builder.WriteString("- 资产登记缺失：当前项目 0 个资产。本轮如使用目标工具，必须先调用 project_insert_assets 登记目标。\n")
+			attachments, _ := s.db.ListRecentProjectAttachments(ctx, projectID, userID, 1)
+			if len(attachments) > 0 {
+				builder.WriteString("- 项目已有上传附件，但尚未登记网络资产。附件可作为源码或其他分析材料。\n")
+			} else {
+				builder.WriteString("- 项目资产数：0。\n")
+			}
 		}
-		builder.WriteString("调度规则：优先处理未测试资产；同一 Host/Path/Method 未产生新证据时禁止原样重跑；一个目标写回测试结果后再切换下一个目标。\n")
 		if assetID != "" {
-			builder.WriteString("未覆盖队列：当前任务已绑定资产，跨资产队列不注入；当前资产明细以上方资产卡片为准。\n")
+			builder.WriteString("候选目标：当前任务已绑定资产，当前资产明细以上方资产卡片为准。\n")
 		} else if len(coverage.NextTargets) == 0 {
-			builder.WriteString("未覆盖队列（按优先级，需要明细调用 project_next_targets）：\n- 无，所有已知目标均已覆盖\n")
+			builder.WriteString("候选目标（可用 project_next_targets 查看明细）：\n- 无\n")
 		} else {
-			builder.WriteString("未覆盖队列（按优先级，需要明细调用 project_next_targets）：\n")
+			builder.WriteString("候选目标（可用 project_next_targets 查看明细）：\n")
 			for index, target := range coverage.NextTargets {
 				if index >= situationAssetLimit {
 					builder.WriteString(fmt.Sprintf("- …（另有 %d 项）\n", len(coverage.NextTargets)-situationAssetLimit))
@@ -424,6 +437,7 @@ func (s *Service) auditLedgerSituation(
 	var checkpoint *database.ProjectFact
 	cellCounts := map[string]int{}
 	notAudited := make([]database.ProjectFact, 0)
+	testedCells := make([]database.ProjectFact, 0)
 	for index := range facts {
 		fact := &facts[index]
 		switch fact.SubjectType {
@@ -440,9 +454,14 @@ func (s *Service) auditLedgerSituation(
 			cellCounts[status]++
 			if status == "not_audited" {
 				notAudited = append(notAudited, *fact)
+			} else if status == "tested" {
+				testedCells = append(testedCells, *fact)
 			}
 		}
 	}
+	sort.SliceStable(testedCells, func(i, j int) bool {
+		return testedCells[i].UpdatedAt.After(testedCells[j].UpdatedAt)
+	})
 	var builder strings.Builder
 	if scope != nil || len(cellCounts) > 0 || checkpoint != nil {
 		builder.WriteString("审计台账：\n")
@@ -468,13 +487,59 @@ func (s *Service) auditLedgerSituation(
 			builder.WriteString(truncateProjectText(fact.SubjectKey, situationTextRune))
 			builder.WriteString("\n")
 		}
+		for index, fact := range testedCells {
+			if index >= situationFailureLimit {
+				builder.WriteString(fmt.Sprintf("- …（另有 %d 个已测试单元格）\n", len(testedCells)-situationFailureLimit))
+				break
+			}
+			builder.WriteString("- TESTED：")
+			builder.WriteString(truncateProjectText(fact.SubjectKey, situationTextRune))
+			if conclusion, result := auditCellConclusion(fact.Body); conclusion != "" || result != "" {
+				builder.WriteString("；")
+				if conclusion != "" {
+					builder.WriteString(conclusion)
+				}
+				if result != "" {
+					if conclusion != "" {
+						builder.WriteString("：")
+					}
+					builder.WriteString(truncateProjectText(result, situationFactSummaryRune))
+				}
+			}
+			builder.WriteString("\n")
+		}
 	}
 	if checkpoint != nil {
 		builder.WriteString("- 最近断点：")
 		builder.WriteString(truncateProjectText(projectFactSummary(*checkpoint), situationTextRune))
 		if body := strings.TrimSpace(checkpoint.Body); body != "" {
-			builder.WriteString("；")
-			builder.WriteString(truncateProjectText(body, situationTextRune))
+			var details struct {
+				Completed []string `json:"completed_directions"`
+				RuledOut  []string `json:"ruled_out_directions"`
+				Pending   []string `json:"pending_directions"`
+				Evidence  []string `json:"evidence_refs"`
+			}
+			if json.Unmarshal([]byte(body), &details) == nil {
+				if len(details.Completed) > 0 {
+					builder.WriteString("；已完成=")
+					builder.WriteString(truncateProjectText(strings.Join(details.Completed, "、"), situationTextRune))
+				}
+				if len(details.RuledOut) > 0 {
+					builder.WriteString("；已排除=")
+					builder.WriteString(truncateProjectText(strings.Join(details.RuledOut, "、"), situationTextRune))
+				}
+				if len(details.Pending) > 0 {
+					builder.WriteString("；待处理=")
+					builder.WriteString(truncateProjectText(strings.Join(details.Pending, "、"), situationTextRune))
+				}
+				if len(details.Evidence) > 0 {
+					builder.WriteString("；证据=")
+					builder.WriteString(truncateProjectText(strings.Join(details.Evidence, "、"), situationTextRune))
+				}
+			} else {
+				builder.WriteString("；")
+				builder.WriteString(truncateProjectText(body, situationTextRune))
+			}
 		}
 		builder.WriteString("\n")
 	}
@@ -488,6 +553,105 @@ func (s *Service) auditLedgerSituation(
 		builder.WriteString("- 审计范围尚未结构化记录；不得把未纳入类别写成已排除。请调用 project_record_audit(action=scope) 写入纳入和排除类别。\n")
 	}
 	return builder.String()
+}
+
+func formatSituationAge(updated time.Time) string {
+	if updated.IsZero() {
+		return ""
+	}
+	age := time.Since(updated)
+	if age < time.Minute {
+		return "刚刚"
+	}
+	if age < time.Hour {
+		return fmt.Sprintf("%d分钟", int(age.Minutes()))
+	}
+	if age < 24*time.Hour {
+		return fmt.Sprintf("%d小时", int(age.Hours()))
+	}
+	return fmt.Sprintf("%d天", int(age.Hours()/24))
+}
+
+func (s *Service) auditWorkspaceSituation(projectID, conversationID string) string {
+	conversationID = strings.TrimSpace(conversationID)
+	if s == nil || conversationID == "" {
+		return ""
+	}
+	paths, err := s.agentWorkspacePathsFor(projectID, conversationID)
+	if err != nil {
+		return ""
+	}
+	for _, workspace := range []string{paths.ConversationRoot, paths.LegacyRoot} {
+		entries, readErr := os.ReadDir(workspace)
+		if readErr != nil {
+			continue
+		}
+		if rendered := formatAuditWorkspaceSituation(workspace, entries); rendered != "" {
+			return rendered
+		}
+	}
+	return ""
+}
+
+func formatAuditWorkspaceSituation(workspace string, entries []os.DirEntry) string {
+	artifacts := make([]string, 0, 8)
+	auditEntries := 0
+	for _, entry := range entries {
+		name := entry.Name()
+		lower := strings.ToLower(name)
+		if entry.IsDir() {
+			switch lower {
+			case "audit_out":
+				if children, readErr := os.ReadDir(filepath.Join(workspace, name)); readErr == nil {
+					auditEntries = len(children)
+				}
+				artifacts = append(artifacts, name+"/")
+			case "audit_extract", "webxml", "dbstep":
+				artifacts = append(artifacts, name+"/")
+			}
+			continue
+		}
+		if !(strings.HasPrefix(lower, "sink_") ||
+			strings.HasPrefix(lower, "cand_") ||
+			lower == "jar_versions.txt") {
+			continue
+		}
+		size := int64(0)
+		if info, infoErr := entry.Info(); infoErr == nil {
+			size = info.Size()
+		}
+		artifacts = append(artifacts, fmt.Sprintf("%s（%dKB）", name, max(1, int(size/1024))))
+	}
+	if len(artifacts) == 0 {
+		return ""
+	}
+	sort.Strings(artifacts)
+
+	var builder strings.Builder
+	builder.WriteString("\nJava 审计工作台（已有文件优先复用，不要重新考古）：\n")
+	for index, artifact := range artifacts {
+		if index >= 8 {
+			builder.WriteString(fmt.Sprintf("- …（另有 %d 项）\n", len(artifacts)-8))
+			break
+		}
+		builder.WriteString("- " + artifact + "\n")
+	}
+	if auditEntries > 0 {
+		builder.WriteString(fmt.Sprintf("audit_out/ 当前包含 %d 个条目。\n", auditEntries))
+	}
+	builder.WriteString("先消费候选索引、路由和鉴权产物，再按当前 intent 收敛；已否定的方向先更新旧 intent，不要重新当成待办。\n")
+	return builder.String()
+}
+
+func auditCellConclusion(body string) (string, string) {
+	var details struct {
+		Conclusion string `json:"conclusion_state"`
+		Result     string `json:"result"`
+	}
+	if json.Unmarshal([]byte(strings.TrimSpace(body)), &details) != nil {
+		return "", ""
+	}
+	return strings.TrimSpace(details.Conclusion), strings.TrimSpace(details.Result)
 }
 
 func (s *Service) oldConclusionReviewCandidate(ctx context.Context, projectID string) string {

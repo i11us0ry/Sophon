@@ -1,16 +1,16 @@
 # 证据点 ID 统一字典（用于 trace 契约与子 skill 对齐）
 
 说明：
-- 本文件用于让 `php-route-tracer` 的 `## 9) Sink Evidence Type Checklist` 与各子审计 skill 的“证据引用（强制）”之间实现字段级同名对齐。
-- 任何子 skill 在 `证据引用（强制）` 部分必须逐项引用本字典中的证据点 ID；缺失则只能标记为 `⚠️待验证`。
+- 本文件用于让 `php-route-tracer` 的 `## 9) Sink Evidence Type Checklist` 与各子审计 skill 的证据引用之间保持字段级参考一致。
+- 子 skill 在证据引用部分可逐项参考本字典中的证据点 ID；缺失时可标记为 `⚠️待验证` 并说明缺口。
 
 ### 尚未执行 `php-route-tracer` 或 trace 不可用时（避免“跑不通”）
 
-子 skill 文中常见「必须引用 trace 的 `## 9)`」是指在**流水线正常路径**下应以 trace 为首选证据源；**不表示**没有 trace 文件就禁止出报告。此时允许且要求：
+子 skill 文中常见的 trace 引用是正常路径下的优先证据源；没有 trace 文件时仍可直接基于静态源码分析。此时可以：
 
-1. 仍按本字典 **逐条列出相同 `EVID_*` ID**，证据内容改为 **静态源码**（`file:line` + 关键摘录）+ 一句说明：`trace 未执行` / `trace_status=PARTIAL|UNRESOLVED`。
-2. 该条结论 **仅允许** `⚠️待验证` 或 `🔍环境依赖`，**禁止** `✅已确认可利用`（与 `php-audit-pipeline` 及子 skill 自己的「证据缺失处理」一致）。
-3. 若走 `php-audit-pipeline`，对应项应同步进入总报告 **「Trace 未闭合 / 待补证风险池」**（见 pipeline 阶段 5）。
+1. 按本字典列出适用的 `EVID_*` ID，证据内容使用静态源码（`file:line` + 关键摘录），并说明 `trace 未执行` / `trace_status=PARTIAL|UNRESOLVED`。
+2. 根据静态证据质量选择 `⚠️待验证`、`🔍环境依赖` 或已有证据能够支持的状态。
+3. 若使用 `php-audit-pipeline`，可把对应项放入「Trace 未闭合 / 待补证风险池」。
 
 如此可避免 Agent 在字面上陷入「没有 trace 就无法满足强制引用」的死锁。
 

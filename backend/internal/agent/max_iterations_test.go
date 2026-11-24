@@ -47,6 +47,24 @@ func TestFailedRunMessageExplainsContextCancellation(t *testing.T) {
 	}
 }
 
+func TestFailedRunMessageExplainsLLMUpstreamRejection(t *testing.T) {
+	contentMessage := failedRunMessage(
+		errors.New("llm_content_policy_rejected: 上游内容拒绝"),
+		&runCapture{},
+	)
+	if !strings.Contains(contentMessage, "内容安全拒绝") ||
+		!strings.Contains(contentMessage, "更换模型提供方") {
+		t.Fatalf("内容拒绝提示不明确: %s", contentMessage)
+	}
+	quotaMessage := failedRunMessage(
+		errors.New("llm_balance_insufficient: NOT_ENOUGH_BALANCE"),
+		&runCapture{},
+	)
+	if !strings.Contains(quotaMessage, "Key 余额不足") {
+		t.Fatalf("余额不足提示不明确: %s", quotaMessage)
+	}
+}
+
 type wrappedMaxIterationsError struct{}
 
 func (e *wrappedMaxIterationsError) Error() string {

@@ -26,8 +26,22 @@ args:
       printf '%s\n' "$(pwd)"
     }
 
+    validate_env_name() {
+      local requested="$1"
+      if [ -z "$requested" ] || [ "$requested" = "default" ]; then
+        return
+      fi
+      case "$requested" in
+        .|..|*[!A-Za-z0-9._-]*)
+          echo "env_name 只能包含字母、数字、点、下划线和短横线，且不能是 . 或 .." >&2
+          exit 2
+          ;;
+      esac
+    }
+
     resolve_env_dir() {
       local requested="$1"
+      validate_env_name "$requested"
       if [ -n "${VIRTUAL_ENV:-}" ] && { [ -z "$requested" ] || [ "$requested" = "default" ]; }; then
         printf '%s\n' "$VIRTUAL_ENV"
         return

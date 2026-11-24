@@ -1,6 +1,5 @@
 # Agent-1-recon 路由侦查员完整指令
 
-> 本文件包含 agent-1-recon 的完整执行步骤、分配规则和自检清单。负责人 spawn agent-1-recon 时将此文件内容作为 prompt 使用。
 
 ## 角色定义
 
@@ -15,10 +14,10 @@
 
 ## 侦查执行步骤
 
-### 1. 物理模块粗扫（必须列全集）
+### 1. 物理模块粗扫（可按需要列全集）
 
 ```bash
-# 全集锚点（一级子目录全集，必须 ls 一次并粘贴原始输出到侦查单）
+# 全集锚点（可按需要执行 ls，并把原始输出作为侦查参考）
 ls -1 {source_path}/webapps/ 2>/dev/null || ls -1 {source_path}/
 
 # WAR / Web 模块锚点
@@ -43,30 +42,30 @@ grep -rl '<packaging>war</packaging>' {source_path} --include=pom.xml 2>/dev/nul
 - Struts2: `grep -c '<action ' {struts子配置}`
 - Spring MVC: `grep -c '@\(Get\|Post\|Put\|Delete\|Request\)Mapping' {目标包}`
 - JAX-RS: `grep -c '@Path' {目标包}`
-- **通配符保守上界**：若模块包含 Struts2 `*_*` / `executeInterface` / 反射分发，预估值改为 `class_count × avg_method_count`（通过 `find {pkg} -name '*.class' | wc -l` 估算 class_count，方法数取 8 作为保守均值），并在备注列标记 "通配符上界估算"。任何**上界 ≥ 150** 的模块自动列为强制独占；上界 < 150 的小通配符模块允许参与同框架小模块合并（合并后单 agent 总上界 ≤ 150）。
+- **通配符保守上界**：若模块包含 Struts2 `*_*` / `executeInterface` / 反射分发，可参考 `class_count × avg_method_count` 估算。规模较大的模块可独立分配，较小模块可与同框架模块合并。
 
 ### 4. 按分配规则生成 Agent 任务分配单
 
-**执行顺序（强制，禁止跳步）：**
+**参考执行顺序（可根据证据和审计收益调整）：**
 
-1. 凡**第 1 层物理模块预估路由 > 150**，必须先完成第 2 层逻辑模块下钻；**未下钻的物理模块禁止直接进入分配规则**。
+1. 第 1 层物理模块预估路由较多时，可优先完成第 2 层逻辑模块下钻；是否下钻由覆盖收益和任务规模决定。
 2. 分配规则的判定单元是**「逻辑模块」**（namespace / 包前缀 / endpoint / 单文件），不是物理模块（WAR / 子模块）。
 3. 物理模块整体 ≤ 150 路由 且 无通配符，方可走「整 WAR 给 1 agent」的捷径（不下钻）。
 
-**分配规则（强制）：**
+**分配规则（建议）：**
 
 - 单逻辑模块 ≥ 150 路由 → 独占 1 agent
-- 含通配符 / `executeInterface` / Struts2 `*_*` 双通配 → **按通配符上界估算判定**：上界 ≥ 150 强制独占；上界 < 150 允许与同框架小模块合并（合并后总上界 ≤ 150）
-  - 「强制独占」的粒度是「逻辑模块」级，禁止上提到「物理模块（WAR）」级
+- 含通配符 / `executeInterface` / Struts2 `*_*` 双通配 → 可结合通配符上界估算：规模较大的模块可独立分配，较小模块可与同框架模块合并
+  - 分配粒度可根据实际工作量选择逻辑模块或物理模块
 - 同框架小模块（< 80 路由）允许合并到一个 agent，单 agent 总路由 ≤ 150
 - **单 agent 处理路由数硬上界 = 200**（含通配符上界估算）。任何分配方案中存在 agent 预估路由 > 200，必须继续切分到 ≥ 2 个 agent
 - WAR 整体路由 ≤ 150 且无通配符 → 整 WAR 给 1 个 agent（两个前置条件必须同时满足）
 - **WebService（JAX-WS / CXF / Axis endpoint）作为普通逻辑模块对待**，独立 agent_id，输出目录命名为 `route_mapper/{war_name}_ws_{service_name}/`
 - 纯静态 / file_storage / 空目录 → SKIP（仅在主索引登记，不分配 agent，必须填写 skip_reason）
 
-**agent_id 命名（强制）：** `agent-1-{序号}`，序号从 1 开始连续递增（如 `agent-1-1`、`agent-1-2`、…）。禁止使用 `agent#1`、`agent_1` 等形式。
+**agent_id 命名（建议）：** `agent-1-{序号}`，序号从 1 开始连续递增（如 `agent-1-1`、`agent-1-2`、…）。
 
-**recon_id（强制）：** 文件名格式 `_recon_{YYYYMMDDHHMMSS}_{8位随机hex}.md`（精度到秒 + 随机后缀，避免重跑碰撞）
+**recon_id（建议）：** 文件名可参考 `_recon_{YYYYMMDDHHMMSS}_{8位随机hex}.md`，用于避免重跑碰撞。
 
 ## 输出：任务分配单
 
@@ -84,7 +83,7 @@ $ find {source_path} -name WEB-INF -type d
 {原样输出}
 ```
 
-## 第 1 层：物理模块清单（必须 == ls 全集）
+## 第 1 层：物理模块清单（可对照 ls 全集）
 
 | # | 模块 | 路径 | 类型 | 主框架 | 配置文件 | 预估路由 | 源码形态 | skip_reason |
 |---|------|------|------|------|--------|--------|--------|------------|
@@ -120,6 +119,6 @@ $ find {source_path} -name WEB-INF -type d
 - [ ] 第 2 层下钻覆盖了所有路由 > 150 的物理模块
 - [ ] **分配表中任意 agent 处理路由 > 100，必须对应第 2 层逻辑模块行**
 - [ ] **分配表中任意 agent 预估路由 ≤ 200**（硬上界；含通配符上界估算时同样适用）
-- [ ] **「强制独占」均落在逻辑模块级**（namespace / 包前缀 / endpoint），不存在以「物理模块含通配符」为由让整 WAR 由 1 个 agent 承包的行
+- [ ] 独立分配的模块粒度可按实际工作量选择逻辑模块或物理模块
 
-**降级策略：** 如侦查自检失败超过 1 次，**禁止退化为单 agent 模式**。改为「保守切分」：每个 WAR 一个 worker、每个 `struts-*.xml` 一个 worker、每个 WS endpoint 一个 worker、Spring 按 controller 包前缀切分；保守切分仍无法确认全集的，**停止流水线**并要求人工复核。
+**降级策略：** 如侦查自检发现覆盖缺口，可改为更细粒度切分：按 WAR、Struts 配置、WS endpoint、Spring controller 包前缀或实际证据缺口分配；无法确认全集时，可标记覆盖限制并继续可执行的审计部分。

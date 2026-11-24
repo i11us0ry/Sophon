@@ -1,0 +1,26 @@
+name: naabu
+version: 2.7.0
+description: ProjectDiscovery port scanner
+license: MIT
+tool_definition: naabu.yaml
+verify_args:
+  - "-version"
+artifacts:
+  linux-amd64:
+    url: https://github.com/projectdiscovery/naabu/releases/download/v2.7.0/naabu_2.7.0_linux_amd64.zip
+    sha256: 0cc77c0ca32d2f519ffbaa7665bb0e7c88c40753ab22f03551d453a1a823e9f0
+    destination: naabu
+    mode: "0755"
+    archive: zip
+    member: naabu
+    capabilities:
+      - cap_net_raw
+  linux-arm64:
+    url: https://github.com/projectdiscovery/naabu/releases/download/v2.7.0/naabu_2.7.0_linux_arm64.zip
+    sha256: e88af9bbfd777e2ffab6f84696747ba74de98fafeda882c078d158a610dbd86e
+    destination: naabu
+    mode: "0755"
+    archive: zip
+    member: naabu
+    capabilities:
+      - cap_net_raw

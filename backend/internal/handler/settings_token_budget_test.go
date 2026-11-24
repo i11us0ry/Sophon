@@ -60,7 +60,7 @@ func TestSettingsUpdateAcceptsZeroAsUnlimitedForAgentLimits(t *testing.T) {
 	recorder := performSettingsUpdate(
 		t,
 		handler,
-		`{"agent":{"maxIterations":0,"maxTurnTokens":0,"maxHypotheses":0}}`,
+		`{"agent":{"maxIterations":0,"maxTurnTokens":0,"maxToolCalls":0,"maxHypotheses":0}}`,
 	)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("三项设置填 0 应允许保存，实际 %d: %s", recorder.Code, recorder.Body.String())
@@ -73,6 +73,7 @@ func TestSettingsUpdateAcceptsZeroAsUnlimitedForAgentLimits(t *testing.T) {
 	for _, want := range []string{
 		"max_iterations: 0",
 		"max_turn_tokens: 0",
+		"max_tool_calls: 0",
 		"max_hypotheses: 0",
 	} {
 		if !strings.Contains(text, want) {

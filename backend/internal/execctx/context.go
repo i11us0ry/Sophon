@@ -20,6 +20,13 @@ type runModeKey struct{}
 type authorizedScopesKey struct{}
 type subagentKey struct{}
 type progressKey struct{}
+type zhiziStateKey struct{}
+
+type ZhiziRuntimeState struct {
+	Enabled     bool
+	Active      bool
+	Unavailable bool
+}
 
 // ProgressFunc forwards a child-agent event to the active run stream.
 // The callback intentionally uses primitive fields so execctx does not depend
@@ -109,7 +116,7 @@ type SubagentInfo struct {
 	Depth        int
 	// WorkerFocus 是主 Agent 为本次子任务指定的工作身份，不替代用户角色。
 	WorkerFocus string
-	// AllowedSkills 是当前 Worker 可读取的角色技能子集；空表示继承角色全部技能。
+	// AllowedSkills 是当前 Worker 的推荐方法包；仅用于提示，不限制全局 read_skill。
 	AllowedSkills []string
 	// RequiredSkills 是本次 Worker 首次实质操作前必须全部加载的技能正文。
 	RequiredSkills []string
@@ -144,6 +151,15 @@ func WithProgress(ctx context.Context, fn ProgressFunc) context.Context {
 func Progress(ctx context.Context) (ProgressFunc, bool) {
 	fn, ok := ctx.Value(progressKey{}).(ProgressFunc)
 	return fn, ok && fn != nil
+}
+
+func WithZhiziRuntimeState(ctx context.Context, state ZhiziRuntimeState) context.Context {
+	return context.WithValue(ctx, zhiziStateKey{}, state)
+}
+
+func ZhiziRuntimeStateFromContext(ctx context.Context) (ZhiziRuntimeState, bool) {
+	state, ok := ctx.Value(zhiziStateKey{}).(ZhiziRuntimeState)
+	return state, ok
 }
 
 func WithProjectID(ctx context.Context, projectID string) context.Context {

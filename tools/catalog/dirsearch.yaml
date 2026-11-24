@@ -1,0 +1,17 @@
+name: dirsearch
+version: 0.5.0
+description: Fast web path scanner
+tool_definition: dirsearch.yaml
+verify_args:
+  - "--version"
+artifacts:
+  linux-amd64:
+    url: https://github.com/maurosoria/dirsearch/releases/download/v0.5.0/dirsearch-v0.5.0-linux-x64-async
+    sha256: 00ebae8abc4e85a790b6e333d40ff6376091aad9279e4e3006b0ae64eb244f96
+    destination: dirsearch
+    mode: "0755"
+  linux-arm64:
+    url: https://github.com/maurosoria/dirsearch/releases/download/v0.5.0/dirsearch-v0.5.0-linux-arm64-async
+    sha256: 9c654d59fe715c6acb4377f14afd4fdfafec02fd570d50b5c12dcbb5df1af6dd
+    destination: dirsearch
+    mode: "0755"

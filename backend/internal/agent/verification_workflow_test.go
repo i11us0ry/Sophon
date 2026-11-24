@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-func TestPlatformVerificationWorkflowAppliedToMainAndSubAgents(t *testing.T) {
+func TestAgentInstructionsDoNotInjectMandatoryVerificationWorkflow(t *testing.T) {
 	service := &Service{}
 	mainInstruction := service.mainAgentInstruction(context.Background())
 	subAgentInstruction := (&subAgentRunner{service: service}).instruction(context.Background())
@@ -14,37 +14,31 @@ func TestPlatformVerificationWorkflowAppliedToMainAndSubAgents(t *testing.T) {
 		"main":     mainInstruction,
 		"subagent": subAgentInstruction,
 	} {
-		for _, expected := range []string{
-			"WP-1 利用前·等价空间扩展",
-			"WP-2 利用后·必要条件最小化",
-			"WP-3 外部先验·搜索空间补全",
-			"Fast Path 或未启动 Planner 时，不要求额外启动子 Agent",
-			"Planner 不发送网络请求",
-			"Worker 必须实际执行",
+		for _, forbidden := range []string{
+			"WP-1",
+			"WP-2",
+			"WP-3",
+			"平台通用验证流程",
 		} {
-			if !strings.Contains(instruction, expected) {
-				t.Fatalf("%s 指令缺少 %q", name, expected)
+			if strings.Contains(instruction, forbidden) {
+				t.Fatalf("%s 指令不应包含固定验证流程 %q", name, forbidden)
 			}
 		}
 	}
 }
 
-func TestVerificationWorkflowIncludedInWritebackAndFinalization(t *testing.T) {
-	for name, text := range map[string]string{
-		"writeback":    projectWritebackGuidance,
-		"finalization": finalizationSynthesisPrompt,
-	} {
-		if !strings.Contains(text, "WP-1") || !strings.Contains(text, "WP-2") {
-			t.Fatalf("%s 缺少验证流程检查", name)
+func TestProjectGuidanceDoesNotDefineMandatoryWorkflow(t *testing.T) {
+	for _, forbidden := range []string{"项目写回纪律（强制）", "测试前用", "必须实际执行"} {
+		if strings.Contains(projectWritebackGuidance, forbidden) ||
+			strings.Contains(finalizationSynthesisPrompt, forbidden) {
+			t.Fatalf("项目工具提示不应包含固定流程 %q", forbidden)
 		}
 	}
 }
 
 func TestWithPlatformVerificationWorkflowPreservesBaseInstruction(t *testing.T) {
 	instruction := withPlatformVerificationWorkflow("基础指令")
-	if !strings.HasPrefix(instruction, "基础指令") ||
-		!strings.Contains(instruction, "WP-1") ||
-		!strings.Contains(instruction, "WP-3") {
+	if instruction != "基础指令" {
 		t.Fatalf("平台验证流程注入异常: %s", instruction)
 	}
 }

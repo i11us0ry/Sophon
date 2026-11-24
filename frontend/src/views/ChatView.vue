@@ -24,6 +24,28 @@ const route = useRoute()
 const MAX_ATTACHMENT_BYTES = 2 * 1024 * 1024 * 1024
 const CONVERSATION_GROUP_COLLAPSE_STORAGE_KEY = 'sophon.conversationGroupsCollapsed'
 type ConversationGroupKey = 'queued' | 'running' | 'completed'
+type AgentLaneRole = 'mainagent' | 'planner' | 'system' | 'worker'
+type AgentLaneStatus =
+  | 'idle'
+  | 'running'
+  | 'waiting'
+  | 'completed'
+  | 'failed'
+  | 'paused'
+  | 'stopped'
+  | 'blocked'
+  | 'exhausted'
+interface AgentLane {
+  key: string
+  role: AgentLaneRole
+  label: string
+  agentId: string
+  intentId: string
+  subtitle: string
+  status: AgentLaneStatus
+  stepCount: number
+  sessionId: string
+}
 function readCollapsedConversationGroups(): Record<ConversationGroupKey, boolean> {
   const defaults: Record<ConversationGroupKey, boolean> = {
     queued: false,
@@ -62,10 +84,14 @@ const copyFailedMessageId = ref('')
 let copyResetTimer: number | undefined
 const messageListRef = ref<HTMLElement | null>(null)
 const stickToBottom = ref(true)
+const agentLaneTranscriptRef = ref<HTMLElement | null>(null)
+const stickToAgentLaneBottom = ref(true)
 const chatFullscreen = ref(false)
 const conversationListCollapsed = ref(
   typeof window !== 'undefined' && window.matchMedia('(max-width: 760px)').matches,
 )
+const agentRailCollapsed = ref(false)
+const selectedAgentLaneKey = ref('')
 const priorityGroupId = ref('')
 const priorityBusinessSystem = ref('')
 const priorityBusinessPriority = ref(50)
@@ -82,9 +108,13 @@ const assistantAvatarSrc = computed(
   () => auth.user?.assistantAvatar?.trim() || brandIcon,
 )
 let refreshTimer: number | undefined
+let refreshSchedulerActive = false
 let refreshInFlight = false
 let refreshConversationId = ''
 let wasConversationRunning = false
+let scrollFrame: number | undefined
+let agentLaneScrollFrame: number | undefined
+let questionRailFrame: number | undefined
 
 const projectRequired = computed(() => !chat.selectedProjectId)
 const selectedProject = computed(
@@ -139,7 +169,12 @@ const projectInactive = computed(
 const projectBlocked = computed(
   () => projectRequired.value || projectUnavailable.value || projectInactive.value,
 )
-const composerBlocked = computed(() => projectBlocked.value || batchParentSelected.value)
+const composerBlocked = computed(
+  () =>
+    projectBlocked.value ||
+    batchParentSelected.value ||
+    chat.updatingConversationProject,
+)
 const selectedProjectStatus = computed(() =>
   selectedProject.value
     ? t(`projectStatus.${selectedProject.value.status}`)
@@ -176,12 +211,16 @@ const allSelected = computed(
     selectableConversations.value.length > 0 &&
     selectableConversations.value.every((conversation) => selected.value.includes(conversation.id)),
 )
-const lastUserId = computed(
-  () => [...chat.messages].reverse().find((item) => item.role === 'user')?.id ?? '',
-)
-const lastAssistantId = computed(
-  () => [...chat.messages].reverse().find((item) => item.role === 'assistant')?.id ?? '',
-)
+function findLastMessageId(role: string) {
+  for (let index = chat.messages.length - 1; index >= 0; index -= 1) {
+    if (chat.messages[index]?.role === role) {
+      return chat.messages[index].id
+    }
+  }
+  return ''
+}
+const lastUserId = computed(() => findLastMessageId('user'))
+const lastAssistantId = computed(() => findLastMessageId('assistant'))
 function isMessageRunning(message: ChatMessage) {
   return (
     message.role === 'assistant' &&
@@ -278,6 +317,21 @@ function statusLabel(status?: string) {
     return t('chat.statusQueued')
   }
   return ''
+}
+
+function conversationInitial(conversation: Conversation) {
+  if (conversation.kind === 'batch_parent') {
+    return 'B'
+  }
+  return (Array.from(conversation.title.trim())[0] || 'C').toUpperCase()
+}
+
+function collapsedConversationLabel(conversation: Conversation) {
+  const status =
+    conversation.status && conversation.status !== 'idle'
+      ? ` · ${statusLabel(conversation.status)}`
+      : ''
+  return `${conversation.title || t('chat.empty')}${status}`
 }
 
 function compactQuestionPreview(content: string) {
@@ -527,15 +581,8 @@ function onZhiziToggle(event: Event) {
   void chat.setZhiziEnabled(enabled)
 }
 
-function onAgentModeChange(event: Event) {
-  const mode = (event.target as HTMLSelectElement).value
-  if (mode === 'fast' || mode === 'deep') {
-    chat.setAgentMode(mode)
-  }
-}
-
-function onRoleChange(event: Event) {
-  chat.selectRole((event.target as HTMLSelectElement).value)
+function onTaskProfileChange(event: Event) {
+  chat.selectTaskProfile((event.target as HTMLSelectElement).value)
 }
 
 async function stopCurrentTask() {
@@ -579,6 +626,29 @@ function toggleConversationList() {
       scrollToBottom()
     }
   })
+}
+
+function toggleAgentRail() {
+  agentRailCollapsed.value = !agentRailCollapsed.value
+}
+
+function selectAgentLane(key: string) {
+  if (!key) return
+  selectedAgentLaneKey.value = key
+  void chat.loadAgentSessionDetails(key)
+  stickToBottom.value = true
+  stickToAgentLaneBottom.value = true
+  void nextTick(() => {
+    scrollToBottom()
+    scrollAgentLaneToBottom()
+    updateActiveQuestionBar()
+  })
+}
+
+function agentLaneStatusLabel(status: AgentLaneStatus) {
+  const key = `chat.agentStatus.${status}`
+  const label = t(key)
+  return label === key ? status : label
 }
 
 async function runCampaignAction(action: 'start' | 'pause' | 'resume') {
@@ -668,9 +738,18 @@ function formatSize(size: number): string {
   return `${size}B`
 }
 
-function messageAttachments(messageId: string) {
-  return chat.attachments.filter((item) => item.messageId === messageId)
-}
+const attachmentsByMessage = computed(() => {
+  const groups = new Map<string, typeof chat.attachments>()
+  for (const attachment of chat.attachments) {
+    const items = groups.get(attachment.messageId)
+    if (items) {
+      items.push(attachment)
+    } else {
+      groups.set(attachment.messageId, [attachment])
+    }
+  }
+  return groups
+})
 
 const processDetailsByMessage = computed(() => {
   const groups = new Map<string, ProcessDetail[]>()
@@ -704,15 +783,24 @@ function isInternalTool(name: string) {
   return INTERNAL_TOOL_PREFIXES.some((prefix) => tool.startsWith(prefix))
 }
 
-function visibleSteps(steps: AgentStep[]) {
-  if (showInternalTools.value) {
-    return steps
-  }
-  return steps.filter(
-    (step) =>
-      (step.type !== 'tool_call' && step.type !== 'tool_result') ||
-      !isInternalTool(step.toolName || ''),
+function isLegacySafetyPlaceholder(step: AgentStep) {
+  return (
+    step.agentKind === 'system' &&
+    step.agentId === 'system-mission-policy' &&
+    step.type === 'agent_completed' &&
+    step.content === '安全边界和工具约束已应用'
   )
+}
+
+function visibleSteps(steps: AgentStep[]) {
+  const visible = showInternalTools.value
+    ? steps
+    : steps.filter(
+        (step) =>
+          (step.type !== 'tool_call' && step.type !== 'tool_result') ||
+          !isInternalTool(step.toolName || ''),
+      )
+  return visible.filter((step) => !isLegacySafetyPlaceholder(step))
 }
 
 function agentMeta(data: Record<string, unknown> = {}) {
@@ -723,6 +811,12 @@ function agentMeta(data: Record<string, unknown> = {}) {
     parentAgentId: String(data.parentAgentId || ''),
     intentId: String(data.intentId || ''),
     hypothesisId: String(data.hypothesisId || ''),
+    attempt: Number(data.attempt || 0),
+    maxAttempts: Number(data.maxAttempts || 0),
+    streamAttempt: Number(data.streamAttempt || 0),
+    maxStreamAttempts: Number(data.maxStreamAttempts || 0),
+    retryReason: String(data.retryReason || ''),
+    recoveryReason: String(data.recoveryReason || ''),
     workerFocus: String(data.workerFocus || ''),
     allowedSkills: Array.isArray(data.allowedSkills)
       ? data.allowedSkills.map((item) => String(item || '')).filter(Boolean)
@@ -730,9 +824,241 @@ function agentMeta(data: Record<string, unknown> = {}) {
   }
 }
 
-function messageSteps(message: ChatMessage): AgentStep[] {
+function normalizeAgentLaneRole(kind: string): AgentLaneRole {
+  const normalized = kind.trim().toLowerCase()
+  if (normalized === 'planner') return 'planner'
+  if (normalized === 'worker' || normalized === 'subagent') return 'worker'
+  if (normalized === 'system') return 'system'
+  return 'mainagent'
+}
+
+function normalizeAgentLaneStatus(value: string): AgentLaneStatus {
+  switch (value.trim().toLowerCase()) {
+    case 'running':
+    case 'waiting':
+    case 'completed':
+    case 'failed':
+    case 'paused':
+      return value.trim().toLowerCase() as AgentLaneStatus
+    default:
+      return 'idle'
+  }
+}
+
+function agentLaneLabel(role: AgentLaneRole) {
+  switch (role) {
+    case 'planner':
+      return t('chat.agentPlanner')
+    case 'system':
+      return t('chat.agentSystem')
+    case 'worker':
+      return t('chat.agentWorker')
+    default:
+      return t('chat.agentMain')
+  }
+}
+
+function laneKeyFromData(data: Record<string, unknown>, role: AgentLaneRole) {
+  if (role !== 'worker') return role
+  const intentId = String(data.intentId || '').trim()
+  const agentId = String(data.agentId || '').trim()
+  return `worker:${intentId || agentId || 'unknown'}`
+}
+
+function agentSessionIDPart(value: string) {
+  return (value.trim() || 'unknown').replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 120)
+}
+
+function liveAgentSessionID(step: AgentStep) {
+  const conversationId = agentSessionIDPart(chat.currentConversationId || '')
+  const role = normalizeAgentLaneRole(step.agentKind || 'mainagent')
+  if (role === 'planner') return `planner:${conversationId}`
+  if (role === 'system') {
+    const agentId = String(step.agentId || '').trim()
+    return agentId
+      ? `system:${conversationId}:${agentSessionIDPart(agentId)}`
+      : `system:${conversationId}`
+  }
+  if (role === 'worker') {
+    return `worker:${conversationId}:${agentSessionIDPart(step.hypothesisId || step.agentId || 'unknown')}`
+  }
+  return `main:${conversationId}`
+}
+
+function laneStatusFromActivity(
+  current: AgentLaneStatus,
+  eventType: string,
+  data: Record<string, unknown>,
+) {
+  const explicit = normalizeAgentLaneStatus(String(data.status || ''))
+  if (explicit !== 'idle') return explicit
+  if (eventType === 'subagent.started') return 'running'
+  if (eventType === 'subagent.completed') return 'completed'
+  if (eventType === 'subagent.failed') return 'failed'
+  if (eventType === 'tool_call' || eventType === 'tool_result' || eventType === 'reasoning') {
+    return current === 'idle' ? 'running' : current
+  }
+  return current
+}
+
+function detailToAgentStep(detail: ProcessDetail): AgentStep | null {
+  const data = detail.data || {}
+  if (detail.eventType === 'reasoning') {
+    return {
+      id: detail.id,
+      type: 'reasoning',
+      ...agentMeta(data),
+      content: String(data.reasoning || detail.message),
+    }
+  }
+  if (detail.eventType === 'thinking') {
+    return {
+      id: detail.id,
+      type: 'thinking',
+      ...agentMeta(data),
+      content: detail.message,
+    }
+  }
+  if (detail.eventType === 'tool_call') {
+    return {
+      id: detail.id,
+      type: 'tool_call',
+      ...agentMeta(data),
+      toolName: detail.message,
+      toolCallId: String(data.toolCallId || ''),
+      content: String(data.arguments || ''),
+    }
+  }
+  if (detail.eventType === 'tool_result') {
+    return {
+      id: detail.id,
+      type: 'tool_result',
+      ...agentMeta(data),
+      toolName: detail.message,
+      toolCallId: String(data.toolCallId || ''),
+      content: String(data.result || ''),
+    }
+  }
+  if (
+    detail.eventType === 'subagent.started' ||
+    detail.eventType === 'subagent.completed' ||
+    detail.eventType === 'subagent.failed'
+  ) {
+    return {
+      id: detail.id,
+      type:
+        detail.eventType === 'subagent.started'
+          ? 'agent_started'
+          : detail.eventType === 'subagent.failed'
+            ? 'agent_failed'
+            : 'agent_completed',
+      ...agentMeta(data),
+      content: detail.message,
+      task: String(data.task || ''),
+      status: String(data.status || ''),
+      durationMs: Number(data.durationMs || 0),
+      resultSummary: String(data.result || ''),
+      errorMessage: String(data.error || ''),
+    }
+  }
+  return null
+}
+
+const agentLanes = computed<AgentLane[]>(() => {
+  const sessions = chat.agentSessions.filter(
+    (session) =>
+      !(
+        session.role === 'system' &&
+        session.agentId === 'system-mission-policy' &&
+        session.status !== 'failed'
+      ),
+  )
+  if (sessions.length) {
+    return sessions.map((session) => {
+      const role = normalizeAgentLaneRole(session.role)
+      return {
+        key: session.id,
+        sessionId: session.id,
+        role,
+        label:
+          role === 'worker'
+            ? session.title || session.agentName || t('chat.agentWorker')
+            : session.title || agentLaneLabel(role),
+        agentId: session.agentId,
+        intentId: '',
+        subtitle:
+          role === 'worker'
+            ? session.agentName || session.hypothesisId
+            : role === 'planner'
+              ? '态势研判'
+              : '',
+        status: session.status as AgentLaneStatus,
+        stepCount: session.activityCount,
+      }
+    })
+  }
+  const baseStatus: AgentLaneStatus = currentConversationRunning.value ? 'running' : 'idle'
+  return (['mainagent', 'planner', 'system'] as const).map((role) => ({
+    key: role,
+    sessionId: '',
+    role,
+    label: agentLaneLabel(role),
+    agentId: role,
+    intentId: '',
+    subtitle: '',
+    status: role === 'mainagent' || role === 'planner' ? baseStatus : 'idle',
+    stepCount: 0,
+  }))
+})
+
+const workerAgentLanes = computed(() =>
+  agentLanes.value.filter((lane) => lane.role === 'worker'),
+)
+const selectedAgentLane = computed(
+  () =>
+    agentLanes.value.find((lane) => lane.key === selectedAgentLaneKey.value) ||
+    agentLanes.value[0],
+)
+const selectedAgentLaneRole = computed(() => selectedAgentLane.value?.role || 'mainagent')
+const selectedAgentLaneTitle = computed(() =>
+  selectedAgentLane.value
+    ? selectedAgentLane.value.label
+    : agentLaneLabel(selectedAgentLaneRole.value),
+)
+const selectedAgentSessionMeta = computed(() => {
+  const sessionId = selectedAgentLane.value?.sessionId
+  return sessionId ? chat.agentSessionMeta[sessionId] : undefined
+})
+const selectedAgentLaneSteps = computed<AgentStep[]>(() => {
+  const sessionId = selectedAgentLane.value?.sessionId || ''
+  if (!sessionId) {
+    return EMPTY_AGENT_STEPS
+  }
   const steps: AgentStep[] = []
-  const details = processDetailsByMessage.value.get(message.id) || []
+  for (const detail of chat.agentSessionActivities[sessionId] || []) {
+    const step = detailToAgentStep(detail)
+    if (step) steps.push(step)
+  }
+  for (const step of chat.liveSteps) {
+    if (liveAgentSessionID(step) !== sessionId) continue
+    steps.push(step)
+  }
+  return visibleSteps(steps)
+})
+const workerRunningCount = computed(
+  () => workerAgentLanes.value.filter((lane) => lane.status === 'running').length,
+)
+const plannerAgentLane = computed(
+  () => agentLanes.value.find((lane) => lane.role === 'planner'),
+)
+
+function buildMessageSteps(message: ChatMessage): AgentStep[] {
+  const steps: AgentStep[] = []
+  const details = (processDetailsByMessage.value.get(message.id) || []).filter(
+    (detail) =>
+      normalizeAgentLaneRole(String(detail.data?.agentKind || 'mainagent')) ===
+      'mainagent',
+  )
   const hasReasoningDetail = details.some((detail) => detail.eventType === 'reasoning')
   if (
     message.role === 'assistant' &&
@@ -808,11 +1134,82 @@ function messageSteps(message: ChatMessage): AgentStep[] {
   return visibleSteps(steps)
 }
 
+const EMPTY_AGENT_STEPS: AgentStep[] = []
+const stepsByMessage = computed(() => {
+  const output = new Map<string, AgentStep[]>()
+  for (const message of chat.messages) {
+    if (message.role === 'assistant') {
+      output.set(message.id, buildMessageSteps(message))
+    }
+  }
+  return output
+})
+
+function stepsForMessage(messageId: string) {
+  return stepsByMessage.value.get(messageId) || EMPTY_AGENT_STEPS
+}
+
 function scrollToBottom() {
   const list = messageListRef.value
   if (list) {
     list.scrollTop = list.scrollHeight
   }
+}
+
+function scrollAgentLaneToBottom() {
+  const body = agentLaneTranscriptRef.value
+  if (body) {
+    body.scrollTop = body.scrollHeight
+  }
+}
+
+function scheduleAgentLaneScrollToBottom() {
+  if (!stickToAgentLaneBottom.value || agentLaneScrollFrame !== undefined) {
+    return
+  }
+  agentLaneScrollFrame = window.requestAnimationFrame(() => {
+    agentLaneScrollFrame = undefined
+    if (stickToAgentLaneBottom.value) {
+      scrollAgentLaneToBottom()
+    }
+  })
+}
+
+function onAgentLaneScroll() {
+  const body = agentLaneTranscriptRef.value
+  if (!body) {
+    return
+  }
+  stickToAgentLaneBottom.value =
+    body.scrollHeight - body.scrollTop - body.clientHeight < 80
+}
+
+async function jumpToAgentLaneBottom() {
+  await nextTick()
+  stickToAgentLaneBottom.value = true
+  scrollAgentLaneToBottom()
+}
+
+function scheduleScrollToBottom() {
+  if (!stickToBottom.value || scrollFrame !== undefined) {
+    return
+  }
+  scrollFrame = window.requestAnimationFrame(() => {
+    scrollFrame = undefined
+    if (stickToBottom.value) {
+      scrollToBottom()
+    }
+  })
+}
+
+function scheduleActiveQuestionBar() {
+  if (questionRailFrame !== undefined) {
+    return
+  }
+  questionRailFrame = window.requestAnimationFrame(() => {
+    questionRailFrame = undefined
+    updateActiveQuestionBar()
+  })
 }
 
 async function jumpToBottom() {
@@ -833,7 +1230,7 @@ async function onMessageScroll() {
   if (!list) {
     return
   }
-  updateActiveQuestionBar(list)
+  scheduleActiveQuestionBar()
   const nearBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 80
   stickToBottom.value = nearBottom
 
@@ -893,7 +1290,12 @@ async function refreshChatPage() {
   }
   refreshInFlight = true
   try {
+    await chat.refreshSelectedProject()
     await chat.refreshConversationStatuses()
+    await chat.loadAgentSessions()
+    if (selectedAgentLaneKey.value) {
+      await chat.loadAgentSessionDetails(selectedAgentLaneKey.value, false, true)
+    }
     if (currentBatchCampaignId.value) {
       await chat.loadCampaignOverview(currentBatchCampaignId.value)
     }
@@ -941,7 +1343,7 @@ async function refreshChatPage() {
       messageListRef.value.scrollTop =
         messageListRef.value.scrollHeight - previousHeight + previousTop
     } else if (stickToBottom.value) {
-      scrollToBottom()
+      scheduleScrollToBottom()
     }
   } finally {
     refreshInFlight = false
@@ -949,7 +1351,9 @@ async function refreshChatPage() {
 }
 
 const liveSteps = computed<AgentStep[]>(() => {
-  const steps = [...chat.liveSteps]
+  const steps = chat.liveSteps.filter(
+    (step) => normalizeAgentLaneRole(step.agentKind || 'mainagent') === 'mainagent',
+  )
   if (chat.reasoningText.trim()) {
     steps.push({
       id: 'live-reasoning',
@@ -969,10 +1373,47 @@ watch(
   async () => {
     cancelEdit()
     showRunSettings.value = false
+    selectedAgentLaneKey.value = ''
     stickToBottom.value = true
+    stickToAgentLaneBottom.value = true
     await nextTick()
     scrollToBottom()
+    scrollAgentLaneToBottom()
     updateActiveQuestionBar()
+  },
+)
+
+watch(
+  () => chat.agentSessions.map((session) => `${session.id}:${session.status}`).join('|'),
+  () => {
+    const sessions = chat.agentSessions
+    if (!sessions.length) {
+      selectedAgentLaneKey.value = ''
+      return
+    }
+    if (!sessions.some((session) => session.id === selectedAgentLaneKey.value)) {
+      selectedAgentLaneKey.value =
+        sessions.find((session) => session.role === 'mainagent')?.id || sessions[0].id
+    }
+  },
+  { immediate: true },
+)
+
+watch(selectedAgentLaneKey, (sessionId) => {
+  if (sessionId) {
+    void chat.loadAgentSessionDetails(sessionId)
+  }
+})
+
+watch(
+  () => {
+    const steps = selectedAgentLaneSteps.value
+    const lastStep = steps.at(-1)
+    return `${selectedAgentLaneKey.value}:${steps.length}:${lastStep?.content?.length || 0}`
+  },
+  async () => {
+    await nextTick()
+    scheduleAgentLaneScrollToBottom()
   },
 )
 
@@ -988,9 +1429,7 @@ watch(
   () => chat.messages.at(-1)?.id,
   async () => {
     await nextTick()
-    if (stickToBottom.value) {
-      scrollToBottom()
-    }
+    scheduleScrollToBottom()
   },
 )
 
@@ -998,16 +1437,19 @@ watch(
   () => chat.responseText,
   async () => {
     await nextTick()
-    if (stickToBottom.value) {
-      scrollToBottom()
-    }
+    scheduleScrollToBottom()
   },
 )
 
 watch(
   () => chat.selectedProjectId,
-  (projectId) => {
-    if (!projectId || chat.creatingConversation || chat.streaming) {
+  async (projectId) => {
+    if (
+      !projectId ||
+      chat.creatingConversation ||
+      chat.updatingConversationProject ||
+      chat.streaming
+    ) {
       return
     }
     const current = chat.conversations.find(
@@ -1016,29 +1458,55 @@ watch(
     if (current?.projectId === projectId) {
       return
     }
+    if (current && chat.messages.length === 0 && !current.lastUserMessage) {
+      await chat.updateCurrentConversationProject(projectId)
+      return
+    }
     void chat.createConversation()
   },
 )
 
 onMounted(async () => {
+  refreshSchedulerActive = true
   await chat.loadConversations()
   const conversationId = String(route.query.conversationId ?? '')
   if (conversationId && conversationId !== chat.currentConversationId) {
     await chat.selectConversation(conversationId)
   }
-  refreshTimer = window.setInterval(() => {
-    void refreshChatPage()
-  }, 5000)
+  const scheduleRefresh = () => {
+    if (!refreshSchedulerActive) {
+      return
+    }
+    if (refreshTimer) {
+      window.clearTimeout(refreshTimer)
+    }
+    refreshTimer = window.setTimeout(async () => {
+      await refreshChatPage()
+      scheduleRefresh()
+    }, chat.agentEventsConnected ? 3000 : 2000)
+  }
+  scheduleRefresh()
   window.addEventListener('keydown', onGlobalKeydown)
   document.addEventListener('pointerdown', onDocumentPointerDown)
 })
 
 onUnmounted(() => {
+  refreshSchedulerActive = false
   if (refreshTimer) {
-    window.clearInterval(refreshTimer)
+    window.clearTimeout(refreshTimer)
   }
+  chat.stopAgentEventStream()
   if (copyResetTimer) {
     window.clearTimeout(copyResetTimer)
+  }
+  if (scrollFrame !== undefined) {
+    window.cancelAnimationFrame(scrollFrame)
+  }
+  if (agentLaneScrollFrame !== undefined) {
+    window.cancelAnimationFrame(agentLaneScrollFrame)
+  }
+  if (questionRailFrame !== undefined) {
+    window.cancelAnimationFrame(questionRailFrame)
   }
   window.removeEventListener('keydown', onGlobalKeydown)
   document.removeEventListener('pointerdown', onDocumentPointerDown)
@@ -1051,28 +1519,77 @@ onUnmounted(() => {
     :class="{
       'chat-layout-fullscreen': chatFullscreen,
       'chat-layout-conversation-collapsed': conversationListCollapsed,
+      'chat-layout-agent-collapsed': agentRailCollapsed,
     }"
   >
-    <aside class="conversation-list">
+    <aside class="conversation-list" :class="{ collapsed: conversationListCollapsed }">
       <div class="conversation-list-header">
         <div class="conversation-list-title">
           <div class="conversation-list-title-copy">
             <span>INPUT / HISTORY</span>
             <strong>{{ t('nav.chat') }}</strong>
           </div>
+          <button
+            class="conversation-list-collapse"
+            type="button"
+            :title="
+              conversationListCollapsed
+                ? t('chat.expandConversationList')
+                : t('chat.collapseConversationList')
+            "
+            :aria-label="
+              conversationListCollapsed
+                ? t('chat.expandConversationList')
+                : t('chat.collapseConversationList')
+            "
+            :aria-expanded="!conversationListCollapsed"
+            @click="toggleConversationList"
+          >
+            <svg v-if="conversationListCollapsed" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M9 6l6 6-6 6" />
+            </svg>
+            <svg v-else viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M15 6l-6 6 6 6" />
+            </svg>
+          </button>
         </div>
         <div class="conversation-header-actions">
           <span class="conversation-count">{{ chat.conversations.length }}</span>
           <button
             class="button compact"
             type="button"
-            :disabled="projectBlocked || chat.creatingConversation"
+            :disabled="projectBlocked || chat.creatingConversation || chat.updatingConversationProject"
             @click="createConversation"
           >
             {{ t('chat.newConversation') }}
           </button>
         </div>
       </div>
+
+      <nav
+        v-if="conversationListCollapsed"
+        class="conversation-collapsed-items"
+        :aria-label="t('nav.chat')"
+      >
+        <button
+          v-for="conversation in chat.conversations"
+          :key="conversation.id"
+          class="conversation-collapsed-chip"
+          :class="{ active: conversation.id === chat.currentConversationId }"
+          type="button"
+          :title="collapsedConversationLabel(conversation)"
+          :aria-label="collapsedConversationLabel(conversation)"
+          @click="chat.selectConversation(conversation.id)"
+        >
+          <span>{{ conversationInitial(conversation) }}</span>
+          <i
+            v-if="conversation.status && conversation.status !== 'idle'"
+            class="conversation-collapsed-status"
+            :class="conversation.status"
+            aria-hidden="true"
+          ></i>
+        </button>
+      </nav>
 
       <label class="select-all">
         <input
@@ -1148,6 +1665,13 @@ onUnmounted(() => {
                       {{ t('chat.batchChildren', { count: conversation.childCount || 0 }) }}
                     </span>
                     <span
+                      v-if="conversation.id === chat.currentConversationId"
+                      class="agent-lane-mini-summary"
+                    >
+                      <span :class="{ active: plannerAgentLane?.status === 'running' }">P</span>
+                      <span :class="{ active: workerRunningCount > 0 }">W{{ workerRunningCount }}</span>
+                    </span>
+                    <span
                       v-if="conversation.status && conversation.status !== 'idle'"
                       class="conversation-status"
                       :class="conversation.status"
@@ -1220,32 +1744,90 @@ onUnmounted(() => {
       </div>
     </aside>
 
-    <button
-      class="conversation-toggle-rail"
-      :class="{ collapsed: conversationListCollapsed }"
-      type="button"
-      :title="
-        conversationListCollapsed
-          ? t('chat.expandConversationList')
-          : t('chat.collapseConversationList')
-      "
-      :aria-label="
-        conversationListCollapsed
-          ? t('chat.expandConversationList')
-          : t('chat.collapseConversationList')
-      "
-      :aria-expanded="!conversationListCollapsed"
-      @click="toggleConversationList"
-    >
-      <svg v-if="conversationListCollapsed" viewBox="0 0 24 24" aria-hidden="true">
-        <path d="M9 6l6 6-6 6" />
-      </svg>
-      <svg v-else viewBox="0 0 24 24" aria-hidden="true">
-        <path d="M15 6l-6 6 6 6" />
-      </svg>
-    </button>
+    <aside class="agent-session-list" :class="{ collapsed: agentRailCollapsed }">
+      <header class="agent-session-header">
+        <div class="agent-session-title">
+          <span>AGENT / SESSIONS</span>
+          <strong>{{ t('chat.agentSessions') }}</strong>
+        </div>
+        <button
+          class="agent-session-collapse"
+          type="button"
+          :title="agentRailCollapsed ? t('chat.expandAgentSessions') : t('chat.collapseAgentSessions')"
+          :aria-label="agentRailCollapsed ? t('chat.expandAgentSessions') : t('chat.collapseAgentSessions')"
+          :aria-expanded="!agentRailCollapsed"
+          @click="toggleAgentRail"
+        >
+          <svg v-if="agentRailCollapsed" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M9 6l6 6-6 6" />
+          </svg>
+          <svg v-else viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M15 6l-6 6 6 6" />
+          </svg>
+        </button>
+      </header>
+      <div class="agent-session-items">
+        <button
+          v-for="lane in agentLanes.filter((item) => item.role !== 'worker')"
+          :key="lane.key"
+          class="agent-session-row"
+          :class="[
+            lane.role,
+            lane.status,
+            { active: selectedAgentLaneKey === lane.key },
+          ]"
+          type="button"
+          :aria-label="`${lane.label} ${agentLaneStatusLabel(lane.status)}`"
+          @click="selectAgentLane(lane.key)"
+        >
+          <span class="agent-session-glyph" aria-hidden="true">
+            {{ lane.role === 'mainagent' ? 'M' : lane.role === 'planner' ? 'P' : 'S' }}
+          </span>
+          <span class="agent-session-copy">
+            <strong>{{ lane.label }}</strong>
+            <small>{{ agentLaneStatusLabel(lane.status) }}</small>
+          </span>
+          <span class="agent-session-count">{{ lane.stepCount }}</span>
+        </button>
+
+        <section v-if="workerAgentLanes.length" class="agent-worker-group">
+          <div class="agent-worker-group-title">
+            <span>{{ t('chat.agentWorkers') }}</span>
+            <em>{{ workerAgentLanes.length }}</em>
+          </div>
+          <button
+            v-for="lane in workerAgentLanes"
+            :key="lane.key"
+            class="agent-session-row worker"
+            :class="[lane.status, { active: selectedAgentLaneKey === lane.key }]"
+            type="button"
+            :aria-label="`${lane.label} ${agentLaneStatusLabel(lane.status)}`"
+            @click="selectAgentLane(lane.key)"
+          >
+            <span class="agent-session-glyph" aria-hidden="true">W</span>
+            <span class="agent-session-copy">
+              <strong>{{ lane.label }}</strong>
+              <small>{{ lane.subtitle || agentLaneStatusLabel(lane.status) }}</small>
+            </span>
+            <span class="agent-session-status-dot" aria-hidden="true"></span>
+          </button>
+        </section>
+      </div>
+    </aside>
 
     <div class="chat-panel">
+      <nav class="agent-lane-tabs" :aria-label="t('chat.agentSessions')">
+        <button
+          v-for="lane in agentLanes"
+          :key="lane.key"
+          type="button"
+          :class="[lane.role, lane.status, { active: selectedAgentLaneKey === lane.key }]"
+          @click="selectAgentLane(lane.key)"
+        >
+          <span>{{ lane.role === 'worker' ? lane.label : lane.label }}</span>
+          <em v-if="lane.role === 'worker'">{{ agentLaneStatusLabel(lane.status) }}</em>
+        </button>
+      </nav>
       <div v-if="chat.error" class="alert error">{{ chat.error }}</div>
       <div v-if="notice" class="alert ok">{{ notice }}</div>
       <div v-if="projectInactive" class="alert warn">
@@ -1528,7 +2110,7 @@ onUnmounted(() => {
         </div>
       </section>
 
-      <div class="message-list-shell">
+      <div v-if="selectedAgentLaneRole === 'mainagent'" class="message-list-shell">
         <div ref="messageListRef" class="message-list" @scroll.passive="onMessageScroll">
           <p v-if="chat.loadingOlderMessages" class="message-history-loading">
             {{ t('common.loading') }}
@@ -1582,13 +2164,16 @@ onUnmounted(() => {
               </div>
               <AgentRunSteps
                 v-if="message.role === 'assistant'"
-                :steps="messageSteps(message)"
+                :steps="stepsForMessage(message.id)"
                 :live="isMessageRunning(message)"
-                :total-count="message.processDetailCount || 0"
+                :total-count="
+                  chat.processDetailMeta[message.id]?.total ||
+                  message.processDetailCount ||
+                  0
+                "
                 :loaded="chat.processDetailMeta[message.id]?.loaded || false"
                 :loading="chat.processDetailMeta[message.id]?.loading || false"
                 :has-more="chat.processDetailMeta[message.id]?.hasMore || false"
-                :agent-summary="chat.processDetailMeta[message.id]?.agentSummary"
                 @load-more="chat.loadProcessDetailsForMessage(message.id)"
               />
               <MarkdownContent
@@ -1596,9 +2181,12 @@ onUnmounted(() => {
                 :content="message.content"
               />
               <p v-else>{{ message.content }}</p>
-              <div v-if="messageAttachments(message.id).length" class="message-attachments">
+              <div
+                v-if="attachmentsByMessage.get(message.id)?.length"
+                class="message-attachments"
+              >
                 <a
-                  v-for="item in messageAttachments(message.id)"
+                  v-for="item in attachmentsByMessage.get(message.id)"
                   :key="item.id"
                   class="attachment-chip"
                   :href="apiUrl(`/attachments/${item.id}/content`)"
@@ -1722,49 +2310,75 @@ onUnmounted(() => {
         </button>
       </div>
 
-      <div class="chat-composer">
+      <div v-else class="agent-lane-transcript-shell">
+        <header class="agent-lane-transcript-head">
+          <div>
+            <span>{{ t(`chat.agentRole.${selectedAgentLaneRole}`) }}</span>
+            <strong>{{ selectedAgentLaneTitle }}</strong>
+          </div>
+          <span class="agent-lane-status" :class="selectedAgentLane?.status">
+            {{ agentLaneStatusLabel(selectedAgentLane?.status || 'idle') }}
+          </span>
+        </header>
+        <div
+          ref="agentLaneTranscriptRef"
+          class="agent-lane-transcript-body"
+          @scroll.passive="onAgentLaneScroll"
+        >
+          <AgentRunSteps
+            v-if="selectedAgentLaneSteps.length"
+            :steps="selectedAgentLaneSteps"
+            :live="selectedAgentLane?.status === 'running'"
+            :total-count="selectedAgentSessionMeta?.total || selectedAgentLaneSteps.length"
+            :loaded="selectedAgentSessionMeta?.loaded || false"
+            :loading="selectedAgentSessionMeta?.loading || false"
+            :has-more="selectedAgentSessionMeta?.hasMore || false"
+            @load-more="
+              selectedAgentLane?.sessionId &&
+                chat.loadAgentSessionDetails(selectedAgentLane.sessionId, true)
+            "
+          />
+          <p v-else class="message-empty">{{ t('chat.agentSessionEmpty') }}</p>
+        </div>
+        <button
+          v-if="!stickToAgentLaneBottom && selectedAgentLaneSteps.length"
+          class="scroll-to-bottom-button"
+          type="button"
+          :title="t('chat.scrollToBottom')"
+          :aria-label="t('chat.scrollToBottom')"
+          @click="void jumpToAgentLaneBottom()"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12 5v14" />
+            <path d="m6 13 6 6 6-6" />
+          </svg>
+        </button>
+      </div>
+
+      <div v-if="selectedAgentLaneRole === 'mainagent'" class="chat-composer">
         <div class="command-bus-head">
           <span>COMMAND BUS</span>
           <span>03 / INPUT</span>
         </div>
         <div class="chat-composer-context">
           <div class="chat-context-group">
-            <label class="composer-selector" :title="t('chat.agentModeHint')">
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M13 2 4 14h7l-1 8 9-12h-7l1-8Z" />
-              </svg>
-              <span>{{ t('chat.agentMode') }}</span>
-              <select
-                :value="chat.agentMode"
-                :aria-label="t('chat.agentMode')"
-                :disabled="chat.creatingConversation || chat.streaming"
-                @change="onAgentModeChange"
-              >
-                <option value="fast">{{ t('chat.fastPath') }}</option>
-                <option value="deep">{{ t('chat.deepPath') }}</option>
-              </select>
-              <svg class="composer-selector-arrow" viewBox="0 0 24 24" aria-hidden="true">
-                <path d="m6 9 6 6 6-6" />
-              </svg>
-            </label>
-
             <label class="composer-selector">
               <svg viewBox="0 0 24 24" aria-hidden="true">
                 <path d="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8Z" />
                 <path d="M4 20c0-3.5 3.6-6 8-6s8 2.5 8 6" />
               </svg>
-              <span>{{ t('chat.role') }}</span>
+              <span>{{ t('chat.taskProfile') }}</span>
               <select
                 :value="chat.selectedRoleId"
-                :aria-label="t('chat.role')"
+                :aria-label="t('chat.taskProfile')"
                 :disabled="
                   !chat.rolesLoaded ||
                   chat.creatingConversation ||
                   chat.streaming
                 "
-                @change="onRoleChange"
+                @change="onTaskProfileChange"
               >
-                <option value="">{{ t('chat.noRole') }}</option>
+                <option value="">{{ t('chat.noTaskProfile') }}</option>
                 <option v-for="role in chat.roles" :key="role.id" :value="role.id">
                   {{ role.name }}
                 </option>
@@ -1782,7 +2396,11 @@ onUnmounted(() => {
               <select
                 v-model="chat.selectedProjectId"
                 :aria-label="t('chat.project')"
-                :disabled="chat.creatingConversation || chat.streaming"
+                :disabled="
+                  chat.creatingConversation ||
+                  chat.updatingConversationProject ||
+                  chat.streaming
+                "
               >
                 <option value="">{{ t('chat.noProject') }}</option>
                 <option
@@ -3649,6 +4267,8 @@ onUnmounted(() => {
   border-radius: 4px;
   background: var(--chat-panel);
   box-shadow: 0 3px 12px rgba(0, 0, 0, 0.14);
+  content-visibility: auto;
+  contain-intrinsic-size: auto 160px;
 }
 
 .message.user {
@@ -3843,10 +4463,6 @@ onUnmounted(() => {
   display: none;
 }
 
-.chat-layout.chat-layout-fullscreen .conversation-toggle-rail {
-  display: none;
-}
-
 .chat-layout.chat-layout-fullscreen .chat-panel {
   grid-column: 1 / -1;
   grid-row: 1 / -1;
@@ -3959,6 +4575,427 @@ onUnmounted(() => {
     padding-inline: 10px;
   }
 }
+
+.agent-lane-mini-summary {
+  display: inline-flex;
+  gap: 3px;
+  align-items: center;
+}
+
+.agent-lane-mini-summary span {
+  padding: 0 3px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--text-muted);
+  font-family: var(--mono);
+  font-size: 8px;
+}
+
+.agent-lane-mini-summary span.active {
+  border-color: color-mix(in srgb, var(--chat-work) 45%, var(--border));
+  color: var(--chat-work);
+  background: color-mix(in srgb, var(--chat-work) 8%, transparent);
+}
+
+.chat-layout {
+  grid-template-columns: 270px 214px minmax(0, 1fr);
+}
+
+.chat-layout.chat-layout-agent-collapsed {
+  grid-template-columns: 270px 52px minmax(0, 1fr);
+}
+
+.agent-session-list {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--chat-panel);
+}
+
+.agent-session-header {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  min-height: 58px;
+  padding: 10px 10px 9px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.agent-session-title {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.agent-session-title span {
+  color: var(--chat-work);
+  font-family: var(--mono);
+  font-size: 7px;
+}
+
+.agent-session-title strong {
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-session-collapse,
+.conversation-list-collapse {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  color: var(--text-muted);
+  background: var(--surface-soft);
+  cursor: pointer;
+  place-items: center;
+}
+
+.agent-session-collapse:hover,
+.conversation-list-collapse:hover {
+  border-color: var(--chat-work);
+  color: var(--chat-work);
+}
+
+.agent-session-collapse svg,
+.conversation-list-collapse svg {
+  width: 12px;
+  height: 12px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+}
+
+.agent-session-items {
+  display: grid;
+  gap: 5px;
+  align-content: start;
+  min-height: 0;
+  padding: 8px;
+  overflow: auto;
+}
+
+.agent-session-row {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr) auto;
+  gap: 7px;
+  align-items: center;
+  min-width: 0;
+  padding: 7px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: var(--text-secondary);
+  background: color-mix(in srgb, var(--field-bg) 72%, transparent);
+  cursor: pointer;
+  text-align: left;
+}
+
+.agent-session-row:hover {
+  border-color: var(--border-strong);
+}
+
+.agent-session-row.active {
+  border-color: color-mix(in srgb, var(--chat-work) 38%, var(--border));
+  background: color-mix(in srgb, var(--chat-work) 8%, var(--field-bg));
+  box-shadow: inset 3px 0 0 var(--chat-work);
+}
+
+.agent-session-glyph {
+  display: grid;
+  width: 22px;
+  height: 22px;
+  border-radius: 4px;
+  color: var(--chat-work);
+  background: color-mix(in srgb, var(--chat-work) 10%, transparent);
+  font-family: var(--mono);
+  font-size: 9px;
+  place-items: center;
+}
+
+.agent-session-row.planner .agent-session-glyph {
+  color: var(--chat-input);
+  background: color-mix(in srgb, var(--chat-input) 10%, transparent);
+}
+
+.agent-session-row.system .agent-session-glyph {
+  color: var(--text-muted);
+  background: color-mix(in srgb, var(--text-muted) 9%, transparent);
+}
+
+.agent-session-copy {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.agent-session-copy strong,
+.agent-session-copy small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-session-copy strong {
+  color: var(--text-primary);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.agent-session-copy small {
+  color: var(--text-muted);
+  font-family: var(--mono);
+  font-size: 8px;
+}
+
+.agent-session-count {
+  color: var(--text-muted);
+  font-family: var(--mono);
+  font-size: 8px;
+}
+
+.agent-session-status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-muted);
+}
+
+.agent-session-row.running .agent-session-status-dot {
+  background: var(--chat-work);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--chat-work) 70%, transparent);
+  animation: chat-live-pulse 1.6s ease-in-out infinite;
+}
+
+.agent-session-row.completed .agent-session-status-dot {
+  background: var(--success);
+}
+
+.agent-session-row.failed .agent-session-status-dot {
+  background: var(--danger);
+}
+
+.agent-session-row.blocked .agent-session-status-dot,
+.agent-session-row.exhausted .agent-session-status-dot {
+  background: var(--danger);
+}
+
+.agent-session-row.paused .agent-session-status-dot,
+.agent-session-row.waiting .agent-session-status-dot {
+  background: var(--warning);
+}
+
+.agent-session-row.stopped .agent-session-status-dot {
+  background: var(--text-muted);
+}
+
+.agent-worker-group {
+  display: grid;
+  gap: 5px;
+  margin-top: 4px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.agent-worker-group-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 4px;
+  color: var(--text-muted);
+  font-family: var(--mono);
+  font-size: 8px;
+}
+
+.agent-worker-group-title em {
+  font-style: normal;
+}
+
+.agent-session-list.collapsed .agent-session-title,
+.agent-session-list.collapsed .agent-session-copy,
+.agent-session-list.collapsed .agent-session-count,
+.agent-session-list.collapsed .agent-session-status-dot,
+.agent-session-list.collapsed .agent-worker-group-title {
+  display: none;
+}
+
+.agent-session-list.collapsed .agent-session-header {
+  justify-content: center;
+  padding-inline: 8px;
+}
+
+.agent-session-list.collapsed .agent-session-collapse {
+  margin-left: 0;
+}
+
+.agent-session-list.collapsed .agent-session-row {
+  grid-template-columns: 22px;
+  justify-content: center;
+  padding-inline: 6px;
+}
+
+.agent-lane-tabs {
+  display: none;
+  gap: 5px;
+  min-width: 0;
+  overflow-x: auto;
+}
+
+.agent-lane-tabs button {
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: 5px;
+  align-items: center;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-muted);
+  background: var(--surface-soft);
+  font-size: 10px;
+}
+
+.agent-lane-tabs button.active {
+  border-color: color-mix(in srgb, var(--chat-work) 45%, var(--border));
+  color: var(--text-primary);
+  background: color-mix(in srgb, var(--chat-work) 9%, var(--surface-soft));
+}
+
+.agent-lane-tabs em {
+  color: var(--text-muted);
+  font-family: var(--mono);
+  font-size: 8px;
+  font-style: normal;
+}
+
+.agent-lane-transcript-shell {
+  position: relative;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--chat-panel);
+}
+
+.agent-lane-transcript-body {
+  min-height: 0;
+  overflow: auto;
+}
+
+.agent-lane-transcript-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.agent-lane-transcript-head > div {
+  display: grid;
+  gap: 3px;
+}
+
+.agent-lane-transcript-head span:first-child {
+  color: var(--chat-work);
+  font-family: var(--mono);
+  font-size: 8px;
+}
+
+.agent-lane-transcript-head strong {
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.agent-lane-status {
+  padding: 3px 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-muted);
+  font-size: 9px;
+}
+
+.agent-lane-status.running {
+  border-color: color-mix(in srgb, var(--chat-work) 40%, var(--border));
+  color: var(--chat-work);
+}
+
+.agent-lane-status.completed {
+  color: var(--success);
+}
+
+.agent-lane-status.failed {
+  color: var(--danger);
+}
+
+.agent-lane-status.paused,
+.agent-lane-status.waiting {
+  color: var(--warning);
+}
+
+.chat-layout.chat-layout-conversation-collapsed {
+  grid-template-columns: 52px 214px minmax(0, 1fr);
+  gap: 10px;
+}
+
+.chat-layout.chat-layout-conversation-collapsed.chat-layout-agent-collapsed {
+  grid-template-columns: 52px 52px minmax(0, 1fr);
+}
+
+.chat-layout.chat-layout-fullscreen .agent-session-list {
+  display: none;
+}
+
+@media (max-width: 1100px) {
+  .chat-layout,
+  .chat-layout.chat-layout-agent-collapsed {
+    grid-template-columns: 270px minmax(0, 1fr);
+  }
+
+  .agent-session-list {
+    display: none;
+  }
+
+  .agent-lane-tabs {
+    display: flex;
+  }
+
+  .chat-layout.chat-layout-conversation-collapsed,
+  .chat-layout.chat-layout-conversation-collapsed.chat-layout-agent-collapsed {
+    grid-template-columns: 52px minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 760px) {
+  .chat-layout,
+  .chat-layout.chat-layout-agent-collapsed {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 230px) minmax(0, 1fr);
+  }
+
+  .chat-layout.chat-layout-conversation-collapsed,
+  .chat-layout.chat-layout-conversation-collapsed.chat-layout-agent-collapsed {
+    grid-template-columns: 52px minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
+  }
+
+  .agent-session-list {
+    display: none;
+  }
+
+  .agent-lane-tabs {
+    padding-inline: 2px;
+  }
+}
 </style>
 
 <style scoped>
@@ -3969,53 +5006,121 @@ onUnmounted(() => {
   gap: 3px;
 }
 
-.conversation-toggle-rail {
-  position: absolute;
-  top: 50%;
-  left: calc(270px + 5px);
-  z-index: 6;
+.chat-layout.chat-layout-conversation-collapsed {
+  grid-template-columns: 52px 214px minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  gap: 10px;
+}
+
+.chat-layout.chat-layout-conversation-collapsed.chat-layout-agent-collapsed {
+  grid-template-columns: 52px 52px minmax(0, 1fr);
+}
+
+.conversation-list.collapsed {
+  grid-template-rows: auto minmax(0, 1fr);
+  max-height: none;
+}
+
+.conversation-list.collapsed .conversation-list-header {
+  min-height: 58px;
+  padding: 10px 8px;
+}
+
+.conversation-list.collapsed .conversation-list-title {
+  justify-content: center;
+}
+
+.conversation-list.collapsed .conversation-list-title-copy,
+.conversation-list.collapsed .conversation-header-actions,
+.conversation-list.collapsed .select-all,
+.conversation-list.collapsed .conversation-items,
+.conversation-list.collapsed .bulk-bar {
+  display: none;
+}
+
+.conversation-list.collapsed .conversation-list-collapse {
+  margin-left: 0;
+}
+
+.conversation-collapsed-items {
   display: grid;
-  width: 30px;
-  height: 30px;
+  gap: 6px;
+  align-content: start;
+  min-height: 0;
+  padding: 4px 8px 10px;
+  overflow-y: auto;
+  scrollbar-width: none;
+}
+
+.conversation-collapsed-items::-webkit-scrollbar {
+  display: none;
+}
+
+.conversation-collapsed-chip {
+  position: relative;
+  display: grid;
+  width: 34px;
+  height: 34px;
+  min-width: 34px;
+  margin-inline: auto;
   padding: 0;
-  border: 1px solid color-mix(in srgb, var(--chat-work) 34%, var(--border));
-  border-radius: 50%;
-  color: var(--chat-work);
-  background: color-mix(in srgb, var(--surface) 92%, var(--chat-work));
-  box-shadow: 0 5px 16px rgba(0, 0, 0, 0.28);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-muted);
+  background: color-mix(in srgb, var(--field-bg) 82%, transparent);
+  font-family: var(--mono);
+  font-size: 11px;
   cursor: pointer;
   place-items: center;
-  transform: translate(-50%, -50%);
 }
 
-.conversation-toggle-rail:hover {
-  border-color: color-mix(in srgb, var(--chat-work) 58%, var(--border));
-  background: color-mix(in srgb, var(--chat-work) 12%, var(--surface));
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.38);
+.conversation-collapsed-chip:hover {
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+  background: var(--surface-soft);
 }
 
-.conversation-toggle-rail.collapsed {
-  left: 15px;
+.conversation-collapsed-chip.active {
+  border-color: color-mix(in srgb, var(--chat-work) 48%, var(--border));
+  color: var(--chat-work);
+  background: color-mix(in srgb, var(--chat-work) 9%, var(--field-bg));
+  box-shadow: inset 2px 0 0 var(--chat-work);
 }
 
-.conversation-toggle-rail svg {
-  width: 13px;
-  height: 13px;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 1.8;
-  stroke-linecap: round;
-  stroke-linejoin: round;
+.conversation-collapsed-chip:focus-visible {
+  outline: 2px solid var(--chat-work);
+  outline-offset: 1px;
 }
 
-.chat-layout.chat-layout-conversation-collapsed {
-  grid-template-columns: minmax(0, 1fr);
-  grid-template-rows: minmax(0, 1fr);
-  gap: 0;
+.conversation-collapsed-status {
+  position: absolute;
+  right: -3px;
+  bottom: -3px;
+  width: 8px;
+  height: 8px;
+  border: 2px solid var(--chat-panel);
+  border-radius: 50%;
+  background: var(--text-muted);
 }
 
-.chat-layout.chat-layout-conversation-collapsed .conversation-list {
-  display: none;
+.conversation-collapsed-status.running {
+  background: var(--chat-work);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--chat-work) 65%, transparent);
+  animation: chat-live-pulse 1.6s ease-in-out infinite;
+}
+
+.conversation-collapsed-status.waiting,
+.conversation-collapsed-status.paused {
+  background: var(--warning);
+}
+
+.conversation-collapsed-status.completed {
+  background: var(--success);
+}
+
+.conversation-collapsed-status.failed,
+.conversation-collapsed-status.blocked {
+  background: var(--danger);
 }
 
 .chat-layout.chat-layout-conversation-collapsed .chat-panel {
@@ -4068,20 +5173,8 @@ onUnmounted(() => {
 
 @media (max-width: 760px) {
   .chat-layout.chat-layout-conversation-collapsed {
-    grid-template-columns: minmax(0, 1fr);
+    grid-template-columns: 52px minmax(0, 1fr);
     grid-template-rows: minmax(0, 1fr);
-  }
-
-  .conversation-toggle-rail {
-    top: calc(230px + 4px);
-    left: 50%;
-    transform: translate(-50%, -50%);
-  }
-
-  .conversation-toggle-rail.collapsed {
-    top: 50%;
-    left: 15px;
-    transform: translate(-50%, -50%);
   }
 }
 </style>

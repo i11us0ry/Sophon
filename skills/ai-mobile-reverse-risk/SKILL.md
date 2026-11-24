@@ -1,219 +1,75 @@
 ---
 name: ai-mobile-reverse-risk
 description: >-
-  Android App 授权逆向的 Phase 4 综合风险审计。用于汇总协议与 Native 证据，分析弱加密、认证授权、组件、WebView、JSBridge、数据安全和业务逻辑风险。
+  Android App 综合风险审计方法。用于汇总协议与 Native 证据，分析弱加密、认证授权、组件、WebView、JSBridge、数据安全和业务逻辑风险。
 metadata:
   tags: [移动安全, app逆向, 风险审计, guardian]
 ---
 
 # Agent: CryptoVulnAnalyzer（弱加密与高风险漏洞筛查 Agent）
 
+## 适用场景
+
+适合已有代码、协议或 Native 线索，需要评估弱加密、认证授权、组件、WebView、JSBridge、数据安全和业务逻辑风险。
+
+## 不适用场景
+
+## 核心判断
+
+每条风险都应按证据层级评估：危险模式、调用可达、输入可控、静态可构造和动态已验证。Guardian L1-L5 衡量证据充分度；严重度则来自资源、权限和业务影响，两者不能混用。
+
+## 证据标准
+
+- 可确认：已有代码、协议、Native 位置、可达链和可控输入证据闭合。
+- 待验证：危险模式或可达链存在，但缺少输入控制、运行时证据或后端行为。
+- 判为否：代码不可达、输入受约束、安全机制实际生效，或只有密钥/算法名称而无安全影响。
+
+## 决策树
+
+- 加载前序产物：先确认覆盖率与缺失阶段。
+- 识别候选：关联 Java、smali、native 和协议字段。
+- 评估可达性：从真实组件或接口入口追踪到危险操作。
+- 判断控制面：确认外部输入是否进入关键参数。
+- 限制影响：静态判断与运行时验证分开记录。
+
+## 常见误判
+
+- 发现硬编码 key、弱算法或 `exported=true` 就直接确认高危漏洞。
+- 把 Guardian L1/L2 模式命中当成 L4 可利用。
+- 忽略后端鉴权、签名和服务端校验，仅凭客户端代码推断结果。
+- 使用真实 Token、密钥或账号验证签名与接口。
+- 将普通调试信息、版本指纹或占位配置纳入垃圾 Finding。
+
 ## Guardian 验证层定义
 
-本阶段使用五级 Guardian 验证层评估每条发现的确认深度。**L1-L5 不是风险等级，是证据充分度。** 同一条漏洞可以是 Critical 严重度但只在 L2，也可以是 Medium 严重度但已达 L4。
+Guardian 五级表示证据充分度，不是风险等级。同一条问题可以是 Critical 严重度但只在 L2，也可以是 Medium 严重度但已有运行时证据。
 
-| Level | 名称 | 判断标准 | 所需证据 | Phase 4 是否可达 |
+| Level | 名称 | 判断标准 | 所需证据 | 证据类型 |
 |-------|------|---------|---------|----------------|
 | **L1** | PATTERN | 在代码中发现危险模式，但不确认是否被实际调用 | 文件路径 + 代码行号 + 匹配的危险模式（如 ECB、硬编码字符串、exported=true） | ✅ 可达 |
 | **L2** | REACHABLE | 危险代码存在可达调用路径，不是死代码 | 从入口（Activity / Service / exported 方法 / BroadcastReceiver）到危险代码的完整调用链 | ✅ 可达 |
 | **L3** | CONTROLLABLE | 外部可控输入（Intent extra / 网络参数 / ContentProvider query）能抵达危险代码 | 具体可控参数 + 静态 source→sink 追踪路径，证明攻击者数据可流入危险点 | ✅ 可达（部分需 jadx 追踪） |
-| **L4** | EXPLOITABLE | 静态可构造完整攻击载荷，所有参数来源已明确，无需运行时确认 | 完整攻击链描述 + 每个参数的具体来源（Phase 2/3 证据）+ PoC 思路可直接落地 | ✅ Phase 4 上限 |
-| **L5** | VERIFIED | 动态验证已确认（Frida hook 输出 / 运行时抓包 / 设备测试） | 运行时证据（hook 输出、实际值、截图） | ❌ 超出 Phase 4 范围，属于 Phase 5 |
+| **L4** | EXPLOITABLE | 静态可构造完整攻击载荷，所有参数来源已明确 | 完整攻击链描述 + 每个参数的具体来源 | ✅ 静态证据 |
+| **L5** | VERIFIED | 已有运行时验证 | 运行时证据（hook 输出、实际值、截图） | ✅ 运行时证据 |
 
-**Phase 5 使用 Guardian Level 排优先级：**
+**可按 Guardian Level 排验证优先级：**
 - L4：直接写 PoC，材料齐全
 - L3：先确认参数可控性（可能需要 Frida），再写 PoC
 - L2：先建立调用链证据，再评估是否值得 PoC
 - L1：暂不出 PoC，标记为待深入分析
-- L5：Phase 5 完成后回写
+- L5：已有运行时结果时直接引用
 
-## 核心目标
+## 方法定位
 
-本阶段是整个 6 阶段流程中的**综合收口阶段**，也是加密分析与高风险问题审计的统一判断中心。
-
-它的任务不是重复 Phase 1 的资产盘点，也不是重复 Phase 2 的流量映射，更不是重复 Phase 3 的 so/JNI 下钻，而是把前 2、3 步已经得到的结果真正合流，完成两件事：
-
-1. 重新收敛并判断 `sign`、`data`、`encryptData`、`token`、`timestamp`、`nonce` 等关键字段对应的加密、签名、编码、校验逻辑，评估是否已可还原、部分还原或仅观测到线索。
-2. 基于 Phase 1-3 的证据，对 APP 源码与请求数据中可能导致问题的高风险点进行系统化代码审计，覆盖弱加密、认证授权、数据安全、业务逻辑、组件安全，以及接近 Top10 风险面的代码问题，例如 SQL 注入、命令执行/RCE、路径穿越、任意文件处理、WebView/JSBridge 高危调用、敏感信息泄露等。
-
-本阶段的输出应该是：
-
-- 风险结论
-- 加密/签名还原判断
-- Top10 风险覆盖情况
-- 每个问题的利用条件、攻击路径、影响范围和修复建议
-
-## 角色定义
-
-你是移动安全综合分析 Agent，负责在 Phase 4 执行**全局弱加密与高风险漏洞筛查**，并将前序流量、代码、JNI、so 证据汇总为统一的风险结论与还原判断。
-
-你的职责包含：
-
-- 吃掉 Phase 2 的协议与字段映射结果
-- 吃掉 Phase 3 的 JNI / so / native 结果
-- 对 `sign/data` 相关算法做综合判断
-- 对源码中可能导致 Top10 风险的问题做静态审计
-- 将“已确认”和“需验证”问题分开
-- 给出修复建议，但不负责生成 POC 脚本
-
-**核心原则**：
-
-- 每个问题都必须尽量给出代码证据
-- 每个结论都应说明来自哪一阶段的证据
-- 明确区分：
-  - `已确认`
-  - `需验证`
-  - `仅有线索`
-- 对无法从当前材料确认的后端问题，不能直接写成已确认事实
-
-## 职责边界（硬性约束，不可违反）
-
-- 本阶段允许吸收 Phase 2 和 Phase 3 的结果来分析 `sign/data` 算法与风险，但**不重新承担 Phase 2 的流量对齐和 Phase 3 的 JNI 深挖职责**
-- 若 Phase 2 或 Phase 3 的结果不足以支撑结论，**允许再次回看 Java 代码、smali、配置文件、`jadx-mcp` 返回的上下文，以及已生成的 `raw_*.json`**，用于补足分析证据
-- 若 native 结果不完整，允许再次回看 so/JNI 相关伪代码或 Phase 3 输出，但不重新执行动态验证
-- 本阶段是**全局综合风险分析**，不是单一接口的 PoC 设计阶段
-- 不在本阶段生成验证脚本或 PoC 代码；PoC 产出属于 Phase 5
-- 不在本阶段发送任何网络请求
-- 不访问真实接口、不验证密钥、不执行外部程序
-- 不得编造后端鉴权缺失、支付校验缺失、签名失效等结论
-- 对仅凭前端或抓包无法确认的问题，必须写明 `需验证`
-
-## 禁止做的事
-
-- 不生成 PoC 脚本
-- 不生成验证请求包
-- 不主动发请求
-- 不访问任何真实接口、对象存储、管理后台或第三方服务
-- 不验证密钥、Token、签名算法是否可直接利用
-- 不执行外部程序
-
-## 路径约定
-
-- 用户提供的源码目录、输出目录、前序产物目录，可以使用真实路径。
-- 本仓库内部的规则文件、脚本、模板若被引用，一律以 `ai-mobile-reverse-skills/` 为根目录描述。
-- 不在本 Agent 中写入任何个人机器绝对路径。
-- 本阶段默认读取 `{output_dir}/step1/`、`{output_dir}/step2/`、`{output_dir}/step3/` 的前序产物，写入 `{output_dir}/step4/`；旧版根目录平铺文件只作为兼容兜底读取。
-
-## 允许再次分析的范围
-
-如果前面阶段没有把问题分析清楚，本阶段允许做“再次分析”，但仅限以下范围：
-
-- 再次阅读 `{target_dir}` 中的 Java / Kotlin / smali / XML / 配置文件
-- 再次调用 `jadx-mcp` 或重新查看其返回结果
-- 再次消费 `protocol_map.json`、`traffic_alignment.json`、`api_endpoints.json`
-- 再次消费 `crypto_native_analysis.json`、`jni_analysis.json`
-- 再次消费 `raw_endpoints.json`、`raw_secrets.json`、`raw_env_guards.json`、`raw_native_bridges.json`
-
-再次分析的目的仅限：
-
-- 补足证据
-- 明确 `sign/data` 算法和参数来源
-- 补足 Top10 风险判断
-- 提高置信度
-
-不得借“再次分析”之名执行网络请求、动态调试、PoC 生成。
-
-## 安全边界（必须遵守）
-
-- 仅做本地静态分析和前序结果汇总，严禁主动访问网络
-- 不得尝试使用发现的密钥、Token、签名逻辑去调用任何接口
-- 不得验证真实账号、订单、支付、管理后台、对象存储等服务
-- 不得执行动态调试、Frida hook、Burp 重放，这些属于其他阶段或由用户自行控制
-
-## 启动前置条件（硬性门控，不满足则立即终止）
-
-在开始任何工作之前，必须检查以下条件：
-
-1. `{output_dir}/step1/file_inventory.json` 必须存在  
-2. 以下文件中至少存在 1 个，用于提供流量与代码映射基础：
-   - `{output_dir}/step2/protocol_map.json`
-   - `{output_dir}/step2/traffic_alignment.json`
-   - `{output_dir}/step2/api_endpoints.json`
-3. 以下文件中至少存在 1 个，用于提供加密与 native 基础：
-   - `{output_dir}/step3/crypto_native_analysis.json`
-   - `{output_dir}/step3/jni_analysis.json`
-   - `{output_dir}/step1/raw_native_bridges.json`
-
-若 `file_inventory.json` 缺失，立即终止并输出：
-
-`「错误：file_inventory.json 不存在，Phase 1 未完成，无法启动弱加密与高风险漏洞筛查。」`
-
-若 Phase 2 与 Phase 3 的关键输入均缺失，立即终止并输出：
-
-`「错误：Phase 4 缺少协议映射或 native 分析关键输入，无法完成 sign/data 还原和高风险漏洞筛查。请先完成 Phase 2 与 Phase 3 的关键输出。」`
-
-若只有部分 Phase 3 输入缺失，但 Phase 2 结果齐全，可以继续，但必须在输出中明确：
-
-- `native_coverage = partial`
-- 对所有 native 相关结论降低置信度
-
-## 输入
-
-- `{target_dir}`：脱壳后、反编译后的源码目录
-- `{output_dir}`：结果输出目录
-- `{output_dir}/step1/file_inventory.json`
-- `{output_dir}/step2/protocol_map.json`
-- `{output_dir}/step2/traffic_alignment.json`
-- `{output_dir}/step2/api_endpoints.json`
-- `{output_dir}/step3/crypto_native_analysis.json`
-- `{output_dir}/step3/jni_analysis.json`
-- `{output_dir}/step4/secrets_report.json`，可选；若缺失但存在 `raw_secrets.json` 或相关静态证据，本阶段应在输出阶段补齐生成
-- `{output_dir}/step4/jsbridge_analysis.json`，可选；若缺失但存在 WebView / JSBridge 相关线索，本阶段应在输出阶段补齐生成
-- `{output_dir}/step1/raw_endpoints.json`
-- `{output_dir}/step1/raw_secrets.json`
-- `{output_dir}/step1/raw_env_guards.json`
-- `{output_dir}/step1/raw_native_bridges.json`
-
-允许其中一部分不存在，但必须根据实际输入调整覆盖率说明。
-
-### 优先消费字段（必须优先读取）
-
-若以下字段存在，本阶段必须优先消费，而不是退回到重新全文猜测：
-
-#### 来自 Phase 2：`protocol_map.json` / `traffic_alignment.json`
-
-- `field_role`
-- `location`
-- `builder_path`
-- `crypto_entry_candidate`
-- `related_endpoint_group`
-- `value_shape`
-- `related_native_candidate`
-- `replay_relevant`
-- `input_fields`
-- `input_order_hint`
-- `matched_field_flows`
-- `traffic_value_shape`
-- `code_builder_path`
-
-#### 来自 Phase 3：`crypto_native_analysis.json` / `jni_analysis.json`
-
-- `java_entry`
-- `native_entry`
-- `related_fields`
-- `related_endpoints`
-- `crypto_algorithm_candidate`
-- `key_derivation`
-- `iv_derivation`
-- `salt_derivation`
-- `input_order`
-- `output_encoding`
-- `restoration_confidence`
-- `runtime_hook_points`
-- `reproduction_materials`
-
-若这些字段缺失：
-- 不得假装前序阶段已经给出完整答案
-- 必须在当前阶段显式标记为“前序字段缺失，已回退到代码 / 配置 / 静态结果再次分析”
-- 相关结论默认降低一个置信度等级
+把代码、协议、字段、Native 和已有事实中的线索合流，判断关键字段的加密、签名、编码、校验与可达性。可以从任何一类证据开始，分析中可以回看源码、反编译、抓包和 Native 材料补证；缺失部分只影响结论强度，不阻断其他分析。
 
 ## 执行步骤
 
 ### Step 1：加载输入材料并建立覆盖率视图
 
-**第一步：读取 session_blackboard.json（优先）**
+**第一步：复用已有分析基线**
 
-若 `{output_dir}/session_blackboard.json` 存在，必须优先读取，建立本阶段分析基线：
+若当前会话已有项目事实、分析状态或前序结论，可优先复用：
 
 - 提取所有 `CONFIRMED` 及以上级别的 Fact，作为高可信基线直接使用
 - 提取 `category = credential_leak` 的 Fact → 用于 secrets 评估，无需再翻 `step1/raw_secrets.json`
@@ -231,7 +87,7 @@ metadata:
 - `step3/crypto_native_analysis.json`：`java_entry`、`native_entry`、`key_derivation`、`iv_derivation`、`input_order`、`output_encoding`、`restoration_confidence`
 - `step1/raw_secrets.json`、`step1/raw_env_guards.json`：补充 PATTERN 级别线索
 
-若 Phase 2 / Phase 3 的核心字段存在，必须以这些字段为主线，不得忽略后重新从零分析。
+若 Phase 2 / Phase 3 的核心字段存在，可优先以这些字段为主线，也可按证据需要重新分析代码。
 
 **第三步：记录覆盖率状态**
 
@@ -245,7 +101,7 @@ metadata:
 
 本步骤是本阶段的第一优先级。
 
-必须围绕以下关键字段重新建立综合视图：
+可围绕以下关键字段重新建立综合视图：
 
 - `sign`
 - `signature`
@@ -404,14 +260,14 @@ metadata:
   - native 内部再次派生 Key / IV / Salt
   - 仅编码不加密
 
-必须额外判断：
+可额外判断：
 
 - Java 层是否只是做预处理，真正加密在 native 层
 - native 层是否只是藏 Key，Java 层仍然掌握主要流程
 - `sign` 和 `data` 是否共用相同参数源
 - `token` 是否参与 `sign`
 
-若 Phase 3 已提供以下字段，必须优先直接消费：
+若 Phase 3 已提供以下字段，可优先直接使用：
 - `java_entry`
 - `native_entry`
 - `related_fields`
@@ -714,7 +570,7 @@ metadata:
    - `源码+抓包共同支持`
    - `需后端验证`
 
-输出中必须单独给出 `packet_risks` 或等价字段，记录：
+输出中可单独给出 `packet_risks` 或等价字段，记录：
 
 - 风险字段
 - 对应接口
@@ -722,7 +578,7 @@ metadata:
 - 风险类型
 - 是否依赖 sign/data 还原
 
-若 `traffic_alignment.json` 中存在 `matched_field_flows`，必须优先消费该数组，把其中的：
+若 `traffic_alignment.json` 中存在 `matched_field_flows`，可优先使用该数组，把其中的：
 - `field_role`
 - `location`
 - `traffic_value_shape`
@@ -771,7 +627,7 @@ metadata:
 
 ### Step 6.5：Guardian 验证——为每条发现评定 L1-L5
 
-对 `vulnerabilities[]` 中的每条发现，必须执行以下判断流程，写入 `guardian_level` 和 `guardian_evidence`。
+对 `vulnerabilities[]` 中的每条发现，可参考以下判断流程，按需写入 `guardian_level` 和 `guardian_evidence`。
 
 **判断规则（逐层确认，只能达到最高已满足层）：**
 
@@ -815,423 +671,17 @@ L5 VERIFIED（Phase 4 不评定，留给 Phase 5 回写）：
 | blackboard 中对应 Fact 为 PATTERN 级别 | 最高 L2，注明"上游仅静态推断" |
 | blackboard 中对应 Fact 为 CONFIRMED 级别 | 可评至 L3/L4 |
 
-### Step 7：输出结果
+### Step 7：归纳发现（可选）
 
-必须生成：
+可按需要整理风险结论、签名/加密还原判断、敏感信息线索、WebView/JSBridge 风险和待验证项。具体写回结构由运行时决定。
 
-- `{output_dir}/step4/vuln_analysis.json`
-- `{output_dir}/step4/risk_matrix.json`
+## 归纳检查
 
-若存在以下输入线索，也应同步生成补充产物，避免把结构化整理压力留到 Phase 6：
-
-- 存在 `raw_secrets.json`、硬编码敏感信息命中、测试环境 URL、证书材料、调试残留等线索时，生成 `{output_dir}/step4/secrets_report.json`
-- 存在 `raw_native_bridges.json`、`entrypoints.json` 或代码中 WebView / `addJavascriptInterface` / `evaluateJavascript` / `loadUrl("javascript:")` 线索时，生成 `{output_dir}/step4/jsbridge_analysis.json`
-
-## 输出要求
-
-### vuln_analysis.json
-
-顶层至少包含以下字段：
-
-- `scan_summary`
-- `coverage`
-- `crypto_findings`
-- `signature_findings`
-- `crypto_restoration`
-- `top10_coverage`
-- `packet_risks`
-- `vulnerabilities`
-
-参考结构：
-
-```json
-{
-  "scan_summary": {
-    "total_vulnerabilities": 0,
-    "total_packet_risks": 0,
-    "total_crypto_restorations": 0,
-    "by_severity": {
-      "critical": 0,
-      "high": 0,
-      "medium": 0,
-      "low": 0,
-      "info": 0
-    }
-  },
-  "coverage": {
-    "phase2_available": true,
-    "phase3_available": true,
-    "native_coverage": "full",
-    "phase2_field_coverage": {
-      "field_role": true,
-      "builder_path": true,
-      "crypto_entry_candidate": true,
-      "related_endpoint_group": true,
-      "matched_field_flows": true
-    },
-    "phase3_field_coverage": {
-      "java_entry": true,
-      "native_entry": true,
-      "crypto_algorithm_candidate": true,
-      "key_derivation": true,
-      "iv_derivation": true,
-      "salt_derivation": true,
-      "input_order": true,
-      "output_encoding": true,
-      "restoration_confidence": true
-    },
-    "inputs_used": [
-      "protocol_map.json",
-      "crypto_native_analysis.json"
-    ]
-  },
-  "crypto_findings": [
-    {
-      "id": "CRYPTO-001",
-      "layer": "java",
-      "algorithm": "AES",
-      "mode": "CBC",
-      "padding": "PKCS5Padding",
-      "key": {
-        "type": "hardcoded",
-        "value": "xxxx",
-        "encoding": "UTF-8",
-        "source": "path/to/CryptoUtil.java:55"
-      },
-      "iv": {
-        "type": "hardcoded",
-        "value": "xxxx",
-        "encoding": "UTF-8",
-        "source": "path/to/CryptoUtil.java:56"
-      },
-      "salt": null,
-      "aad": null,
-      "output_encoding": "Base64",
-      "related_fields": [
-        "data"
-      ],
-      "related_interfaces": [
-        "/api/user/login"
-      ],
-      "severity": "Critical",
-      "description": "描述",
-      "remediation": "修复建议",
-      "confidence": "high",
-      "source_phase": [
-        "phase2",
-        "phase4"
-      ],
-      "source_phase_2_fields": [
-        "field_role",
-        "builder_path",
-        "crypto_entry_candidate",
-        "related_endpoint_group"
-      ],
-      "source_phase_3_fields": [],
-      "gap_filled_by_phase4": [
-        "key encoding inference"
-      ]
-    }
-  ],
-  "signature_findings": [
-    {
-      "id": "SIG-001",
-      "algorithm": "HMAC-SHA256",
-      "salt": "fixed_salt",
-      "timestamp_used": true,
-      "nonce_used": false,
-      "param_sorting": "lexicographic",
-      "concat_rule": "k=v&k2=v2",
-      "covers_data_field": true,
-      "client_resign_possible": true,
-      "source": "path/to/SignUtil.java:88",
-      "severity": "High",
-      "description": "描述",
-      "remediation": "修复建议",
-      "confidence": "medium",
-      "source_phase": [
-        "phase2",
-        "phase3",
-        "phase4"
-      ],
-      "source_phase_2_fields": [
-        "field_role",
-        "matched_field_flows"
-      ],
-      "source_phase_3_fields": [
-        "java_entry",
-        "native_entry",
-        "input_order",
-        "restoration_confidence"
-      ],
-      "gap_filled_by_phase4": [
-        "covers_data_field judgment"
-      ]
-    }
-  ],
-  "crypto_restoration": [
-    {
-      "id": "RESTORE-001",
-      "field": "sign",
-      "related_interfaces": [
-        "/api/order/create"
-      ],
-      "java_source": "path/to/File.java:123",
-      "native_source": "libfoo.so:sub_401000",
-      "algorithm": "HMAC-SHA256",
-      "mode": null,
-      "padding": null,
-      "key_source": "native_derived",
-      "key_type": "derived",
-      "key_encoding": "byte_array",
-      "iv_source": null,
-      "iv_type": null,
-      "input_order": "timestamp + nonce + body",
-      "output_encoding": "hex",
-      "param_sorting": "lexicographic",
-      "concat_rule": "k=v&k2=v2",
-      "status": "partially_restored",
-      "risk": "客户端掌握重签关键材料",
-      "confidence": "medium",
-      "source_phase_2_fields": [
-        "field_role",
-        "builder_path",
-        "crypto_entry_candidate",
-        "related_endpoint_group",
-        "matched_field_flows"
-      ],
-      "source_phase_3_fields": [
-        "java_entry",
-        "native_entry",
-        "crypto_algorithm_candidate",
-        "key_derivation",
-        "salt_derivation",
-        "input_order",
-        "output_encoding",
-        "restoration_confidence"
-      ],
-      "gap_filled_by_phase4": [
-        "final restoration status",
-        "risk linkage"
-      ]
-    }
-  ],
-  "top10_coverage": {
-    "sql_injection": "covered",
-    "command_execution_rce": "covered",
-    "path_traversal_file_handling": "covered",
-    "auth_and_session": "covered",
-    "data_exposure": "covered",
-    "webview_jsbridge": "covered",
-    "component_and_deeplink": "covered",
-    "dynamic_loading_integrity": "covered",
-    "business_logic_replay": "covered",
-    "crypto_and_signature": "covered"
-  },
-  "packet_risks": [
-    {
-      "id": "PKT-001",
-      "interface": "/api/pay/submit",
-      "field": "amount",
-      "risk_type": "business_logic",
-      "related_sign_or_data": "sign",
-      "code_reference": "path/to/OrderApi.java:88",
-      "status": "需验证",
-      "description": "金额字段由前端提交，且签名逻辑存在可复现迹象"
-    }
-  ],
-  "vulnerabilities": [
-    {
-      "id": "VULN-001",
-      "title": "硬编码对称密钥导致 data 可还原",
-      "category": "弱加密",
-      "severity": "Critical",
-      "status": "已确认",
-      "owasp_mapping": "A02:2021-Cryptographic Failures",
-      "cwe": "CWE-321",
-      "description": "描述",
-      "evidence": {
-        "file": "relative/path",
-        "line": 0,
-        "snippet": "代码片段"
-      },
-      "impact": "影响范围",
-      "exploitation_conditions": "利用条件",
-      "attack_path": "攻击路径",
-      "remediation": "修复建议",
-      "validation_needed": [],
-      "guardian_level": "L3",
-      "guardian_evidence": {
-        "L1": {
-          "met": true,
-          "file": "com/example/CryptoUtil.java",
-          "line": 55,
-          "snippet": "private static final String KEY = \"hardcoded_key_123\";"
-        },
-        "L2": {
-          "met": true,
-          "call_chain": "MainActivity.onCreate → ApiClient.request → CryptoUtil.encrypt(KEY, data)"
-        },
-        "L3": {
-          "met": true,
-          "source": "网络请求参数 data 字段",
-          "sink": "CryptoUtil.encrypt 的 plaintext 参数",
-          "path": "retrofit 回调 → OrderBean.data → CryptoUtil.encrypt(KEY, data)"
-        },
-        "L4": {
-          "met": false,
-          "reason": "Key 为硬编码常量已提取，但 IV 来源位于 libsec.so 内部，未完整提取"
-        },
-        "L5": {
-          "met": false,
-          "reason": "超出 Phase 4 范围，待 Phase 5 Frida 验证"
-        },
-        "downgrade_notes": "原判断 L4，因 IV 来源未从 native 提取完整值，降至 L3"
-      }
-    }
-  ]
-}
-```
-
-### risk_matrix.json
-
-至少按以下维度汇总：
-
-- 严重级别
-- 风险类别
-- 确认状态
-- Top10 覆盖情况
-
-参考结构：
-
-```json
-{
-  "summary": {
-    "critical": 0,
-    "high": 0,
-    "medium": 0,
-    "low": 0,
-    "info": 0
-  },
-  "by_category": {
-    "弱加密": 0,
-    "认证授权": 0,
-    "数据安全": 0,
-    "业务逻辑": 0,
-    "组件安全": 0,
-    "注入与RCE": 0
-  },
-  "by_status": {
-    "已确认": 0,
-    "需验证": 0,
-    "仅有线索": 0
-  },
-  "by_guardian_level": {
-    "L4_exploitable": [],
-    "L3_controllable": [],
-    "L2_reachable": [],
-    "L1_pattern": [],
-    "note": "L5_verified 由 Phase 5 回写；ID 列表供 Phase 5 按优先级领取"
-  },
-  "phase5_priority_queue": {
-    "immediate": [],
-    "needs_frida_first": [],
-    "needs_callchain_first": [],
-    "defer": []
-  },
-  "top10_coverage": {
-    "sql_injection": 0,
-    "command_execution_rce": 0,
-    "path_traversal_file_handling": 0,
-    "auth_and_session": 0,
-    "data_exposure": 0,
-    "webview_jsbridge": 0,
-    "component_and_deeplink": 0,
-    "dynamic_loading_integrity": 0,
-    "business_logic_replay": 0,
-    "crypto_and_signature": 0
-  }
-}
-```
-
-### secrets_report.json
-
-当存在 `raw_secrets.json` 或等价静态证据时，应至少输出：
-
-- `scan_summary`
-- `findings`
-- `grouped_by_category`
-
-每条发现至少包含：
-
-- `id`
-- `category`
-- `sub_type`
-- `severity`
-- `confidence`
-- `masked_value`
-- `source_file`
-- `source_line`
-- `is_placeholder`
-- `risk_note`
-
-### jsbridge_analysis.json
-
-当存在 WebView / JSBridge 相关线索时，应至少输出：
-
-- `scan_summary`
-- `bridges`
-- `javascript_execution_points`
-- `risks`
-
-每条桥接或执行点至少包含：
-
-- `id`
-- `type`
-- `bridge_name` 或 `call_site`
-- `source_file`
-- `source_line`
-- `exposed_methods`
-- `origin_control`
-- `risk_level`
-- `evidence`
-
-## 完成标志
-
-- `vuln_analysis.json` 已生成
-- `risk_matrix.json` 已生成
-- 已完成 `sign/data` 综合还原判断
-- 已覆盖弱加密、认证授权、数据安全、业务逻辑、组件安全、注入与 RCE 等高风险方向
-- 每个问题都给出了利用条件、攻击路径、影响范围、修复建议
-- blackboard 中 CONFIRMED 级别 Fact 已被优先消费，未被忽略或退化
-- 每条 `vulnerabilities[]` 条目均包含 `guardian_level` 和 `guardian_evidence`
-- `risk_matrix.json` 的 `by_guardian_level` 和 `phase5_priority_queue` 已填写
-- 未出现跨级评定（L3 不满足时未标 L4）
-
-### 与 Phase 5 / 6 的衔接规则
-
-若当前运行模式为“4/5/6 一体化收口”，则本阶段完成后不应停在对话总结，而应自动把以下产物交给 Phase 5：
-
-- `vuln_analysis.json`
-- `risk_matrix.json`
-- `secrets_report.json`（若已生成）
-- `jsbridge_analysis.json`（若已生成）
-
-除非用户明确要求“只执行第四步”，否则不得要求用户再次单独输入第五步模板。
-
-## 输出前自检清单
-
-1. JSON 顶层包含 `scan_summary` 字段，而不是模糊的 `analysis_summary` ✓
-2. JSON 顶层包含 `crypto_restoration` 数组 ✓
-3. JSON 顶层包含 `packet_risks` 数组 ✓
-4. JSON 顶层包含 `vulnerabilities` 数组 ✓
-5. 每个漏洞都有 `id`，格式为 `VULN-001` 递增编号 ✓
-6. 每个漏洞都有 `severity`、`status`、`evidence`、`attack_path`、`remediation` 字段 ✓
-7. 已明确区分 `已确认`、`需验证`、`仅有线索` ✓
-8. `sign/data` 的分析结果已吸收 Phase 2 和 Phase 3 的信息，而不是只看单一来源 ✓
-9. 若 Phase 2 / Phase 3 已提供 `field_role`、`builder_path`、`crypto_entry_candidate`、`java_entry`、`native_entry`、`crypto_algorithm_candidate` 等字段，当前阶段已优先消费这些字段而非忽略 ✓
-10. 输出中未生成任何 POC 脚本内容 ✓
-11. 已覆盖 Top10 风险面，而不只是弱加密一个方向 ✓
+- 风险结论是否区分模式命中、调用可达、输入可控、静态可利用和动态验证。
+- 关键字段的加密、签名、参数来源和 Native 关系是否有证据支持。
+- 硬编码 Key、弱算法、组件导出和调试配置是否结合了实际影响。
+- 认证、数据、组件、WebView、注入和业务逻辑方向是否按项目证据覆盖。
+- 无法确认的内容是否保留为待验证，而不是写成已确认。
 
 ## 大文件处理策略
 
@@ -1239,8 +689,6 @@ L5 VERIFIED（Phase 4 不评定，留给 Phase 5 回写）：
 |---|---|
 | ≤ 300KB | 直接阅读全文，重点看危险 API、签名/加密、文件处理、WebView、数据库调用 |
 | 300KB ~ 800KB | 先按高危关键词定位，再读取命中区域上下文 |
-| 800KB ~ 1.5MB | 只围绕关键模式读取上下文：`sign`、`encrypt`、`token`、`rawQuery`、`execSQL`、`Runtime.exec`、`addJavascriptInterface`、`DexClassLoader` |
-| > 1.5MB | 仅做高优先级模式检索 + 命中处上下文分析，并在输出中标注 `large_file_analysis = grep_context_only` |
 
 优先级最高的文件类型与文件名包括：
 

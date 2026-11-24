@@ -32,6 +32,11 @@ export interface SSEEvent {
   timestamp?: string
 }
 
+export interface NamedSSEEvent {
+  type: string
+  data: Record<string, unknown>
+}
+
 export async function apiRequest<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const method = (options.method || 'GET').toUpperCase()
   const headers: Record<string, string> = {
@@ -235,6 +240,81 @@ export async function* apiStream(
     if (raw) {
       yield JSON.parse(raw) as SSEEvent
     }
+  }
+}
+
+export async function* apiNamedEventStream(
+  path: string,
+  signal?: AbortSignal,
+): AsyncGenerator<NamedSSEEvent, void, void> {
+  const response = await fetch(`${API_BASE_URL}${path}`, {
+    method: 'GET',
+    credentials: 'include',
+    headers: {
+      Accept: 'text/event-stream',
+    },
+    signal,
+  })
+  if (!response.ok) {
+    let errorBody: ApiErrorBody = {}
+    try {
+      errorBody = (await response.json()) as ApiErrorBody
+    } catch {
+      errorBody = {}
+    }
+    throw new ApiError(response.status, errorBody)
+  }
+  if (!response.body) {
+    throw new Error('浏览器不支持流式响应')
+  }
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) {
+      break
+    }
+    buffer += decoder.decode(value, { stream: true })
+    let boundary = buffer.indexOf('\n\n')
+    while (boundary >= 0) {
+      const block = buffer.slice(0, boundary)
+      buffer = buffer.slice(boundary + 2)
+      const event = parseNamedSSEBlock(block)
+      if (event) {
+        yield event
+      }
+      boundary = buffer.indexOf('\n\n')
+    }
+  }
+  buffer += decoder.decode()
+  const event = parseNamedSSEBlock(buffer)
+  if (event) {
+    yield event
+  }
+}
+
+function parseNamedSSEBlock(block: string): NamedSSEEvent | null {
+  let type = 'message'
+  const dataLines: string[] = []
+  for (const line of block.split('\n')) {
+    if (line.startsWith('event:')) {
+      type = line.slice(6).trim() || 'message'
+    } else if (line.startsWith('data:')) {
+      dataLines.push(line.slice(5).trimStart())
+    }
+  }
+  if (!dataLines.length) {
+    return null
+  }
+  try {
+    return {
+      type,
+      data: JSON.parse(dataLines.join('\n')) as Record<string, unknown>,
+    }
+  } catch {
+    return null
   }
 }
 

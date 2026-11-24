@@ -77,9 +77,26 @@ func TestProjectAuditLedgerRecordsScopeMatrixRescanAndCheckpoint(t *testing.T) {
 		"action":               "checkpoint",
 		"active_hypothesis_id": hypothesis.ID,
 		"pending_directions":   []string{"kdsvc 入口", "storedProc executeType"},
+		"completed_directions": []string{"已确认文件上传入口需要 token"},
+		"ruled_out_directions": []string{"固定路径下载不存在目录穿越"},
+		"evidence_refs":        []string{"artifact:audit_out/FileUploadService.txt"},
 		"next_action":          "先回扫 kdsvc 零参数入口",
 	}); err != nil {
 		t.Fatalf("记录断点失败: %v", err)
+	}
+	if _, err := invokeProjectTool(t, service, ctx, "project_record_audit", map[string]interface{}{
+		"action":           "cell",
+		"asset_id":         asset.ID,
+		"service":          "FileUploadService",
+		"entry":            "processUpload",
+		"shape":            "file-write",
+		"surface":          "spring-mvc",
+		"coverage_status":  "tested",
+		"conclusion_state": "NEEDS_VALIDATION",
+		"result":           "落盘文件名由服务端生成",
+		"evidence":         "FileUploadService.java:120",
+	}); err != nil {
+		t.Fatalf("记录已测试审计单元失败: %v", err)
 	}
 
 	facts, err := service.db.ListProjectFacts(ctx, "project-tools")
@@ -107,6 +124,16 @@ func TestProjectAuditLedgerRecordsScopeMatrixRescanAndCheckpoint(t *testing.T) {
 	if !hasScope || !hasCheckpoint || cellCount != 3 {
 		t.Fatalf("审计台账事实不完整: scope=%v checkpoint=%v cells=%d facts=%+v", hasScope, hasCheckpoint, cellCount, facts)
 	}
+	for _, fact := range facts {
+		if fact.SubjectType != auditSubjectCheckpoint {
+			continue
+		}
+		for _, want := range []string{"completed_directions", "ruled_out_directions", "artifact:audit_out"} {
+			if !strings.Contains(fact.Body, want) {
+				t.Fatalf("断点正文缺少 %q: %s", want, fact.Body)
+			}
+		}
+	}
 
 	coverage, err := service.db.ProjectCoverage(ctx, "project-tools", "user-1")
 	if err != nil {
@@ -126,7 +153,10 @@ func TestProjectAuditLedgerRecordsScopeMatrixRescanAndCheckpoint(t *testing.T) {
 	}
 
 	situation := service.projectSituation(ctx, "project-tools", "user-1")
-	for _, want := range []string{"审计台账", "范围：纳入=", "NOT_AUDITED", "最近断点", "先回扫 kdsvc 零参数入口"} {
+	for _, want := range []string{
+		"审计台账", "范围：纳入=", "NOT_AUDITED", "TESTED",
+		"NEEDS_VALIDATION", "最近断点", "先回扫 kdsvc 零参数入口",
+	} {
 		if !strings.Contains(situation, want) {
 			t.Fatalf("任务态势缺少审计台账内容 %q:\n%s", want, situation)
 		}

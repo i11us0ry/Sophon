@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -105,14 +106,16 @@ func TestToolDigestKeepsLastPairs(t *testing.T) {
 	db := openDigestTestDB(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
-	for index := 0; index < 10; index++ {
+	for index := 0; index < 20; index++ {
+		callID := fmt.Sprintf("call-%02d", index)
+		toolName := fmt.Sprintf("tool-%02d", index)
 		if err := db.AddProcessDetail(ctx, database.ProcessDetail{
-			ID:             "call-" + string(rune('a'+index)),
+			ID:             callID,
 			ConversationID: "conv-digest",
 			EventType:      "tool_call",
-			Message:        "tool-" + string(rune('0'+index)),
+			Message:        toolName,
 			Data: map[string]interface{}{
-				"toolCallId": "call-" + string(rune('a'+index)),
+				"toolCallId": callID,
 				"arguments":  "{}",
 			},
 			CreatedAt: now.Add(time.Duration(index) * time.Millisecond),
@@ -123,10 +126,10 @@ func TestToolDigestKeepsLastPairs(t *testing.T) {
 
 	service := &Service{db: db, cfg: config.Config{}}
 	digest := service.toolDigest(ctx, "conv-digest")
-	if strings.Contains(digest, "- tool-1(") {
+	if strings.Contains(digest, "- tool-03(") {
 		t.Fatalf("应只保留最近 %d 对工具调用: %q", toolDigestMaxPairs, digest)
 	}
-	for _, want := range []string{"- tool-2(", "- tool-9("} {
+	for _, want := range []string{"- tool-04(", "- tool-19("} {
 		if !strings.Contains(digest, want) {
 			t.Fatalf("工具摘要缺少 %q: %q", want, digest)
 		}

@@ -1,8 +1,9 @@
 name: "whatweb"
-command: "/usr/bin/whatweb"
+command: "whatweb"
 args: ["--color=never", "--no-errors"]
 enabled: true
 timeout_seconds: 600
+requires_binaries: ["ruby"]
 short_description: "Web技术栈、CMS、服务器与插件指纹识别"
 description: |
   WhatWeb 用于识别Web应用使用的CMS、框架、服务器和插件。

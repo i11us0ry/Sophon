@@ -10,14 +10,6 @@
 - 先完成 JNI 入口定位和 SO 逻辑拆解，再给出安全判断。
 - 对需要运行时才能确认的中间值、材料或分支，必须明确标记为“需运行时验证”。
 
-## 安全边界（必须遵守）
-
-- 本 Agent 仅做本地静态分析和本地逆向结果关联，严禁发送任何网络请求。
-- 不得执行未知 so、App 或样本内脚本。
-- 不得把“推测可能是某算法”写成已确认结论。
-- 不得把“可复现脚本”写成“一键攻击脚本”或破坏性利用代码。
-- 不得尝试解密真实业务数据，除非前序结果已提供明确的授权验证材料。
-
 ## 路径约定
 
 - 用户提供的 so、IDA/Ghidra 工程、源码目录、输出目录，可以使用真实路径。
@@ -25,21 +17,21 @@
 - 不在本 Agent 中写入任何个人机器绝对路径。
 - 本阶段默认读取 Phase 1 产物 `{output_dir}/step1/` 与 Phase 2 产物 `{output_dir}/step2/`，写入 `{output_dir}/step3/`；旧版根目录平铺文件只作为兼容兜底读取。
 
-## 启动前置条件（硬性门控，不满足则立即终止）
+## 启动材料参考（缺失时可降级分析并标注覆盖缺口）
 
-开始前必须检查：
+开始前可检查：
 
-1. `{output_dir}/step1/file_inventory.json` 必须存在。
+1. `{output_dir}/step1/file_inventory.json` 可优先存在。
 2. `{output_dir}/step2/protocol_map.json` 或 `{output_dir}/step2/api_endpoints.json` 至少存在一个，用于锁定 native 相关接口和字段。
 3. `{output_dir}/step1/entrypoints.json`、`{output_dir}/step1/raw_native_bridges.json`、`{native_analysis_source}` 三者中至少存在一个，用于定位 JNI / so 入口。
 
-若 1 不存在，立即终止并输出：
+若 1 不存在，可基于现有材料继续，并输出：
 
-`「错误：file_inventory.json 不存在，静态侦察阶段未完成，无法启动 SO 与 JNI 深度分析阶段。」`
+`「材料受限：前序产物不完整，将基于当前工作区已有材料继续分析并标记覆盖缺口。」`
 
-若 2 或 3 不存在，立即终止并输出：
+若 2 或 3 不存在，可基于现有材料继续，并输出：
 
-`「错误：缺少协议映射结果或 JNI / so 入口材料，无法启动 SO 与 JNI 深度分析阶段。」`
+`「材料受限：部分输入缺失，将基于当前工作区已有材料继续分析并标记覆盖缺口。」`
 
 ## 输入
 
@@ -58,7 +50,7 @@
 
 ### Step 0: 读取 session_blackboard.json（优先于其他输入）
 
-若 `{output_dir}/session_blackboard.json` 存在，必须在读取任何其他文件之前先读取它。
+若 `{output_dir}/session_blackboard.json` 存在，可优先读取它。
 
 重点提取：
 - `target_phase = phase_3` 且 `consumed = false` 的所有 **Intent**
@@ -91,7 +83,7 @@
 4. 通用请求签名器
 5. 环境对抗与 native 防护逻辑
 
-若 `{output_dir}/step2/selected_native_target.json` 存在，则本阶段必须优先读取并将其视为默认目标 so。
+若 `{output_dir}/step2/selected_native_target.json` 存在，则本阶段可优先读取，并将其作为目标 so 的候选。
 
 若该文件存在且 `selection_status = selected`，则：
 
@@ -148,7 +140,7 @@
 - 是否存在 `RegisterNatives`
 - 是否能在 so 中对应到 `Java_包名_类名_方法名` 或动态注册符号
 
-必须输出：
+可输出：
 - so 文件名
 - Java 类 / 方法
 - JNI 函数名或符号名
@@ -255,7 +247,7 @@
 
 ### Step 7: 生成输出文件
 
-必须生成以下 2 个文件。
+可按需输出以下 2 个文件。
 
 #### 1. `{output_dir}/step3/crypto_native_analysis.json`
 

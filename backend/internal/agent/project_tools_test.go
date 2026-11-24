@@ -83,6 +83,27 @@ func invokeProjectTool(
 	name string,
 	args map[string]interface{},
 ) (string, error) {
+	return invokeProjectToolWithDefaults(t, service, ctx, name, args, true)
+}
+
+func invokeProjectToolWithoutBodyDefault(
+	t *testing.T,
+	service *Service,
+	ctx context.Context,
+	name string,
+	args map[string]interface{},
+) (string, error) {
+	return invokeProjectToolWithDefaults(t, service, ctx, name, args, false)
+}
+
+func invokeProjectToolWithDefaults(
+	t *testing.T,
+	service *Service,
+	ctx context.Context,
+	name string,
+	args map[string]interface{},
+	defaultFactBody bool,
+) (string, error) {
 	t.Helper()
 	if resource, ok := legacyProjectListResource(name); ok {
 		converted := make(map[string]interface{}, len(args)+1)
@@ -110,6 +131,16 @@ func invokeProjectTool(
 		name = "project_get"
 		args = converted
 	}
+	if defaultFactBody && name == "project_record_fact" {
+		if _, exists := args["body"]; !exists {
+			converted := make(map[string]interface{}, len(args)+1)
+			for key, value := range args {
+				converted[key] = value
+			}
+			converted["body"] = firstNonEmptyTestString(args["summary"], args["value"], "测试事实正文")
+			args = converted
+		}
+	}
 	var target tool.BaseTool
 	for _, item := range newProjectTools(service) {
 		info, err := item.Info(context.Background())
@@ -133,6 +164,15 @@ func invokeProjectTool(
 		t.Fatalf("序列化参数失败: %v", err)
 	}
 	return invokable.InvokableRun(ctx, string(raw))
+}
+
+func firstNonEmptyTestString(values ...interface{}) string {
+	for _, value := range values {
+		if text, ok := value.(string); ok && strings.TrimSpace(text) != "" {
+			return strings.TrimSpace(text)
+		}
+	}
+	return ""
 }
 
 func TestNewServiceRegistersProjectTools(t *testing.T) {
@@ -166,6 +206,7 @@ func TestNewServiceRegistersProjectTools(t *testing.T) {
 		"project_add_intent",
 		"project_add_hint",
 		"project_update_goal",
+		"project_prove_goal",
 		"project_update_intent",
 		"project_update_finding",
 	}
@@ -360,6 +401,57 @@ func TestProjectToolsRejectInactiveProject(t *testing.T) {
 	}
 }
 
+func TestProjectRecordTestAllowsSourceAuditWithoutAsset(t *testing.T) {
+	service, ctx := openProjectToolService(t, true)
+	if err := service.db.AddAttachment(ctx, database.Attachment{
+		ID:             "record-source-attachment",
+		ConversationID: "conv-tools",
+		FileName:       "source.zip",
+		StoragePath:    "conv-tools/record-source-attachment_source.zip",
+		CreatedAt:      time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("创建源码附件失败: %v", err)
+	}
+	out, err := invokeProjectTool(t, service, ctx, "project_record_test", map[string]interface{}{
+		"dimension":  "源码命令执行审计",
+		"technique":  "source-review",
+		"status":     "suspicious",
+		"result":     "发现命令执行候选，仍需补齐调用者可控性",
+		"evidence":   "WebShell.aspx:1 调用 Process.Start(Request[\"c\"])",
+		"confidence": 80,
+	})
+	if err != nil {
+		t.Fatalf("源码测试写回不应要求网络资产: %v", err)
+	}
+	if !strings.Contains(out, "已记录测试结果") {
+		t.Fatalf("源码测试结果未写入: %q", out)
+	}
+	items, err := service.db.ListProjectHypotheses(ctx, "project-tools", "suspicious", 10)
+	if err != nil || len(items) != 1 || items[0].AssetID != "" {
+		t.Fatalf("源码测试结果范围错误: %+v err=%v", items, err)
+	}
+}
+
+func TestProjectRecordTestRejectsUnscopedAuditWhenAssetsExist(t *testing.T) {
+	service, ctx := openProjectToolService(t, true)
+	now := time.Now().UTC()
+	if err := service.db.CreateAsset(ctx, database.Asset{
+		ID: "asset-record-existing", ProjectID: "project-tools", OwnerUserID: "user-1",
+		Name: "已有目标", Kind: "url", Value: "https://record.example",
+		Status: "active", Criticality: "medium", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("创建已有资产失败: %v", err)
+	}
+	if _, err := invokeProjectTool(t, service, ctx, "project_record_test", map[string]interface{}{
+		"dimension": "无归属测试",
+		"status":    "suspicious",
+		"result":    "候选",
+		"evidence":  "源码位置",
+	}); err == nil || !strings.Contains(err.Error(), "asset_id 不能为空") {
+		t.Fatalf("已有资产时不应接受无归属测试: %v", err)
+	}
+}
+
 func TestProjectFactToolRoundTrip(t *testing.T) {
 	service, ctx := openProjectToolService(t, true)
 	if err := service.db.CreateAsset(ctx, database.Asset{
@@ -414,7 +506,7 @@ func TestProjectFactToolRoundTrip(t *testing.T) {
 
 	// 低置信、无证据的覆盖请求应被拒绝（审计修复）：事实保持原值。
 	if _, err := invokeProjectTool(t, service, ctx, "project_record_fact", map[string]interface{}{
-		"key": "目标IP", "value": "目标 IP 已更新", "asset_id": "asset-1",
+		"key": "目标IP", "value": "目标 IP 已更新", "body": "nmap 确认主机开放 80/443", "asset_id": "asset-1",
 	}); err != nil {
 		t.Fatalf("低置信覆盖不应报错: %v", err)
 	}
@@ -423,9 +515,9 @@ func TestProjectFactToolRoundTrip(t *testing.T) {
 		t.Fatalf("低置信无证据覆盖应被拒绝: %+v, err=%v", facts, err)
 	}
 
-	// 提供更高置信度后允许同 key 幂等更新，且空 body 保留原值。
+	// 提供更高置信度和正文后允许同 key 幂等更新。
 	if _, err := invokeProjectTool(t, service, ctx, "project_record_fact", map[string]interface{}{
-		"key": "目标IP", "value": "目标 IP 已更新", "confidence": 99, "asset_id": "asset-1",
+		"key": "目标IP", "value": "目标 IP 已更新", "body": "nmap 确认主机开放 80/443", "confidence": 99, "asset_id": "asset-1",
 	}); err != nil {
 		t.Fatalf("高置信更新失败: %v", err)
 	}
@@ -435,6 +527,44 @@ func TestProjectFactToolRoundTrip(t *testing.T) {
 		facts[0].Summary != "目标 IP 已更新" ||
 		facts[0].Body != "nmap 确认主机开放 80/443" {
 		t.Fatalf("高置信同 key 应幂等更新: %+v, err=%v", facts, err)
+	}
+}
+
+func TestProjectRecordFactRequiresBody(t *testing.T) {
+	service, ctx := openProjectToolService(t, true)
+	if err := service.db.CreateAsset(ctx, database.Asset{
+		ID:          "asset-body-required",
+		ProjectID:   "project-tools",
+		OwnerUserID: "user-1",
+		Name:        "正文校验资产",
+		Kind:        "ip",
+		Value:       "10.0.0.9",
+		Status:      "active",
+		Criticality: "medium",
+		CreatedAt:   time.Now().UTC(),
+		UpdatedAt:   time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("创建测试资产失败: %v", err)
+	}
+	if _, err := invokeProjectToolWithoutBodyDefault(
+		t,
+		service,
+		ctx,
+		"project_record_fact",
+		map[string]interface{}{
+			"asset_id": "asset-body-required",
+			"key":      "chain/body-required",
+			"summary":  "摘要不能代替正文",
+		},
+	); err == nil || !strings.Contains(err.Error(), "必须提供 body") {
+		t.Fatalf("缺少 body 应被拒绝，实际 err=%v", err)
+	}
+	facts, err := service.db.ListProjectFacts(ctx, "project-tools")
+	if err != nil {
+		t.Fatalf("读取事实失败: %v", err)
+	}
+	if len(facts) != 0 {
+		t.Fatalf("缺少 body 的事实不应写入: %+v", facts)
 	}
 }
 
@@ -538,21 +668,22 @@ func TestProjectAssetToolAcceptsExpandedKinds(t *testing.T) {
 	out, err := invokeProjectTool(t, service, ctx, "project_insert_assets", map[string]interface{}{
 		"assets_json": `[
 			{"name":"端口","kind":"port","value":"443"},
-			{"name":"主机","kind":"host","value":"app.internal"}
+			{"name":"主机","kind":"host","value":"app.internal"},
+			{"name":"源码包","kind":"source","value":"seeyon20250422"}
 		]`,
 	})
 	if err != nil {
-		t.Fatalf("写入 port/host 资产失败: %v", err)
+		t.Fatalf("写入 port/host/source 资产失败: %v", err)
 	}
-	if !strings.Contains(out, "共写入 2 个资产") {
-		t.Fatalf("port/host 写入结果异常: %q", out)
+	if !strings.Contains(out, "共写入 3 个资产") {
+		t.Fatalf("port/host/source 写入结果异常: %q", out)
 	}
 	assets, err := service.db.ListProjectAssets(ctx, "project-tools", "user-1")
 	if err != nil {
 		t.Fatalf("读取项目资产失败: %v", err)
 	}
-	if len(assets) != 2 {
-		t.Fatalf("应写入 2 个资产: %+v", assets)
+	if len(assets) != 3 {
+		t.Fatalf("应写入 3 个资产: %+v", assets)
 	}
 }
 
@@ -563,7 +694,9 @@ func TestInferFindingAssetKindReturnsSupportedKinds(t *testing.T) {
 		"a.com":           "domain",
 		"443":             "port",
 		"10.0.0.0/24":     "host",
-		"internal-host":   "host",
+		"internal-host":   "",
+		"seeyon20250422":  "",
+		"app.internal":    "host",
 		"opaque target":   "",
 		"internal target": "",
 		"src/WebSite/bin/Kingdee.BOS.FileServer.Web.dll : Kingdee.BOS.FileServer.Web.FileService.Upload2Attachment rva=0x2D24": "",
@@ -587,7 +720,7 @@ func TestProjectFindingAndGraphTools(t *testing.T) {
 		"severity":      "high",
 		"description":   "id 参数可注入",
 		"target":        "https://a.com/x?id=1",
-		"poc":           "GET /x?id=1%20AND%201=1",
+		"poc":           "GET /x?id=1%20AND%201=1 HTTP/1.1\nHost: a.com\nUser-Agent: curl/8\n",
 		"impact":        "可读取数据库数据",
 		"evidence_refs": evidenceRefs,
 	}))
@@ -613,8 +746,8 @@ func TestProjectFindingAndGraphTools(t *testing.T) {
 	if err != nil || len(findings) != 1 {
 		t.Fatalf("读取结构化漏洞失败: %+v, err=%v", findings, err)
 	}
-	if !strings.HasPrefix(findings[0].ReproductionSteps, "GET /x?id=1%20AND%201=1") ||
-		!strings.Contains(findings[0].ReproductionSteps, "利用脚本（优先 Python）") ||
+	if !strings.Contains(findings[0].ReproductionSteps, "GET /x?id=1%20AND%201=1") ||
+		!strings.Contains(findings[0].ReproductionSteps, "Host: a.com") ||
 		findings[0].Impact != "可读取数据库数据" ||
 		len(findings[0].EvidenceRefs) != 2 ||
 		findings[0].AssetID == "" {
@@ -698,6 +831,73 @@ func TestProjectFindingAndGraphTools(t *testing.T) {
 	})
 	if err != nil || !strings.Contains(out, "验证 WAF 绕过") {
 		t.Fatalf("节点详情异常: %q, err=%v", out, err)
+	}
+}
+
+func TestProjectReportFindingUsesWriterForInvalidNarrativeFields(t *testing.T) {
+	service, ctx := openProjectToolService(t, true)
+	evidenceRef := completedToolRef(t, service, ctx, "http-probe")
+	writerDraft := vulnerabilityWriterDraft{
+		Description:   "目标接口将用户输入直接拼接到查询语句，形成 SQL 注入链路。",
+		Preconditions: "否",
+		ReproductionSteps: "POST /item?id=1 HTTP/1.1\n" +
+			"Host: writer.example\n" +
+			"Content-Type: application/x-www-form-urlencoded\n\n" +
+			"id=1\n\n" +
+			"```python\nimport requests\nresponse = requests.post('https://writer.example/item', data={'id': '1'}, timeout=15)\nprint(response.status_code, response.text[:200])\n```",
+		Evidence:       "HTTP/1.1 200 OK，响应内容返回数据库版本信息。",
+		Impact:         "直接危害：可读取数据库信息；数据安全：存在敏感数据暴露风险。",
+		Recommendation: "使用参数化查询，并限制数据库账号权限。",
+		RetestNotes:    "无",
+	}
+	encoded, err := json.Marshal(writerDraft)
+	if err != nil {
+		t.Fatalf("编码漏洞编写结果失败: %v", err)
+	}
+	service.model = &vulnerabilityReviewTestModel{content: string(encoded)}
+	out, err := invokeProjectTool(t, service, ctx, "project_report_finding", map[string]interface{}{
+		"severity":           "high",
+		"target":             "https://writer.example/item?id=1",
+		"http_method":        "POST",
+		"vulnerability_type": "SQL 注入",
+		"evidence_refs":      []string{evidenceRef},
+	})
+	if err != nil || !strings.Contains(out, "已上报漏洞") {
+		t.Fatalf("漏洞编写 Agent 未完成自动修复: %q err=%v", out, err)
+	}
+	findings, _, err := service.db.ListVulnerabilitiesFiltered(ctx, database.VulnerabilityFilter{
+		OwnerUserID: "user-1",
+		ProjectID:   "project-tools",
+		Limit:       10,
+	})
+	if err != nil || len(findings) != 1 {
+		t.Fatalf("读取漏洞失败: %+v err=%v", findings, err)
+	}
+	if findings[0].Description != writerDraft.Description ||
+		findings[0].Impact != writerDraft.Impact ||
+		!strings.Contains(findings[0].ReproductionSteps, "Host: writer.example") ||
+		!strings.Contains(findings[0].ReproductionSteps, "```python") {
+		t.Fatalf("漏洞编写字段未写回: %+v", findings[0])
+	}
+	details, err := service.db.ListProcessDetails(ctx, "conv-tools", 100)
+	if err != nil {
+		t.Fatalf("读取漏洞编写生命周期失败: %v", err)
+	}
+	started := 0
+	completed := 0
+	for _, detail := range details {
+		if traceString(detail.Data["agentId"]) != SystemVulnerabilityWriterID {
+			continue
+		}
+		switch detail.EventType {
+		case "subagent.started":
+			started++
+		case "subagent.completed":
+			completed++
+		}
+	}
+	if started != 1 || completed != 1 {
+		t.Fatalf("漏洞编写生命周期错误: started=%d completed=%d", started, completed)
 	}
 }
 

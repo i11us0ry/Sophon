@@ -9,34 +9,65 @@ description: PHP Web 路由到 Sink 的多层数据流追踪工具。根据用�
 
 根据 `php-route-mapper` 的路由（或 `php-audit-pipeline` 给出的合成入口），追踪从 **handler / CLI 入口 / 指定符号** 到最终 Sink（SQL/命令/文件/SSRF/XSS/模板渲染/反序列化等）的位置，输出完整数据流链、参数变量名变化与可控性分析。
 
-## CRITICAL：只输出追踪，不输出漏洞建议
-- 禁止给出“漏洞结论/风险等级/CVSS/修复建议”
-- 只输出：数据流链证据、分支执行路径、Sink 定位、参数可控性判定表（可控性不等于漏洞结论）
+## 适用场景
 
-## 输入依赖
-- `routes_{timestamp}.md`：路由定义（独立落盘时常为 `route_mapping/routes_{timestamp}.md`，见 `shared/IO_PATH_CONVENTION.md`）
-- `params_{timestamp}.md`：参数结构（独立落盘时常为 `route_mapping/params_{timestamp}.md`）
-- `source_path`：源码根目录
-- `route_id`：来自 `cross_analysis/high_risk_routes_{timestamp}.md`；可为 HTTP 路由序号，或 **`php-audit-pipeline` 阶段 3 的合成 ID**（`ENTRY_CLI:` / `ENTRY_CRON:` / `ENTRY_QUEUE:` / `ENTRY_HOOK:` / `ENTRY_INCLUDE:` / `SINK_ONLY:` 等）。
-- **合成入口（当非 HTTP 路由时必填）**：`entry_file`（相对 `source_path`）、`entry_symbol`（函数/方法或 `global`）、`trace_from`（从何处开始向 sink 追踪的说明）。
+适合已经存在明确入口、路由或符号，需要确认参数如何到达 Sink、经过哪些分支和净化点。
 
-## 追踪范围（必做）
-1. handler 入口（controller 方法/闭包函数/中间件最终处理函数）；**非 HTTP 任务**时以输入中的 `entry_file` + `entry_symbol` 为追踪起点（见「输入依赖」）
+## 不适用场景
+
+如果路由或入口尚未建立，不必先做全量数据流追踪。若只搜索关键字，也不能用 trace 模板制造未观察到的数据流。
+
+## 核心判断
+
+追踪只回答“数据是否、如何到达哪里”，不回答“漏洞是否成立”。重点判断调用链、分支、变量变化、净化点和最终执行点是否有代码证据。
+
+## 证据标准
+
+- 每一层调用都需要文件、行号、函数或符号证据。
+- 分支必须说明实际可达条件和退出路径。
+- 参数可控性需要来源与净化点对照。
+- 没有完整到 Sink 的链路时，标记 PARTIAL 或 UNRESOLVED，不补写推断。
+
+## 决策树
+
+- 入口明确且数据流连续：继续追踪到 Sink。
+- 遇到净化函数：判断是否完全阻断、条件阻断或仅编码。
+- 遇到分支：分别记录可达与提前退出路径。
+- 链路中断：标记未闭合原因并停止该分支。
+- 到达 Sink：交给对应专项 Skill 判断漏洞，不自行下结论。
+
+## 常见误判
+
+- 把同名变量当成同一数据流。
+- 忽略函数返回值、数组字段或对象属性转换。
+- 只追踪成功分支，不记录提前退出。
+- 把可控性表当成漏洞可利用性结论。
+- 在证据缺失时补写“应该会到达”。
+
+## 追踪输出边界
+
+本 Skill 只输出：数据流链证据、分支执行路径、Sink 定位、参数可控性判定。
+不负责输出漏洞等级、CVSS、修复建议或最终漏洞结论。
+
+## 可用上下文
+
+优先利用已有的 `route_id`、`routes_{timestamp}.md`、`params_{timestamp}.md`、`entry_file`、`entry_symbol` 和 `trace_from`。缺少这些上游信息时，可从用户指定入口、源码路径或直接扫描代码建立追踪起点，不要求先读取固定文件。
+
+## 追踪范围（按需）1. handler 入口（controller 方法/闭包函数/中间件最终处理函数）；**非 HTTP 任务**时以输入中的 `entry_file` + `entry_symbol` 为追踪起点（见「输入依赖」）
 2. 请求参数进入 handler 的位置（request 获取、解码 JSON、提取 $_GET/$_POST）
 3. 参数在函数/方法之间的传递（assignment、数组字段访问、对象属性访问）
 4. 分支条件（if/switch/try/catch/return/throw）与提前退出点
 5. 最终 Sink 的调用点与参数位置（函数调用参数名/位置）
 
-## 输出文件结构（建议）
+## 结果组织参考
 ```
-{output_path}/route_tracer/
 └── {route_id}/
     ├── trace_{method}_{timestamp}.md
     └── trace_all_{timestamp}.md
 ```
 说明：**HTTP 路由**：`route_id` 宜与 `php-route-mapper` 的 `routes_{timestamp}.md` 中 `=== [N] {route_summary} ===` 的序号 `N` 一致。**CLI / hook / sink-only 等**：使用流水线合成 `route_id`，追踪起点以输入中的 `entry_file` + `entry_symbol` + `trace_from` 为准，不要求与 URI 对应。
 
-## 单路由报告模板（强制）
+## 单路由记录模板
 ```markdown
 # Route Call Trace
 
@@ -67,7 +98,7 @@ Level-1: {file}:{line} {Function/Class}.{method}({args})
 Level-2: {file}:{line} {Function/Class}.{method}({args})
 
 ---
-## 4) 分支路径追踪（Branch Execution Proof，必须输出）
+## 4) 分支路径追踪（Branch Execution Proof，形成结论时说明）
 path A:
 条件: {if/switch/try/catch/return/throw 的条件摘要}
 执行: {在该分支下参数如何继续流转到 Sink 的摘要}
@@ -78,31 +109,29 @@ path B:
 执行: {另一条分支下参数的处理/提前退出摘要}
 
 ---
-## 5) 参数可控性矩阵（Controllability Matrix，强制字段名与列必须一致）
+## 5) 参数可控性矩阵（Controllability Matrix，字段可参考）
 | 参数 | HTTP/Body 字段 | 预处理/归一化 | Sink类型 | 覆盖类型 | 覆盖条件 | BlockReason(如有) | 可控性结论(✅/⚠️/❌) | 实际使用(是/否) | 可控场景 |
 |------|------------------|------------------|-----------|-----------|-----------|--------------------|----------------------|------------------|----------|
 
 ---
-## 6) Sink 定位（Sink Parameter Mapping，强制字段名与列必须一致）
+## 6) Sink 定位（Sink Parameter Mapping，字段可参考）
 | Sink类型 | 函数/方法 | 调用点(file:line) | Sink参数名/位置 | 参数映射（Sink参数 <- 可控参数） | 证据(关键代码片段) |
 |----------|-----------|-------------------|-------------------|----------------------------------------------|----------------------|
 ```
 
-## 7) Sink Summary（强制：用于 pipeline 的硬门槛校验）
-必须输出一个汇总表（不允许省略）：
+## 7) Sink Summary（可选：用于 pipeline 交叉核对）
 | route_id | Sink类型 | Sink函数/语句 | 是否执行(是/否) | 触发分支(条件摘要) | 关联参数(来自可控性矩阵) | 证据(代码片段) |
 |----------|---------|---------------|----------------|--------------------|------------------------------|----------------------|
 
 ---
-## 8) Trace 完整性声明（强制）
-| trace_status | 含义 |
+## 8) Trace 完整性声明（可选）| trace_status | 含义 |
 |-------------|------|
 | COMPLETE | 调用链与 sink 证据齐全，参数可控性可判断 |
 | PARTIAL | 只有局部链路证据或分支证据不完整，但 sink 存在或参数流可证明一部分 |
 | UNRESOLVED | 无法定位到明确 sink 或可控性证据不足 |
 
 并给出：
-- 缺失项列表（必须逐条列出缺失：调用链层级/分支/映射/证据）
+- 缺失项列表（建议逐条列出：调用链层级/分支/映射/证据）
 - 回退建议（允许的回退：重新 tracer 或进入对应子 skill 的 ⚠️待验证模式）
 
 ## 必做的“禁止项”
@@ -110,7 +139,7 @@ path B:
 - 禁止保留未替换模板变量（如 `${route}` 未替换为真实 route_id）
 - 禁止将“不可控”与“无风险”混为一谈：本 skill 只输出可控性，不输出漏洞结论
 
-## 9) Sink Evidence Type Checklist（强制：用于 pipeline 硬门槛）
+## 9) Sink Evidence Type Checklist（有 trace 时使用）
 要求在每条 trace 报告中输出本检查清单（允许内容为空，但必须存在标题与表头；并对实际命中的 sink 写出证据来源与证据片段）。
 
 | Sink类型 | 必须包含的证据要点（来自代码/配置的可证据片段） | 证据位置 |
@@ -135,5 +164,4 @@ path B:
 | CSRF | `EVID_CSRF_STATE_CHANGE_HANDLER_EXEC`: 状态变更 handler 的执行证据（trace 的分支路径证据）；`EVID_CSRF_TOKEN_SOURCE`: CSRF token 来源与生成证据（session/cookie/random）；`EVID_CSRF_TOKEN_RECEIVE`: CSRF token 在请求中的接收/进入校验逻辑的位置证据；`EVID_CSRF_TOKEN_VERIFY`: 后端校验比较/哈希判断位置与早退证据；`EVID_CSRF_BYPASS_BRANCH`: 绕过分支证据（如仅校验特定 Content-Type / 仅 AJAX 校验 / 某分支不校验） | file:line |
 | SESS | `EVID_SESS_SESSION_INIT_REGEN`: 登录后是否 `session_regenerate_id` 等会话固定防护证据；`EVID_SESS_COOKIE_FLAGS`: Cookie flags（HttpOnly/Secure/SameSite）设置证据；`EVID_SESS_JWT_VERIFY_CLAIMS`: JWT 签名算法固定与 exp/nbf/iss/aud 等 claim 校验证据；`EVID_SESS_LOGOUT_CLEAR`: logout 是否真正清除 session 与 token 的证据 | file:line |
 | CFG | `EVID_CFG_CONFIG_LOCATION`: 配置文件/环境变量位置证据（.env/config/php.ini/Dockerfile 等）；`EVID_CFG_RUNTIME_SETTING_CODE`: 运行时设置代码位置证据（ini_set/set_exception_handler/安全中间件等）；`EVID_CFG_IMPACT_ASSOCIATION`: 影响点关联证据（哪些路由/响应被该配置影响）；`EVID_CFG_SECURITY_SWITCH_EVIDENCE`: 安全头/错误暴露/CORS/危险开关等关键配置证据 | file:line |
-
 

@@ -1,0 +1,19 @@
+name: ksubdomain
+version: 0.7
+description: High-speed subdomain brute-force tool built from the pinned upstream source
+tool_definition: ksubdomain.yaml
+verify_args:
+  - "version"
+build:
+  url: https://codeload.github.com/knownsec/ksubdomain/tar.gz/8606804a79bbf1ca5f21a28219440cf6e8ca77a2
+  sha256: 43ab0e5ef14ed7e1f766ba2248336f0c106a9277697a638a0daf0fc8f2d12f74
+  archive: tar.gz
+  strip_components: 1
+  recipe: go
+  destination: ksubdomain
+  package: ./cmd
+  statik_source: resources
+  capabilities:
+    - cap_net_raw
+  command: ksubdomain
+  command_target: ksubdomain

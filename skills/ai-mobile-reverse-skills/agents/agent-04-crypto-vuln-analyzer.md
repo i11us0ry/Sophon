@@ -58,16 +58,13 @@
   - `仅有线索`
 - 对无法从当前材料确认的后端问题，不能直接写成已确认事实
 
-## 职责边界（硬性约束，不可违反）
+## 职责参考
 
 - 本阶段允许吸收 Phase 2 和 Phase 3 的结果来分析 `sign/data` 算法与风险，但**不重新承担 Phase 2 的流量对齐和 Phase 3 的 JNI 深挖职责**
 - 若 Phase 2 或 Phase 3 的结果不足以支撑结论，**允许再次回看 Java 代码、smali、配置文件、`jadx-mcp` 返回的上下文，以及已生成的 `raw_*.json`**，用于补足分析证据
 - 若 native 结果不完整，允许再次回看 so/JNI 相关伪代码或 Phase 3 输出，但不重新执行动态验证
 - 本阶段是**全局综合风险分析**，不是单一接口的 PoC 设计阶段
 - 不在本阶段生成验证脚本或 PoC 代码；PoC 产出属于 Phase 5
-- 不在本阶段发送任何网络请求
-- 不访问真实接口、不验证密钥、不执行外部程序
-- 不得编造后端鉴权缺失、支付校验缺失、签名失效等结论
 - 对仅凭前端或抓包无法确认的问题，必须写明 `需验证`
 
 ## 禁止做的事
@@ -75,9 +72,6 @@
 - 不生成 PoC 脚本
 - 不生成验证请求包
 - 不主动发请求
-- 不访问任何真实接口、对象存储、管理后台或第三方服务
-- 不验证密钥、Token、签名算法是否可直接利用
-- 不执行外部程序
 
 ## 路径约定
 
@@ -103,20 +97,12 @@
 - 补足 Top10 风险判断
 - 提高置信度
 
-不得借“再次分析”之名执行网络请求、动态调试、PoC 生成。
 
-## 安全边界（必须遵守）
+## 启动材料参考（缺失时可降级分析并标注覆盖缺口）
 
-- 仅做本地静态分析和前序结果汇总，严禁主动访问网络
-- 不得尝试使用发现的密钥、Token、签名逻辑去调用任何接口
-- 不得验证真实账号、订单、支付、管理后台、对象存储等服务
-- 不得执行动态调试、Frida hook、Burp 重放，这些属于其他阶段或由用户自行控制
+在开始任何工作之前，可检查以下条件：
 
-## 启动前置条件（硬性门控，不满足则立即终止）
-
-在开始任何工作之前，必须检查以下条件：
-
-1. `{output_dir}/step1/file_inventory.json` 必须存在  
+1. `{output_dir}/step1/file_inventory.json` 可优先存在  
 2. 以下文件中至少存在 1 个，用于提供流量与代码映射基础：
    - `{output_dir}/step2/protocol_map.json`
    - `{output_dir}/step2/traffic_alignment.json`
@@ -126,15 +112,15 @@
    - `{output_dir}/step3/jni_analysis.json`
    - `{output_dir}/step1/raw_native_bridges.json`
 
-若 `file_inventory.json` 缺失，立即终止并输出：
+若 `file_inventory.json` 缺失，可基于现有材料继续，并输出：
 
-`「错误：file_inventory.json 不存在，Phase 1 未完成，无法启动弱加密与高风险漏洞筛查。」`
+`「材料受限：前序产物不完整，将基于当前工作区已有材料继续分析并标记覆盖缺口。」`
 
-若 Phase 2 与 Phase 3 的关键输入均缺失，立即终止并输出：
+若 Phase 2 与 Phase 3 的关键输入均缺失，可基于现有材料继续并输出：
 
-`「错误：Phase 4 缺少协议映射或 native 分析关键输入，无法完成 sign/data 还原和高风险漏洞筛查。请先完成 Phase 2 与 Phase 3 的关键输出。」`
+`「材料受限：部分输入缺失，将继续分析现有证据并标记未验证项。」`
 
-若只有部分 Phase 3 输入缺失，但 Phase 2 结果齐全，可以继续，但必须在输出中明确：
+若只有部分 Phase 3 输入缺失，但 Phase 2 结果齐全，可以继续，并可在输出中明确：
 
 - `native_coverage = partial`
 - 对所有 native 相关结论降低置信度
@@ -158,9 +144,9 @@
 
 允许其中一部分不存在，但必须根据实际输入调整覆盖率说明。
 
-### 优先消费字段（必须优先读取）
+### 优先消费字段（建议优先读取）
 
-若以下字段存在，本阶段必须优先消费，而不是退回到重新全文猜测：
+若以下字段存在，本阶段可优先使用，而不是重新全文猜测：
 
 #### 来自 Phase 2：`protocol_map.json` / `traffic_alignment.json`
 
@@ -196,7 +182,7 @@
 
 若这些字段缺失：
 - 不得假装前序阶段已经给出完整答案
-- 必须在当前阶段显式标记为“前序字段缺失，已回退到代码 / 配置 / 静态结果再次分析”
+- 可在当前阶段显式标记为“前序字段缺失，已回退到代码 / 配置 / 静态结果再次分析”
 - 相关结论默认降低一个置信度等级
 
 ## 执行步骤
@@ -205,7 +191,7 @@
 
 **第一步：读取 session_blackboard.json（优先）**
 
-若 `{output_dir}/session_blackboard.json` 存在，必须优先读取，建立本阶段分析基线：
+若 `{output_dir}/session_blackboard.json` 存在，可优先读取，建立本阶段分析基线：
 
 - 提取所有 `CONFIRMED` 及以上级别的 Fact，作为高可信基线直接使用
 - 提取 `category = credential_leak` 的 Fact → 用于 secrets 评估，无需再翻 `step1/raw_secrets.json`
@@ -223,7 +209,7 @@
 - `step3/crypto_native_analysis.json`：`java_entry`、`native_entry`、`key_derivation`、`iv_derivation`、`input_order`、`output_encoding`、`restoration_confidence`
 - `step1/raw_secrets.json`、`step1/raw_env_guards.json`：补充 PATTERN 级别线索
 
-若 Phase 2 / Phase 3 的核心字段存在，必须以这些字段为主线，不得忽略后重新从零分析。
+若 Phase 2 / Phase 3 的核心字段存在，可优先以这些字段为主线，也可按证据需要重新分析。
 
 **第三步：记录覆盖率状态**
 
@@ -237,7 +223,7 @@
 
 本步骤是本阶段的第一优先级。
 
-必须围绕以下关键字段重新建立综合视图：
+可围绕以下关键字段重新建立综合视图：
 
 - `sign`
 - `signature`
@@ -396,14 +382,14 @@
   - native 内部再次派生 Key / IV / Salt
   - 仅编码不加密
 
-必须额外判断：
+可额外判断：
 
 - Java 层是否只是做预处理，真正加密在 native 层
 - native 层是否只是藏 Key，Java 层仍然掌握主要流程
 - `sign` 和 `data` 是否共用相同参数源
 - `token` 是否参与 `sign`
 
-若 Phase 3 已提供以下字段，必须优先直接消费：
+若 Phase 3 已提供以下字段，可优先直接使用：
 - `java_entry`
 - `native_entry`
 - `related_fields`
@@ -706,7 +692,7 @@
    - `源码+抓包共同支持`
    - `需后端验证`
 
-输出中必须单独给出 `packet_risks` 或等价字段，记录：
+输出中可单独给出 `packet_risks` 或等价字段，记录：
 
 - 风险字段
 - 对应接口
@@ -714,7 +700,7 @@
 - 风险类型
 - 是否依赖 sign/data 还原
 
-若 `traffic_alignment.json` 中存在 `matched_field_flows`，必须优先消费该数组，把其中的：
+若 `traffic_alignment.json` 中存在 `matched_field_flows`，可优先使用该数组，把其中的：
 - `field_role`
 - `location`
 - `traffic_value_shape`
@@ -763,7 +749,7 @@
 
 ### Step 6.5：Guardian 验证——为每条发现评定 L1-L5
 
-对 `vulnerabilities[]` 中的每条发现，必须执行以下判断流程，写入 `guardian_level` 和 `guardian_evidence`。
+对 `vulnerabilities[]` 中的每条发现，可参考以下判断流程，按需写入 `guardian_level` 和 `guardian_evidence`。
 
 **判断规则（逐层确认，只能达到最高已满足层）：**
 
@@ -809,7 +795,7 @@ L5 VERIFIED（Phase 4 不评定，留给 Phase 5 回写）：
 
 ### Step 7：输出结果
 
-必须生成：
+可按需生成：
 
 - `{output_dir}/step4/vuln_analysis.json`
 - `{output_dir}/step4/risk_matrix.json`
@@ -1231,8 +1217,6 @@ L5 VERIFIED（Phase 4 不评定，留给 Phase 5 回写）：
 |---|---|
 | ≤ 300KB | 直接阅读全文，重点看危险 API、签名/加密、文件处理、WebView、数据库调用 |
 | 300KB ~ 800KB | 先按高危关键词定位，再读取命中区域上下文 |
-| 800KB ~ 1.5MB | 只围绕关键模式读取上下文：`sign`、`encrypt`、`token`、`rawQuery`、`execSQL`、`Runtime.exec`、`addJavascriptInterface`、`DexClassLoader` |
-| > 1.5MB | 仅做高优先级模式检索 + 命中处上下文分析，并在输出中标注 `large_file_analysis = grep_context_only` |
 
 优先级最高的文件类型与文件名包括：
 

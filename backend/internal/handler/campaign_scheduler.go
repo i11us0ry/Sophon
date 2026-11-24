@@ -352,6 +352,16 @@ func (s *CampaignScheduler) run(
 		if err != nil || current.Status != database.CampaignStatusRunning {
 			break
 		}
+		if _, err := s.db.GetActiveProject(ctx, current.ProjectID, userID); err != nil {
+			_ = s.db.SetCampaignResumeOnStart(context.Background(), campaignID, userID, true)
+			_ = s.db.UpdateCampaignStatus(
+				context.Background(),
+				campaignID,
+				userID,
+				database.CampaignStatusPaused,
+			)
+			break
+		}
 		available := cap(sem) - len(sem)
 		if available > 0 {
 			_ = s.db.RecomputeCampaignScheduling(ctx, campaignID)

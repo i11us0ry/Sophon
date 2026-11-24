@@ -9,15 +9,39 @@ description: Java Web 源码表达式/模板注入漏洞审计工具。覆盖 OG
 
 扫描 Java Web 项目源码，识别所有表达式求值和模板渲染入口，检测代码注入漏洞。
 
----
+## 适用场景
 
-## 漏洞分级标准
+适合 OGNL、SpEL、MVEL、EL、JEXL、Groovy、Velocity、FreeMarker 等引擎接收动态表达式或模板内容，需要判断控制面和执行边界。
 
-详见 [SEVERITY_RATING.md](../java-shared/SEVERITY_RATING.md)
+## 不适用场景
 
-- 漏洞编号格式: `{C/H/M/L}-EXPR-{序号}`
-- 表达式注入 + 参数可控 + 无鉴权 → 🔴 Critical
-- Score = R × 0.40 + I × 0.35 + C × 0.25
+请求数据进入固定模板变量不等于 SSTI，页面未转义首先属于 XSS。只有用户能控制表达式字符串、模板源码或可执行模板结构时，才进入表达式注入评估。
+
+## 核心判断
+
+关键链路是“用户控制表达式或模板语法 -> 引擎解析/求值 -> 可执行对象或敏感方法可达”。引擎版本、EvaluationContext、模板对象和沙箱决定输入是数据、受限表达式还是完整代码。
+
+## 证据标准
+
+- 可确认：表达式/模板控制证据、引擎执行入口和可观测执行结果证据闭合。
+- 待验证：存在动态拼接或危险引擎，但输入控制、上下文能力、版本或沙箱条件尚未确认。
+- 判为否：只控制模板变量、表达式来自固定配置、引擎只做数据绑定，或输出问题仅形成 XSS。
+
+## 决策树
+
+- 找到引擎入口：区分表达式解析、模板加载、模板变量和普通渲染。
+- 判断控制面：确认用户能否改变表达式文本、模板内容或模板名。
+- 检查上下文：核对 EvaluationContext、方法访问、类加载过滤和模板对象限制。
+- 关联版本：把已知沙箱/CVE 作为候选条件，继续验证实际调用。
+- 只有错误回显：证明错误来自表达式求值且具有安全影响。
+
+## 常见误判
+
+- 用户输入进入模板模型就认定模板注入。
+- SpEL `parseExpression()` 存在就认为表达式字符串可控。
+- 使用沙箱就认为完全安全，或只看版本不看 context 配置。
+- 把模板输出未转义和模板语法执行混为同一漏洞。
+- 用真实命令执行破坏性操作验证表达式能力。
 
 ---
 
@@ -269,43 +293,13 @@ Content-Type: application/json
 
 ---
 
-## 核心要求
-
-- ✅ 识别所有 10+ 种表达式引擎 + 7 种模板引擎
-- ✅ 检测每个 sink 的参数可控性
-- ✅ 评估引擎版本与已知沙箱/绕过的关系
-- ✅ 针对 Struts2 项目：检测版本是否在 S2 漏洞范围内
-- ✅ 结合鉴权状态评估外部可利用性
-- ❌ 禁止忽略 FreeMarker/Thymeleaf 的 SSTI
-- ❌ 禁止跳过 OGNL 的版本绕过链分析
-
----
-
 ## 反编译阶段（CRITICAL）
 
-**当源码不可用时，必须使用 CFR 反编译器反编译表达式/模板引擎相关类。**
+**当源码不可用时，按运行环境中可用的反编译能力处理表达式/模板引擎相关类。**
 
 详细策略参见 [DECOMPILE_STRATEGY.md](references/DECOMPILE_STRATEGY.md)
 
-```bash
-# 反编译表达式引擎使用类
-java -jar {CFR_JAR} /path/to/ExprService.class --outputdir {output_path}/decompiled
-
-# 批量反编译模板处理类
-find /path/to/WEB-INF/classes -name "*Template*.class" -o -name "*Expression*.class" | \
-  xargs java -jar {CFR_JAR} --outputdir {output_path}/decompiled
-```
-
----
-
-## 输出格式
-
-**严格按照 [references/OUTPUT_TEMPLATE.md](references/OUTPUT_TEMPLATE.md) 中的填充式模板生成输出文件。**
-
-- 文件名格式: `{project_name}_expr_inject_audit_{YYYYMMDD_HHMMSS}.md`
-- 不得修改模板结构、不得增删章节、不得调整顺序
-- 所有【填写】占位符必须替换为实际内容
-- 通用规范参考: [java-shared/OUTPUT_STANDARD.md](../java-shared/OUTPUT_STANDARD.md)
+可使用运行环境中可用的反编译工具。内置 `java_decompile`、CFR、`javap` 等均可作为候选，按实际能力和结果选择。
 
 ---
 
