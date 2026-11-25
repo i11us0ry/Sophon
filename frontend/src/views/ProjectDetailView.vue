@@ -252,6 +252,15 @@ let projectStatusTimer: number | undefined
 let projectStatusSequence = 0
 
 const project = ref<Project | null>(null)
+const scopeExpanded = ref(false)
+const projectScope = computed(() => project.value?.scope?.trim() ?? '')
+const projectScopeNeedsToggle = computed(() => {
+  const text = projectScope.value
+  return (
+    Array.from(text).length > 120 ||
+    text.split(/\r?\n/).filter((line) => line.trim()).length > 3
+  )
+})
 const counts = ref<ProjectCounts | null>(null)
 const coverage = ref<ProjectCoverage | null>(null)
 const pendingIntentTargets = computed(() =>
@@ -1187,7 +1196,23 @@ onUnmounted(() => {
             </div>
             <div>
               <dt>{{ t('project.scopeLabel') }}</dt>
-              <dd>{{ project?.scope || t('project.briefEmpty') }}</dd>
+              <dd class="project-scope">
+                <span
+                  class="project-scope-text"
+                  :class="{ clamped: projectScopeNeedsToggle && !scopeExpanded }"
+                >
+                  {{ projectScope || t('project.briefEmpty') }}
+                </span>
+                <button
+                  v-if="projectScopeNeedsToggle"
+                  class="project-scope-toggle"
+                  type="button"
+                  :aria-expanded="scopeExpanded"
+                  @click="scopeExpanded = !scopeExpanded"
+                >
+                  {{ scopeExpanded ? t('project.scopeCollapse') : t('project.scopeExpand') }}
+                </button>
+              </dd>
             </div>
           </dl>
         </div>
@@ -1773,16 +1798,6 @@ onUnmounted(() => {
           </span>
         </div>
       </header>
-      <div class="graph-brief">
-        <div>
-          <span class="graph-brief-label">{{ t('project.goalsLabel') }}</span>
-          <p>{{ project?.goals || t('project.briefEmpty') }}</p>
-        </div>
-        <div>
-          <span class="graph-brief-label">{{ t('project.scopeLabel') }}</span>
-          <p>{{ project?.scope || t('project.briefEmpty') }}</p>
-        </div>
-      </div>
       <AttackGraphCanvas
         v-if="graphView === 'canvas'"
         :nodes="graphNodes"
@@ -2981,36 +2996,40 @@ onUnmounted(() => {
   white-space: pre-wrap;
 }
 
-.graph-brief {
+.project-brief .project-scope {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-  gap: 12px;
-  margin-bottom: 12px;
-  padding: 10px 12px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: var(--surface-soft);
-  box-shadow: none;
-}
-
-.graph-brief > div {
-  display: grid;
-  gap: 4px;
+  gap: 3px;
+  justify-items: start;
   min-width: 0;
 }
 
-.graph-brief-label {
-  color: var(--text-muted);
-  font-size: 11px;
-  font-weight: 600;
+.project-scope-text {
+  display: block;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
-.graph-brief p {
-  margin: 0;
-  color: var(--text-secondary);
-  font-size: 12px;
-  overflow-wrap: anywhere;
-  white-space: pre-wrap;
+.project-scope-text.clamped {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+.project-scope-toggle {
+  padding: 0;
+  border: 0;
+  color: var(--accent);
+  background: transparent;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.project-scope-toggle:hover,
+.project-scope-toggle:focus-visible {
+  color: color-mix(in srgb, var(--accent) 78%, white);
+  outline: none;
+  text-decoration: underline;
 }
 
 .coverage-panel {
@@ -4045,12 +4064,6 @@ onUnmounted(() => {
 .main-column .page-projects .panel-load-more {
   width: auto;
   margin: 0 11px 11px;
-}
-
-.graph-brief {
-  margin: 11px;
-  border-color: var(--project-line);
-  background: color-mix(in srgb, var(--field-bg) 52%, transparent);
 }
 
 .main-column .page-projects .fact-modal-backdrop {

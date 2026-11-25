@@ -881,6 +881,14 @@ func TestExplicitSingleAgentRequestOverridesDeepMode(t *testing.T) {
 		"请使用单 Agent 模式处理",
 		"仅使用主 Agent",
 		"不要 Worker",
+		"这个任务不需要 Planner 或 Worker",
+		"无需 Worker 协作",
+		"不要委派给子 Agent",
+		"复测已知漏洞",
+		"编写 WebShell 连接目标",
+		"搭建一条隧道代理链路",
+		"输出漏洞成果总结",
+		"读取文件 /tmp/source.txt",
 		"use single agent mode",
 		"no planner",
 	} {
@@ -893,6 +901,9 @@ func TestExplicitSingleAgentRequestOverridesDeepMode(t *testing.T) {
 	}
 	if got := applyExplicitSingleAgentMode("验证漏洞是否存在", agentModeDeep); got != agentModeDeep {
 		t.Fatalf("普通请求不应修改 Deep 模式: %s", got)
+	}
+	if got := applyExplicitSingleAgentMode("批量测试所有资产", agentModeDeep); got != agentModeDeep {
+		t.Fatalf("普通批量测试不应修改 Deep 模式: %s", got)
 	}
 }
 

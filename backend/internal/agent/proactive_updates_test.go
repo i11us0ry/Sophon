@@ -107,7 +107,28 @@ func TestProactiveToolUpdateDedupe(t *testing.T) {
 	ctx := execctx.WithSubagent(proactiveTestContext(project, conversation), execctx.SubagentInfo{
 		ID: "worker-1", Kind: "worker", HypothesisID: "hyp-1",
 	})
-	result := `{"ok":true,"status":"generated","artifact_id":"artifact-1","directory":"/tmp/artifact-1"}`
+	result := `{
+		"ok":true,
+		"status":"generated",
+		"artifact_id":"artifact-1",
+		"directory":"/tmp/artifact-1",
+		"shell_file":"/tmp/artifact-1/godzilla_csharp_aspx.aspx",
+		"client_config":"/tmp/artifact-1/client-config.json",
+		"verify_python":"/tmp/artifact-1/verify.py",
+		"request_http":"/tmp/artifact-1/request.http",
+		"report":"/tmp/artifact-1/report.md",
+		"metadata":"/tmp/artifact-1/metadata.json",
+		"next_action":"upload_shell_then_run_verify_python",
+		"metadata_payload":{
+			"family":"godzilla",
+			"target_url":"https://target.example/shell.aspx",
+			"language":"csharp",
+			"container":"aspx",
+			"cryptor":"CSharpAesBase64",
+			"shell_sha256":"52d844eca498d93560d8bda407428aa585ff3f3e2722a125fddf04f20f36a984",
+			"shell_bytes":1409
+		}
+	}`
 	service.maybeEnqueueProactiveToolUpdate(ctx, "payload_factory", result)
 	service.maybeEnqueueProactiveToolUpdate(ctx, "payload_factory", result)
 	events, err := service.db.ClaimBackgroundUpdatesForConversation(
@@ -121,6 +142,32 @@ func TestProactiveToolUpdateDedupe(t *testing.T) {
 	}
 	if len(events) != 1 || events[0].Kind != "artifact_ready" {
 		t.Fatalf("artifact 事件去重失败: %+v", events)
+	}
+	var payload map[string]interface{}
+	if err := json.Unmarshal([]byte(events[0].PayloadJSON), &payload); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"clientConfig", "verifyPython", "requestHttp", "metadata_payload"} {
+		if payload[key] == nil {
+			t.Fatalf("artifact 事件缺少字段 %s: %+v", key, payload)
+		}
+	}
+	summary := proactiveFallbackSummary([]proactivePromptEvent{{
+		Kind: events[0].Kind, CreatedAt: nowString(), Payload: payload,
+	}})
+	for _, want := range []string{
+		"关键详情",
+		"客户端配置：/tmp/artifact-1/client-config.json",
+		"验证脚本：/tmp/artifact-1/verify.py",
+		"使用方式：客户端加载配置 /tmp/artifact-1/client-config.json",
+		"目标 https://target.example/shell.aspx",
+		"容器 aspx",
+		"加密器 CSharpAesBase64",
+		"SHA-256：52d844",
+	} {
+		if !strings.Contains(summary, want) {
+			t.Fatalf("artifact 通用详情缺少 %q: %s", want, summary)
+		}
 	}
 	if err := service.db.CompleteBackgroundUpdates(
 		context.Background(),
@@ -141,7 +188,21 @@ func TestProactiveFindingEventAndFallback(t *testing.T) {
 		OwnerUserID:       project.OwnerUserID,
 		Title:             "测试任意文件读取",
 		Severity:          "high",
+		Status:            "confirmed",
+		VulnerabilityType: "File Upload",
+		HTTPMethod:        "POST",
+		Parameter:         "file",
+		Preconditions:     "需要普通账户",
+		ReproductionSteps: "POST /upload HTTP/1.1\nHost: target.example\n\n上传 test.aspx 后访问 /upload/test.aspx",
+		Description:       "上传接口未校验文件类型，可写入可执行文件",
+		Evidence:          "HTTP 200，返回上传路径 /upload/test.aspx",
+		EvidenceRefs:      []string{"tool:upload-test"},
+		Impact:            "可向服务器写入任意文件",
+		Recommendation:    "限制文件类型并禁止上传目录执行脚本",
 		VerificationState: "verified",
+		Confidence:        95,
+		Exploitability:    "已验证文件写入",
+		TestTechnique:     "multipart_file_upload",
 		Target:            "https://target.example",
 	})
 	events, err := service.db.ClaimBackgroundUpdatesForConversation(
@@ -157,11 +218,53 @@ func TestProactiveFindingEventAndFallback(t *testing.T) {
 	if err := json.Unmarshal([]byte(events[0].PayloadJSON), &payload); err != nil {
 		t.Fatal(err)
 	}
+	for _, key := range []string{
+		"vulnerabilityType", "httpMethod", "parameter", "preconditions",
+		"reproductionSteps", "evidence", "evidenceRefs", "impact", "recommendation",
+	} {
+		if payload[key] == nil {
+			t.Fatalf("漏洞事件缺少字段 %s: %+v", key, payload)
+		}
+	}
 	summary := proactiveFallbackSummary([]proactivePromptEvent{{
 		Kind: events[0].Kind, CreatedAt: nowString(), Payload: payload,
 	}})
-	if !strings.Contains(summary, "后台进展") || !strings.Contains(summary, "测试任意文件读取") {
-		t.Fatalf("降级摘要错误: %s", summary)
+	for _, want := range []string{
+		"后台进展", "关键详情", "测试任意文件读取", "对象：https://target.example",
+		"类型：File Upload", "入口：POST；file", "证据：HTTP 200",
+		"影响：可向服务器写入任意文件", "修复建议：限制文件类型",
+		"证据引用：tool:upload-test",
+	} {
+		if !strings.Contains(summary, want) {
+			t.Fatalf("漏洞通用详情缺少 %q: %s", want, summary)
+		}
+	}
+}
+
+func TestProactiveDetailsSupportUnknownEvents(t *testing.T) {
+	events := []proactivePromptEvent{{
+		Kind: "custom_checkpoint",
+		Payload: map[string]interface{}{
+			"summary":      "证据归档完成",
+			"object":       "project-alpha",
+			"checkpoint":   "evidence-03",
+			"record_count": 12,
+			"future_meta": map[string]interface{}{
+				"owner": "team-a",
+			},
+		},
+	}}
+	content := appendProactiveDetails("后台进展\n已生成证据目录", events)
+	for _, want := range []string{
+		"关键详情", "证据归档完成", "对象：project-alpha",
+		"checkpoint=evidence-03", "record_count=12", "owner=team-a",
+	} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("未知事件通用详情缺少 %q: %s", want, content)
+		}
+	}
+	if strings.Count(content, "关键详情：") != 1 {
+		t.Fatalf("关键详情不应重复追加: %s", content)
 	}
 }
 

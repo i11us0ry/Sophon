@@ -35,10 +35,9 @@ func missionTestAssets() []database.Asset {
 
 func TestCoordinatedMainInstructionUsesOperatorRole(t *testing.T) {
 	ctx := withCoordinatedBackgroundActive(context.Background())
-	instruction := agentInstructionForMission(
-		ctx,
-		agentModeDeep,
-		missionPlan{
+	ctx = withMissionExecution(ctx, missionExecution{
+		AgentMode: agentModeDeep,
+		Plan: missionPlan{
 			Mode:        missionModeAgent,
 			Coordinated: true,
 			Objective:   "testxc.xmfactory.com\n不限手段挖掘可用漏洞",
@@ -46,25 +45,21 @@ func TestCoordinatedMainInstructionUsesOperatorRole(t *testing.T) {
 				"testxc.xmfactory.com",
 			},
 		},
-		missionPhaseGeneral,
-	)
+		Phase: missionPhaseGeneral,
+	})
+	instruction := (&Service{}).mainAgentInstruction(ctx)
 	for _, want := range []string{
 		"人类操作员与 Planner/Worker 之间的接口",
-		"你不亲自探索目标",
-		"orchestrator_control(action=\"worker_output\"",
+		"当前运行方式：主 Agent + Planner/Worker 协同模式",
+		"不亲自运行命令、脚本、扫描器或 MCP 工具",
 		"当前任务目标：testxc.xmfactory.com",
 	} {
 		if !strings.Contains(instruction, want) {
 			t.Fatalf("协调模式主 Agent 指令缺少 %q: %s", want, instruction)
 		}
 	}
-	for _, forbidden := range []string{
-		"执行流程由你决定",
-		"你可以直接执行",
-	} {
-		if strings.Contains(instruction, forbidden) {
-			t.Fatalf("协调模式主 Agent 不应包含直接执行说明 %q: %s", forbidden, instruction)
-		}
+	if strings.Contains(instruction, "当前运行方式：主 Agent 独立执行模式") {
+		t.Fatalf("协同模式不应注入独立执行状态: %s", instruction)
 	}
 }
 
@@ -2466,11 +2461,11 @@ func TestMainAgentInstructionUsesSingleRolePrompt(t *testing.T) {
 		AgentMode: agentModeFast,
 	})
 	fastInstruction := service.mainAgentInstruction(fastCtx)
-	if !strings.Contains(fastInstruction, "【单 Agent 模式约束】") {
-		t.Fatalf("单 Agent 指令缺少模式约束")
+	if !strings.Contains(fastInstruction, "当前运行方式：主 Agent 独立执行模式") {
+		t.Fatalf("独立执行指令缺少运行状态")
 	}
-	if strings.Contains(fastInstruction, "人类操作员与 Planner/Worker 之间的接口") {
-		t.Fatalf("单 Agent 指令不应同时包含协调者角色")
+	if strings.Count(fastInstruction, "你是 Sophon 授权渗透测试系统的主 Agent") != 1 {
+		t.Fatalf("主 Agent 指令应只有一个角色身份")
 	}
 
 	coordinatedCtx := withMissionExecution(context.Background(), missionExecution{
@@ -2478,10 +2473,34 @@ func TestMainAgentInstructionUsesSingleRolePrompt(t *testing.T) {
 		AgentMode: agentModeDeep,
 	})
 	coordinatedInstruction := service.mainAgentInstruction(coordinatedCtx)
-	if !strings.Contains(coordinatedInstruction, "人类操作员与 Planner/Worker 之间的接口") {
-		t.Fatalf("协调模式指令缺少协调者角色")
+	if !strings.Contains(coordinatedInstruction, "当前运行方式：主 Agent + Planner/Worker 协同模式") {
+		t.Fatalf("协调模式指令缺少运行状态")
 	}
-	if strings.Contains(coordinatedInstruction, "【单 Agent 模式约束】") {
-		t.Fatalf("协调模式指令不应同时包含单 Agent 角色")
+	if strings.Count(coordinatedInstruction, "你是 Sophon 授权渗透测试系统的主 Agent") != 1 {
+		t.Fatalf("协调模式指令应只有一个角色身份")
+	}
+}
+
+func TestMainAgentInstructionUsesStoredMainAgentPrompt(t *testing.T) {
+	db, err := database.Open(filepath.Join(t.TempDir(), "main-agent-prompt.db"))
+	if err != nil {
+		t.Fatalf("打开数据库失败: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ctx := context.Background()
+	if err := EnsureSystemAgentRoles(ctx, db); err != nil {
+		t.Fatalf("初始化系统 Agent 失败: %v", err)
+	}
+	role, err := db.GetAgentRole(ctx, SystemMainAgentID)
+	if err != nil {
+		t.Fatalf("读取主 Agent 失败: %v", err)
+	}
+	role.Prompt = "数据库中的唯一主 Agent Prompt"
+	if err := db.UpdateAgentRole(ctx, *role); err != nil {
+		t.Fatalf("更新主 Agent Prompt 失败: %v", err)
+	}
+	instruction := (&Service{db: db}).mainAgentInstruction(ctx)
+	if instruction != role.Prompt {
+		t.Fatalf("运行时未使用数据库主 Agent Prompt: %q", instruction)
 	}
 }

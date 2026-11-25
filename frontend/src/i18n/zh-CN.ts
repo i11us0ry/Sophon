@@ -495,6 +495,8 @@ const messages: Record<string, string> = {
   'project.scopePlaceholder': '资产范围（如：10.0.0.0/24、example.com，不含生产库）',
   'project.goalsLabel': '目标',
   'project.scopeLabel': '资产范围',
+  'project.scopeExpand': '展开更多',
+  'project.scopeCollapse': '收起',
   'project.briefEmpty': '未填写',
   'project.nameLabel': '名称',
   'project.descriptionLabel': '描述',

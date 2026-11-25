@@ -495,6 +495,8 @@ const messages: Record<string, string> = {
   'project.scopePlaceholder': 'Asset scope (e.g. 10.0.0.0/24, example.com; excl. production DB)',
   'project.goalsLabel': 'Goals',
   'project.scopeLabel': 'Asset scope',
+  'project.scopeExpand': 'Show more',
+  'project.scopeCollapse': 'Show less',
   'project.briefEmpty': 'Not set',
   'project.nameLabel': 'Name',
   'project.descriptionLabel': 'Description',

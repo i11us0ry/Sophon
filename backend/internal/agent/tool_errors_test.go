@@ -75,29 +75,41 @@ func TestTolerantToolReturnsErrorAsResult(t *testing.T) {
 	}
 }
 
-func TestDefaultSystemPromptKeepsExecutionBoundariesConcise(t *testing.T) {
-	if len([]rune(defaultSystemPrompt)) > 2200 {
-		t.Fatalf("默认系统提示仍然过长: %d", len([]rune(defaultSystemPrompt)))
+func TestMainAgentPromptDefinesTwoExecutionModes(t *testing.T) {
+	if len([]rune(mainAgentPrompt)) > 3200 {
+		t.Fatalf("主 Agent 系统提示仍然过长: %d", len([]rune(mainAgentPrompt)))
 	}
 	for _, expected := range []string{
 		"工具与能力",
+		"主 Agent 独立执行模式",
+		"主 Agent + Planner/Worker 协同模式",
+		"用户明确要求不需要 Planner/Worker",
+		"编写 WebShell",
+		"隧道代理",
+		"漏洞成果总结",
 		"mcp_search_tools",
 		"mcp_use_tool",
 		"project_next_targets",
-		"pent_agent_execute",
+		"pent_agent_*",
 		"read_skill",
-		"单 Agent 模式由主 Agent 直接执行",
-		"单 Agent 模式禁止调用这些入口",
+		"project_add_hint",
+		"project_add_intent",
+		"steer_worker",
+		"project_add_goal",
+		`memory_kind="constraint"`,
 		"工具失败时先判断错误类型和可修复性",
 		"不得用等价方式绕过授权、拦截或人工审批",
 	} {
-		if !strings.Contains(defaultSystemPrompt, expected) {
+		if !strings.Contains(mainAgentPrompt, expected) {
 			t.Fatalf("系统提示缺少基础设施边界 %q", expected)
 		}
 	}
+	if strings.Contains(mainAgentPrompt, "Deep 模式") {
+		t.Fatalf("主 Agent Prompt 不应定义第三种工作模式")
+	}
 }
 
-func TestDefaultPromptDoesNotEncodeEndpointSpecificWorkflow(t *testing.T) {
+func TestMainAgentPromptDoesNotEncodeEndpointSpecificWorkflow(t *testing.T) {
 	for _, forbidden := range []string{
 		"page_size=1",
 		"禁止批量翻页",
@@ -105,16 +117,16 @@ func TestDefaultPromptDoesNotEncodeEndpointSpecificWorkflow(t *testing.T) {
 		"优先处理 `project_next_targets`",
 		"每个测试方向必须形成",
 	} {
-		if strings.Contains(defaultSystemPrompt, forbidden) {
+		if strings.Contains(mainAgentPrompt, forbidden) {
 			t.Fatalf("系统提示不应固化具体测试流程 %q", forbidden)
 		}
 	}
 }
 
-func TestDefaultPromptDoesNotForceSpecificToolChoice(t *testing.T) {
-	if strings.Contains(defaultSystemPrompt, "必须使用 java_decompile") ||
-		strings.Contains(defaultSystemPrompt, "必须调用 pent_agent") ||
-		strings.Contains(defaultSystemPrompt, "必须填写 worker_focus") {
+func TestMainAgentPromptDoesNotForceSpecificToolChoice(t *testing.T) {
+	if strings.Contains(mainAgentPrompt, "必须使用 java_decompile") ||
+		strings.Contains(mainAgentPrompt, "必须调用 pent_agent") ||
+		strings.Contains(mainAgentPrompt, "必须填写 worker_focus") {
 		t.Fatalf("默认提示不应强制某个工具")
 	}
 }

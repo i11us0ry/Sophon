@@ -230,6 +230,12 @@ const displayStepCount = computed(() =>
   Math.max(props.totalCount || 0, props.steps.length),
 )
 
+const summaryLabel = computed(() =>
+  props.live
+    ? `${t('chat.generating')} · ${displayStepCount.value}`
+    : t('chat.executionSteps', { count: displayStepCount.value }),
+)
+
 function itemKey(item: StepItem, index: number) {
   if (item.kind === 'tool') {
     return `tool-${item.group.key || index}`
@@ -354,16 +360,26 @@ function onToggle(event: Event) {
   <details
     v-if="live || steps.length || (totalCount || 0) > 0"
     class="agent-run"
-    :open="live || expanded"
+    :open="expanded"
     @toggle="onToggle"
   >
-    <summary v-if="!live" class="agent-run-summary">
-      <span>{{ t('chat.executionSteps', { count: displayStepCount }) }}</span>
+    <summary class="agent-run-summary">
+      <span class="agent-run-summary-main">
+        <i :class="{ running: live }" aria-hidden="true"></i>
+        {{ summaryLabel }}
+      </span>
+      <span
+        v-if="agentCounts.planner || agentCounts.worker"
+        class="agent-run-agents"
+      >
+        <span v-if="agentCounts.planner">P {{ agentCounts.planner }}</span>
+        <span v-if="agentCounts.worker">W {{ agentCounts.worker }}</span>
+      </span>
       <svg class="agent-run-chevron" viewBox="0 0 24 24" aria-hidden="true">
         <path d="m6 9 6 6 6-6" />
       </svg>
     </summary>
-    <div v-if="live || expanded" class="agent-steps" :class="{ live }">
+    <div v-if="expanded" class="agent-steps" :class="{ live }">
       <div
         v-if="
           agentCounts.main ||
@@ -533,25 +549,44 @@ function onToggle(event: Event) {
 }
 
 .agent-run {
-  margin-bottom: 8px;
+  margin-top: 8px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface-soft) 62%, transparent);
 }
 
 .agent-run-summary {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 9px;
-  border: 1px solid color-mix(in srgb, var(--border) 78%, transparent);
-  border-radius: var(--radius);
+  padding: 10px 12px;
   color: var(--text-secondary);
-  background: color-mix(in srgb, var(--surface-soft) 72%, transparent);
+  background: transparent;
   font-size: 11px;
   cursor: pointer;
   list-style: none;
 }
 
-.agent-run-summary > span:first-child {
+.agent-run-summary-main {
+  display: inline-flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.agent-run-summary-main i {
+  width: 7px;
+  height: 7px;
   flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--success);
+}
+
+.agent-run-summary-main i.running {
+  background: var(--accent);
+  animation: sophon-pulse 1.4s ease-in-out infinite;
 }
 
 .agent-run-summary::-webkit-details-marker {
@@ -562,7 +597,6 @@ function onToggle(event: Event) {
   flex: 0 0 auto;
   width: 13px;
   height: 13px;
-  margin-left: auto;
   fill: none;
   stroke: currentColor;
   stroke-linecap: round;
@@ -572,7 +606,7 @@ function onToggle(event: Event) {
 }
 
 .agent-run[open] > .agent-run-summary {
-  border-radius: var(--radius);
+  border-bottom: 1px solid var(--border);
 }
 
 .agent-run[open] > .agent-run-summary .agent-run-chevron {
@@ -580,8 +614,23 @@ function onToggle(event: Event) {
 }
 
 .agent-run > .agent-steps {
-  margin-top: 6px;
+  margin-top: 0;
   margin-bottom: 0;
+  padding: 12px;
+}
+
+.agent-run-agents {
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: 5px;
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.agent-run-agents span {
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: var(--surface-soft);
 }
 
 .agent-run-overview {

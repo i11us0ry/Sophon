@@ -3909,3 +3909,35 @@ html.paused *::after {
     animation: none !important;
   }
 }
+
+@media (max-width: 760px) {
+  .app-shell.chat-shell {
+    height: 100dvh;
+    min-height: 0;
+    overflow: hidden;
+    padding-bottom: 70px;
+  }
+
+  .app-shell.chat-shell .main-column {
+    height: calc(100dvh - 126px);
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .app-shell.chat-shell .main-content {
+    height: 100%;
+    min-height: 0;
+    overflow: hidden;
+    padding: 8px 8px 10px;
+  }
+
+  .app-shell.chat-shell .chat-layout {
+    height: 100%;
+    min-height: 0;
+  }
+
+  .app-shell.chat-shell .chat-panel {
+    height: 100%;
+    min-height: 0;
+  }
+}

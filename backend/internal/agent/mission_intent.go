@@ -1916,67 +1916,47 @@ func formatMissionTargets(plan missionPlan) string {
 	return strings.Join(plan.PentestTargets, "、")
 }
 
-func agentInstructionForMission(
-	ctx context.Context,
-	mode string,
-	plan missionPlan,
-	phase string,
-) string {
-	_ = ctx
-	if !plan.Coordinated {
-		instruction := agentInstructionForMode(mode) + missionPlanGuidance(plan, phase)
-		if normalizeAgentMode(mode) == agentModeFast {
-			instruction += "\n\n【单 Agent 模式强制约束】\n" +
-				"禁止调用 Planner、Worker、pent_agent_*，禁止启动或恢复后台 Planner/Worker 编排。"
-		}
-		return instruction
-	}
+func mainAgentExecutionContext(plan missionPlan) string {
 	var builder strings.Builder
-	builder.WriteString(coordinatedMainAgentPrompt)
+	builder.WriteString("\n\n【执行上下文】\n")
+	if plan.Coordinated {
+		builder.WriteString("当前运行方式：主 Agent + Planner/Worker 协同模式。平台已启动后台编排，本轮不直接执行工具。\n")
+	} else {
+		builder.WriteString("当前运行方式：主 Agent 独立执行模式。平台已关闭 Planner、Worker 和 pent_agent_* 入口。\n")
+	}
 	if objective := strings.TrimSpace(plan.Objective); objective != "" {
-		builder.WriteString("\n\n当前任务目标：")
+		builder.WriteString("当前任务目标：")
 		builder.WriteString(objective)
+		builder.WriteString("\n")
 	}
 	if targets := formatMissionTargets(plan); targets != "" && targets != "未指定" {
-		builder.WriteString("\n当前目标范围：")
+		builder.WriteString("当前目标范围：")
 		builder.WriteString(targets)
+		builder.WriteString("\n")
 	}
-	builder.WriteString(missionPlanGuidance(plan, phase))
+	builder.WriteString("当前用户、项目、目标、附件、finding 和项目状态仅作为上下文；完成当前任务后停止。")
 	return builder.String()
 }
 
 func (s *Service) mainAgentInstruction(ctx context.Context) string {
-	instruction := defaultSystemPrompt
+	instruction := s.systemAgentPrompt(
+		ctx,
+		SystemMainAgentID,
+		SystemMainAgentName,
+		mainAgentPrompt,
+	)
 	if execution, ok := missionExecutionFromContext(ctx); ok {
-		instruction = agentInstructionForMission(
-			ctx,
-			execution.AgentMode,
+		instruction += mainAgentExecutionContext(
 			execution.Plan,
-			execution.Phase,
 		)
 	}
 	if agentPrompt := s.conversationSystemAgentPrompt(ctx); strings.TrimSpace(agentPrompt) != "" {
 		instruction = agentPrompt + "\n\n" + instruction
 	}
-	if policyPrompt := s.systemAgentPrompt(
-		ctx,
-		SystemMissionPolicyAgentID,
-		SystemMissionPolicyAgentName,
-		missionPolicyAgentPrompt,
-	); strings.TrimSpace(policyPrompt) != "" {
-		instruction += "\n\n" + policyPrompt
-	}
 	conversationID := strings.TrimSpace(execctx.ConversationID(ctx))
 	userID := strings.TrimSpace(execctx.UserID(ctx))
-	if s != nil && s.db != nil && conversationID != "" && userID != "" {
-		if conversation, err := s.db.GetConversation(ctx, conversationID, userID); err == nil &&
-			strings.TrimSpace(conversation.ProjectID) != "" {
-			instruction += projectWritebackGuidance
-		}
-	}
-	instruction += untrustedContextGuidance
-	execution, coordinated := missionExecutionFromContext(ctx)
-	if s != nil && s.db != nil && (!coordinated || !execution.Plan.Coordinated) {
+	if execution, coordinated := missionExecutionFromContext(ctx); s != nil && s.db != nil &&
+		(!coordinated || !execution.Plan.Coordinated) {
 		if conversationID != "" && userID != "" {
 			if state, err := s.db.GetZhiziConversationState(ctx, conversationID, userID); err == nil &&
 				state.Enabled && state.Lease != nil {

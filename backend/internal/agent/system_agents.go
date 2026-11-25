@@ -562,7 +562,7 @@ func systemAgentDefinitions() []systemAgentDefinition {
 			Name:        SystemMainAgentName,
 			Description: "平台默认主 Agent，负责直接理解用户请求、发现项目材料、规划任务并调用工具执行。",
 			Icon:        "◈",
-			Prompt:      defaultSystemPrompt,
+			Prompt:      mainAgentPrompt,
 		},
 		{
 			ID:          SystemReportAgentID,

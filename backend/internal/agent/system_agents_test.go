@@ -25,7 +25,7 @@ func TestSystemAgentRolesSeedCanonicalIdentityAndPrompt(t *testing.T) {
 		t.Fatalf("读取主 Agent 失败: %v", err)
 	}
 	if mainRole.Name != SystemMainAgentName || !mainRole.Enabled || !mainRole.Builtin ||
-		mainRole.Prompt != defaultSystemPrompt || mainRole.Icon != "◈" {
+		mainRole.Prompt != mainAgentPrompt || mainRole.Icon != "◈" {
 		t.Fatalf("主 Agent 初始状态错误: %+v", mainRole)
 	}
 	if SystemAgentEditableForRole(*mainRole) || SystemAgentDisableableForRole(*mainRole) {
