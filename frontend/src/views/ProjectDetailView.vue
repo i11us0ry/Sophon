@@ -290,6 +290,7 @@ const notice = ref('')
 
 const facts = ref<Fact[]>([])
 const factAssetFilter = ref('')
+const factSearchQuery = ref('')
 const factsHasMore = ref(false)
 const factsNextOffset = ref(0)
 const factsLoadingMore = ref(false)
@@ -312,6 +313,8 @@ const vulnerabilityEditLoading = ref(false)
 const vulnerabilityDraft = ref<VulnerabilityDetail | null>(null)
 const graphNodes = ref<GraphNode[]>([])
 const graphEdges = ref<GraphEdge[]>([])
+const intentSearchQuery = ref('')
+const intentStatusFilter = ref('')
 const pendingIntentCards = computed(() => {
   const graph = new Map(graphNodes.value.map((node) => [node.id, node]))
   return pendingIntentTargets.value
@@ -346,6 +349,32 @@ const intentCards = computed(() => {
       reason: targetByID.get(node.id)?.reason ?? graphStatusLabel(node.status),
     }))
 })
+const filteredIntentCards = computed(() =>
+  intentCards.value.filter(
+    (item) =>
+      (!intentStatusFilter.value || item.node.status === intentStatusFilter.value) &&
+      matchesProjectSearch(intentSearchQuery.value, [
+        item.node.title,
+        item.node.detail,
+        item.reason,
+        item.node.assetId ? assetName(item.node.assetId) : '',
+      ]),
+  ),
+)
+const filteredFacts = computed(() =>
+  facts.value.filter((fact) =>
+    matchesProjectSearch(factSearchQuery.value, [
+      fact.key,
+      fact.summary,
+      fact.value,
+      fact.body,
+      fact.evidence,
+      fact.relation,
+      fact.factType,
+      fact.assetId ? assetName(fact.assetId) : '',
+    ]),
+  ),
+)
 const evidenceGapFacts = computed(() => {
   const byID = new Map(facts.value.map((fact) => [fact.id, fact]))
   return (coverage.value?.evidenceGapTargets ?? [])
@@ -1071,6 +1100,14 @@ function assetName(assetId: string) {
   return assets.value.find((item) => item.id === assetId)?.name ?? assetId
 }
 
+function matchesProjectSearch(query: string, values: unknown[]) {
+  const keyword = query.trim().toLocaleLowerCase()
+  return (
+    !keyword ||
+    values.some((value) => String(value ?? '').toLocaleLowerCase().includes(keyword))
+  )
+}
+
 function relationLabel(rel: string) {
   return t(`graph.rel.${rel}`)
 }
@@ -1453,9 +1490,36 @@ onUnmounted(() => {
         <h2>{{ t('project.tabPendingIntents') }}</h2>
         <span class="panel-hint">{{ t('project.pendingIntentManageHint') }}</span>
       </header>
-      <div v-if="intentCards.length" class="fact-grid">
+      <div class="project-filter-toolbar">
+        <input
+          v-model.trim="intentSearchQuery"
+          class="project-search-input"
+          type="search"
+          :aria-label="t('project.intentSearchPlaceholder')"
+          :placeholder="t('project.intentSearchPlaceholder')"
+        />
+        <select
+          v-model="intentStatusFilter"
+          class="asset-filter-select"
+          :aria-label="t('project.intentStatusFilter')"
+        >
+          <option value="">{{ t('project.statusAll') }}</option>
+          <option v-for="status in GRAPH_STATUS_OPTIONS.intent" :key="status" :value="status">
+            {{ graphStatusLabel(status) }}
+          </option>
+        </select>
+        <span class="project-filter-count">
+          {{
+            t('project.filterCount', {
+              filtered: filteredIntentCards.length,
+              total: intentCards.length,
+            })
+          }}
+        </span>
+      </div>
+      <div v-if="filteredIntentCards.length" class="fact-grid">
         <article
-          v-for="item in intentCards"
+          v-for="item in filteredIntentCards"
           :key="`tab-intent-${item.node.id}`"
           class="fact-card"
         >
@@ -1486,7 +1550,13 @@ onUnmounted(() => {
           </footer>
         </article>
       </div>
-      <p v-else class="empty-cell">{{ t('project.pendingIntentBoardEmpty') }}</p>
+      <p v-else class="empty-cell">
+        {{
+          intentSearchQuery || intentStatusFilter
+            ? t('project.intentNoMatch')
+            : t('project.pendingIntentBoardEmpty')
+        }}
+      </p>
     </section>
 
     <section v-if="activeTab === 'evidence-gaps'" class="panel">
@@ -1585,24 +1655,41 @@ onUnmounted(() => {
       <header class="panel-header">
         <h2>{{ t('project.tabFacts') }}</h2>
         <div class="header-actions">
-          <select
-            v-model="factAssetFilter"
-            class="asset-filter-select"
-            :aria-label="t('project.factAsset')"
-          >
-            <option value="">{{ t('project.allAssets') }}</option>
-            <option v-for="asset in assets" :key="asset.id" :value="asset.id">
-              {{ asset.name || asset.value }}
-            </option>
-          </select>
           <span class="panel-hint">{{ t('project.factHint') }}</span>
           <button class="button compact" type="button" @click="openCreateFact">
             {{ t('project.addFact') }}
           </button>
         </div>
       </header>
-      <div v-if="facts.length" class="fact-grid">
-        <article v-for="fact in facts" :key="fact.id" class="fact-card">
+      <div class="project-filter-toolbar">
+        <input
+          v-model.trim="factSearchQuery"
+          class="project-search-input"
+          type="search"
+          :aria-label="t('project.factSearchPlaceholder')"
+          :placeholder="t('project.factSearchPlaceholder')"
+        />
+        <select
+          v-model="factAssetFilter"
+          class="asset-filter-select"
+          :aria-label="t('project.factAsset')"
+        >
+          <option value="">{{ t('project.allAssets') }}</option>
+          <option v-for="asset in assets" :key="asset.id" :value="asset.id">
+            {{ asset.name || asset.value }}
+          </option>
+        </select>
+        <span class="project-filter-count">
+          {{
+            t('project.filterCount', {
+              filtered: filteredFacts.length,
+              total: facts.length,
+            })
+          }}
+        </span>
+      </div>
+      <div v-if="filteredFacts.length" class="fact-grid">
+        <article v-for="fact in filteredFacts" :key="fact.id" class="fact-card">
           <header>
             <span class="fact-type">{{ fact.factType || 'general' }}</span>
             <strong class="fact-key" :title="fact.key">{{ fact.key }}</strong>
@@ -1639,7 +1726,9 @@ onUnmounted(() => {
           </footer>
         </article>
       </div>
-      <p v-else class="fact-empty">{{ t('project.factEmpty') }}</p>
+      <p v-else class="fact-empty">
+        {{ factSearchQuery ? t('project.factNoMatch') : t('project.factEmpty') }}
+      </p>
       <button
         v-if="factsHasMore"
         class="button panel-load-more"
@@ -2401,6 +2490,38 @@ onUnmounted(() => {
   background: var(--surface-raised);
   border: 1px solid var(--border);
   border-radius: var(--radius);
+}
+
+.project-filter-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.project-search-input {
+  flex: 1 1 280px;
+  min-width: 180px;
+  max-width: 440px;
+  padding: 7px 10px;
+  color: var(--text-primary);
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.project-search-input:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+
+.project-filter-count {
+  margin-left: auto;
+  color: var(--text-muted);
+  font-family: var(--mono);
+  font-size: 10px;
+  white-space: nowrap;
 }
 
 .panel-load-more {
@@ -4351,6 +4472,20 @@ onUnmounted(() => {
   .asset-filter-select {
     width: 100%;
     max-width: none;
+  }
+
+  .project-filter-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .project-search-input {
+    width: 100%;
+    max-width: none;
+  }
+
+  .project-filter-count {
+    margin-left: 0;
   }
 
   .view-switch {

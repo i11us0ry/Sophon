@@ -2,7 +2,7 @@
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 
-import { apiDelete, apiGet, apiPost, apiPut, apiUrl } from '../api/client'
+import { apiDelete, apiGet, apiPost, apiPut } from '../api/client'
 import DataPagination from '../components/DataPagination.vue'
 import PageTitleRobot from '../components/PageTitleRobot.vue'
 import { useI18n } from '../i18n'
@@ -382,7 +382,7 @@ function openBatchStart() {
 }
 
 function exportProject(project: Project) {
-  window.open(apiUrl(`/projects/${project.id}/export?format=docx`), '_blank')
+  void router.push({ name: 'project-report', params: { id: project.id } })
 }
 
 function closeCreate() {

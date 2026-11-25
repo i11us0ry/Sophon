@@ -31,9 +31,22 @@ const (
 	transcriptReseedFiles = 3
 	// 超长消息截断标记：提示模型原文已外置到 transcript。
 	contextTruncateMarker = "\n\n[...上下文已截断，完整原文见会话 transcript...]\n\n"
+	pinnedRecentUserCount = 5
+	pinnedUserTokenLimit  = 600
 	transcriptDirName     = "summarization"
 	transcriptMaxMessages = 500
 )
+
+func filterProactiveMessages(messages []database.Message) []database.Message {
+	result := make([]database.Message, 0, len(messages))
+	for _, message := range messages {
+		if strings.EqualFold(strings.TrimSpace(message.MessageKind), "proactive") {
+			continue
+		}
+		result = append(result, message)
+	}
+	return result
+}
 
 // groupMessageRounds 把历史切成「回合」：user 消息开启新回合，
 // 其后的 assistant 消息归入同一回合；回合是压缩与裁剪的最小单位，避免拆散问答对。
@@ -123,6 +136,77 @@ func softBudgetMessages(messages []database.Message, budgetTokens int) []databas
 	return result
 }
 
+// preserveRecentUserMessages 保证最近用户要求不会因为后台进展或长 assistant 回合被整轮裁掉。
+func preserveRecentUserMessages(
+	selected []database.Message,
+	original []database.Message,
+	budgetTokens int,
+) []database.Message {
+	selectedByID := make(map[string]database.Message, len(selected))
+	for _, message := range selected {
+		selectedByID[message.ID] = message
+	}
+	included := make(map[string]bool, len(selected)+pinnedRecentUserCount)
+	for _, message := range selected {
+		included[message.ID] = true
+	}
+	originalByID := make(map[string]database.Message, len(original))
+	for _, message := range original {
+		originalByID[message.ID] = message
+	}
+	targetIDs := make([]string, 0, pinnedRecentUserCount)
+	for index := len(original) - 1; index >= 0 && len(targetIDs) < pinnedRecentUserCount; index-- {
+		if strings.EqualFold(strings.TrimSpace(original[index].Role), "user") {
+			targetIDs = append(targetIDs, original[index].ID)
+		}
+	}
+	pinned := make(map[string]database.Message, pinnedRecentUserCount)
+	remaining := budgetTokens - estimateDatabaseMessagesTokens(selected)
+	for _, id := range targetIDs {
+		if remaining <= 0 {
+			break
+		}
+		message, ok := originalByID[id]
+		if !ok || included[message.ID] {
+			continue
+		}
+		maxContentTokens := min(pinnedUserTokenLimit, remaining-4)
+		if maxContentTokens < 32 {
+			break
+		}
+		message.Content = truncateMessageContent(message.Content, maxContentTokens)
+		messageTokens := estimateDatabaseMessagesTokens([]database.Message{message})
+		if messageTokens > remaining {
+			break
+		}
+		pinned[message.ID] = message
+		included[message.ID] = true
+		remaining -= messageTokens
+	}
+	result := make([]database.Message, 0, len(selected)+len(pinned))
+	for _, message := range original {
+		if selectedMessage, ok := selectedByID[message.ID]; ok {
+			result = append(result, selectedMessage)
+			continue
+		}
+		if pinnedMessage, ok := pinned[message.ID]; ok {
+			result = append(result, pinnedMessage)
+			continue
+		}
+	}
+	appended := make(map[string]bool, len(result))
+	for _, message := range result {
+		appended[message.ID] = true
+	}
+	for _, message := range selected {
+		if !appended[message.ID] {
+			result = append(result, message)
+			appended[message.ID] = true
+		}
+	}
+	return result
+}
+
 func maxInt(left, right int) int {
 	if left > right {
 		return left
@@ -177,10 +261,11 @@ func (s *Service) compactConversation(
 		return nil
 	}
 	kind = normalizeCompactionKind(kind)
-	history, err := s.db.GetMessages(ctx, conversationID, transcriptMaxMessages)
+	history, err := s.db.GetContextMessages(ctx, conversationID, transcriptMaxMessages)
 	if err != nil {
 		return err
 	}
+	history = filterProactiveMessages(history)
 	stored, err := s.db.GetConversationSummary(ctx, conversationID)
 	if err != nil {
 		return err

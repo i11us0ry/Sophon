@@ -363,6 +363,13 @@ Sophon 仅允许用于本公司、本组织拥有或明确控制的系统，以�
   - 修复 Planner 服务异常时已有假设无法启动 Worker，以及暂停编排无法继续的问题
   - 修复续跑任务仍被旧主 Agent 运行状态占用的问题
   - 修复会话切换消息丢失、重复新建会话、Worker 重复启动和任务暂停后继续执行等问题
+- 20261125:
+  - 新增“主 Agent Fast / 主 Agent 协调”双模式：Fast 由主 Agent 直接执行；协调模式不直接运行工具，由 Planner/Worker 执行，主 Agent 负责观察、操舵和审核
+  - Agent 模式按会话持久化，优先级为请求显式选择 > 会话保存值 > 默认协调模式；旧 `auto` 兼容为协调模式，不再根据自然语言自动推断
+  - 优化上下文组装：后台进展不进入模型上下文，最近五条用户指令在上下文预算内保留
+  - 重构项目报告导出：报告先生成 Markdown，再渲染为带 Sophon 品牌、目录、授权与免责声明、严重程度图表和分页样式的 PDF
+  - 报告导出包同时包含 Markdown、PDF、`assets.csv`、`vulnerabilities.csv` 和清单文件；报告仅包含已确认漏洞
+  - 漏洞复现步骤支持上传图片并内联到 PDF，补充 Chromium 与 Noto CJK 字体依赖
 
 ## 许可证
 
@@ -715,6 +722,13 @@ This statement is not legal advice and does not replace a formal authorization d
   - Fixed Worker dispatch when the Planner service is unavailable and restored paused orchestration recovery.
   - Fixed stale main-Agent runs blocking resumed work.
   - Fixed message loss during conversation switching, duplicate conversation creation, duplicate Worker starts, and execution after task pause.
+- 20261125:
+  - Added explicit `Main Agent Fast` and `Main Agent Coordinated` modes: Fast executes directly, while Coordinated delegates execution to Planner/Worker and only allows observation, steering, and review.
+  - Persisted the selected Agent mode per conversation with `explicit request > saved conversation value > default coordinated` precedence; legacy `auto` maps to coordinated mode and natural-language inference is removed.
+  - Improved context assembly: background progress is excluded from model context, and the latest five user instructions are retained within the context budget.
+  - Reworked project report export: reports are generated as Markdown and rendered to PDF with Sophon branding, a table of contents, authorization disclaimer, severity chart, and pagination styling.
+  - Report packages now include Markdown, PDF, `assets.csv`, `vulnerabilities.csv`, and a manifest; findings are limited to confirmed vulnerabilities.
+  - Vulnerability reproduction steps now support uploaded images in the PDF, with Chromium and Noto CJK font dependencies added to installation.
 
 ## License
 

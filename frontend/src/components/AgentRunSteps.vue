@@ -303,10 +303,35 @@ function lifecycleLabel(
     case 'agent_started':
       return t('chat.workerStarted')
     case 'agent_failed':
+      if (step.status === 'stopped') {
+        return t('chat.workerStopped')
+      }
       return t('chat.workerFailed')
     default:
       return t('chat.workerCompleted')
   }
+}
+
+function workerStatusLabel(status?: string) {
+  return status === 'stopped' ? t('chat.workerStatusStopped') : status || ''
+}
+
+function workerStopDisplay(step: AgentStep) {
+  const message = (step.stopMessage || '').trim()
+  if (message) {
+    return message
+  }
+  switch ((step.stopReason || '').trim().toLowerCase()) {
+    case 'planner_stopped':
+      return t('chat.workerLegacyStopPlanner')
+    case 'user_stopped':
+      return t('chat.workerLegacyStopUser')
+  }
+  const errorMessage = (step.errorMessage || '').trim()
+  if (errorMessage && !/^Worker 已被停止[。；;]?$/.test(errorMessage)) {
+    return errorMessage
+  }
+  return t('chat.workerStopReasonUnknown')
 }
 
 function workerAttemptCount(group: AgentGroup): number {
@@ -476,14 +501,18 @@ function onToggle(event: Event) {
               >
                 <span>{{ t('chat.workerDuration') }} {{ formatDuration(item.step.durationMs) }}</span>
                 <span v-if="item.step.status">
-                  {{ t('chat.workerStatus') }} {{ item.step.status }}
+                  {{ t('chat.workerStatus') }} {{ workerStatusLabel(item.step.status) }}
                 </span>
               </div>
               <div v-if="item.step.resultSummary" class="step-block">
                 <small class="step-label">{{ t('chat.workerResult') }}</small>
                 <pre>{{ item.step.resultSummary }}</pre>
               </div>
-              <div v-if="item.step.errorMessage" class="step-block">
+              <div v-if="item.step.status === 'stopped'" class="step-block">
+                <small class="step-label">{{ t('chat.workerStopReason') }}</small>
+                <pre>{{ workerStopDisplay(item.step) }}</pre>
+              </div>
+              <div v-else-if="item.step.errorMessage" class="step-block">
                 <small class="step-label">{{ t('chat.workerError') }}</small>
                 <pre>{{ item.step.errorMessage }}</pre>
               </div>

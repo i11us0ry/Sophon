@@ -50,16 +50,16 @@ func TestCoordinatedMainInstructionUsesOperatorRole(t *testing.T) {
 	instruction := (&Service{}).mainAgentInstruction(ctx)
 	for _, want := range []string{
 		"人类操作员与 Planner/Worker 之间的接口",
-		"当前运行方式：主 Agent + Planner/Worker 协同模式",
-		"不亲自运行命令、脚本、扫描器或 MCP 工具",
+		"当前运行方式：主 Agent 协调（Planner/Worker）",
+		"不得直接运行 exec、Python、扫描器、反编译、MCP 或智子执行工具",
 		"当前任务目标：testxc.xmfactory.com",
 	} {
 		if !strings.Contains(instruction, want) {
 			t.Fatalf("协调模式主 Agent 指令缺少 %q: %s", want, instruction)
 		}
 	}
-	if strings.Contains(instruction, "当前运行方式：主 Agent 独立执行模式") {
-		t.Fatalf("协同模式不应注入独立执行状态: %s", instruction)
+	if strings.Contains(instruction, "当前运行方式：主 Agent Fast") {
+		t.Fatalf("协调模式不应注入 Fast 执行状态: %s", instruction)
 	}
 }
 
@@ -434,7 +434,8 @@ func TestScopedTargetGuardAllowsUnresolvedTargets(t *testing.T) {
 			Mode:           missionModePentest,
 			PentestTargets: []string{"falcon.example.com"},
 		},
-		Phase: missionPhasePentest,
+		Phase:     missionPhasePentest,
+		AgentMode: agentModeFast,
 		Scope: missionScope{
 			Hosts:  []string{"falcon.example.com"},
 			Active: true,
@@ -447,24 +448,19 @@ func TestScopedTargetGuardAllowsUnresolvedTargets(t *testing.T) {
 	}
 }
 
-func TestScopedSubagentHandoffAllowsUnresolvedTarget(t *testing.T) {
+func TestMainAgentCannotDirectlyUseSubagentEntryTools(t *testing.T) {
 	service := &Service{}
-	ctx := withMissionExecution(context.Background(), missionExecution{
-		Plan: missionPlan{
-			Mode:           missionModePentest,
-			PentestTargets: []string{"falcon.example.com"},
-		},
-		Phase:     missionPhasePentest,
-		AgentMode: agentModeDeep,
-		Scope: missionScope{
-			Hosts:  []string{"falcon.example.com"},
-			Active: true,
-		},
-	})
-	if allowed, _ := service.missionToolDecision(ctx, pentToolExecute, map[string]interface{}{
-		"task": "继续深入检查所有接口",
-	}); !allowed {
-		t.Fatalf("Deep Path 移交任务无法静态解析目标时不应拒绝")
+	for _, mode := range []string{agentModeFast, agentModeDeep} {
+		ctx := withMissionExecution(context.Background(), missionExecution{
+			Plan:      missionPlan{Mode: missionModePentest, PentestTargets: []string{"falcon.example.com"}},
+			Phase:     missionPhasePentest,
+			AgentMode: mode,
+		})
+		if allowed, reason := service.missionToolDecision(ctx, pentToolExecute, map[string]interface{}{
+			"task": "继续深入检查所有接口",
+		}); allowed {
+			t.Fatalf("%s 模式下主 Agent 不应直接调用子 Agent 入口: %s", mode, reason)
+		}
 	}
 }
 
@@ -666,9 +662,6 @@ func TestSpecificFindingAuditBindsUniqueFindingAndLocksBudget(t *testing.T) {
 		plan.MaxToolCalls != boundedFindingMaxToolCalls ||
 		plan.AllowFollowUps {
 		t.Fatalf("单漏洞核验应绑定唯一漏洞并锁定预算: %+v", plan)
-	}
-	if mode := resolveAgentMode(agentModeDeep, agentModeDeep, plan); mode != agentModeDeep {
-		t.Fatalf("单漏洞核验也应使用多 Agent，实际 %s", mode)
 	}
 	boundedCtx := withMissionExecution(ctx, missionExecution{
 		Plan:      plan,
@@ -1182,7 +1175,8 @@ func TestCodeAuditStageRespectsAssetRestriction(t *testing.T) {
 			SourceRoots: []string{source},
 			Stages:      []string{missionPhaseSourceAudit},
 		},
-		Phase: missionPhaseSourceAudit,
+		Phase:     missionPhaseSourceAudit,
+		AgentMode: agentModeFast,
 		Scope: missionScope{
 			Hosts:  []string{"falcon.example.com"},
 			Active: true,
@@ -1243,7 +1237,7 @@ func TestRetestConversationInjectsRetestAgentPrompt(t *testing.T) {
 	}
 }
 
-func TestDeepCodeAuditMainAgentKeepsExecutionTools(t *testing.T) {
+func TestCoordinatedCodeAuditMainAgentKeepsOnlyCoordinatorTools(t *testing.T) {
 	root := t.TempDir()
 	source := filepath.Join(root, "tmp", "workspace", "conv-coordinator", "src")
 	if err := os.MkdirAll(source, 0o700); err != nil {
@@ -1268,19 +1262,17 @@ func TestDeepCodeAuditMainAgentKeepsExecutionTools(t *testing.T) {
 		allowed, reason := service.missionToolDecision(ctx, toolName, map[string]interface{}{
 			"command": "ls", "script": "print('x')", "name": "dotnet-code-audit",
 		})
-		if !allowed {
-			t.Fatalf("代码审计主 Agent 应可直接使用 %s: %s", toolName, reason)
+		if allowed {
+			t.Fatalf("协调模式主 Agent 不应直接使用 %s: %s", toolName, reason)
 		}
 	}
 	for _, toolName := range []string{
-		pentToolPlanHypotheses,
-		pentToolExecuteHypothesis,
-		"exec",
-		"execute-python-script",
 		"project_list_hypotheses",
 		"read_artifact",
 		"project_next_targets",
 		"project_update_goal",
+		"project_add_hint",
+		orchestratorControlToolName,
 	} {
 		allowed, reason := service.missionToolDecision(ctx, toolName, map[string]interface{}{})
 		if !allowed {
@@ -1658,7 +1650,7 @@ func TestRetestFinalizationRequiresEvidenceAndWriteback(t *testing.T) {
 	}
 }
 
-func TestMissionToolsStayAvailableAcrossPhases(t *testing.T) {
+func TestFastModeToolsStayAvailableAcrossPhases(t *testing.T) {
 	service := &Service{tools: []tool.BaseTool{
 		&jsonTool{name: "project_list_assets"},
 		&jsonTool{name: "project_insert_assets"},
@@ -1670,7 +1662,7 @@ func TestMissionToolsStayAvailableAcrossPhases(t *testing.T) {
 	}}
 	assetTools := service.activeToolsForMission(
 		context.Background(),
-		agentModeDeep,
+		agentModeFast,
 		missionPlan{Mode: missionModeAssetInventory},
 		missionPhaseAsset,
 	)
@@ -1680,7 +1672,6 @@ func TestMissionToolsStayAvailableAcrossPhases(t *testing.T) {
 		"project_insert_assets",
 		"exec",
 		"execute-python-script",
-		pentToolExecute,
 		"project_record_test",
 		internetSearchToolName,
 	} {
@@ -1689,15 +1680,16 @@ func TestMissionToolsStayAvailableAcrossPhases(t *testing.T) {
 		}
 	}
 
-	deepPentestTools := service.activeToolsForMission(
+	coordinatedTools := service.activeToolsForMission(
 		context.Background(),
 		agentModeDeep,
 		missionPlan{Mode: missionModePentest, PentestTargets: []string{"app.example.com"}},
 		missionPhasePentest,
 	)
-	deepNames := missionToolNames(t, deepPentestTools)
-	if !deepNames["exec"] || !deepNames[pentToolExecute] || !deepNames[internetSearchToolName] {
-		t.Fatalf("Deep Path 不应移除主 Agent 的直接执行工具: %+v", deepNames)
+	coordinatedNames := missionToolNames(t, coordinatedTools)
+	if coordinatedNames["exec"] || coordinatedNames[pentToolExecute] ||
+		coordinatedNames[internetSearchToolName] {
+		t.Fatalf("协调模式不应保留主 Agent 的直接执行工具: %+v", coordinatedNames)
 	}
 }
 
@@ -1739,8 +1731,8 @@ func TestInternetSearchMissionPolicy(t *testing.T) {
 	})
 	if allowed, reason := service.missionToolDecision(deepPentestCtx, internetSearchToolName, map[string]interface{}{
 		"query": "CVE-2026 example.com",
-	}); !allowed {
-		t.Fatalf("Deep Path 主 Agent 应允许公开资料搜索: %s", reason)
+	}); allowed {
+		t.Fatalf("协调模式主 Agent 不应直接调用互联网搜索: %s", reason)
 	}
 }
 
@@ -1885,7 +1877,8 @@ func TestMissionToolDecisionRespectsAssetRestriction(t *testing.T) {
 			Mode:           missionModePentest,
 			PentestTargets: []string{"falcon.example.com"},
 		},
-		Phase: missionPhasePentest,
+		Phase:     missionPhasePentest,
+		AgentMode: agentModeFast,
 		Scope: missionScope{
 			Hosts:  []string{"falcon.example.com"},
 			Active: true,
@@ -2436,21 +2429,54 @@ func TestFastModeMissionToolDecisionBlocksDelegation(t *testing.T) {
 	})
 
 	if allowed, reason := service.missionToolDecision(ctx, pentToolExecute, nil); allowed {
-		t.Fatalf("单 Agent 模式不应允许子 Agent 入口: %s", reason)
+		t.Fatalf("Fast 模式不应允许子 Agent 入口: %s", reason)
 	}
 	if allowed, reason := service.missionToolDecision(
 		ctx,
 		orchestratorControlToolName,
 		map[string]interface{}{"action": "resume_project"},
 	); allowed {
-		t.Fatalf("单 Agent 模式不应允许恢复协调任务: %s", reason)
+		t.Fatalf("Fast 模式不应允许恢复协调任务: %s", reason)
 	}
 	if allowed, reason := service.missionToolDecision(
 		ctx,
 		orchestratorControlToolName,
 		map[string]interface{}{"action": "status"},
 	); !allowed {
-		t.Fatalf("单 Agent 模式应允许查看历史 Worker 状态: %s", reason)
+		t.Fatalf("Fast 模式应允许查看历史 Worker 状态: %s", reason)
+	}
+}
+
+func TestCoordinatedModeMissionToolDecisionBlocksDirectExecution(t *testing.T) {
+	service := newSubAgentTestService(t)
+	ctx := context.Background()
+	ctx = execctx.WithRunMode(ctx, agentModeDeep)
+	ctx = withMissionExecution(ctx, missionExecution{
+		Plan:      missionPlan{Mode: missionModeAgent, Coordinated: true, ProjectScope: true},
+		AgentMode: agentModeDeep,
+	})
+
+	for _, toolName := range []string{
+		"exec",
+		"execute-python-script",
+		"install-python-package",
+		"java_decompile",
+		mcpUseToolName,
+		pentToolExecute,
+	} {
+		if allowed, reason := service.missionToolDecision(ctx, toolName, nil); allowed {
+			t.Fatalf("协调模式不应允许主 Agent 直接执行 %s: %s", toolName, reason)
+		}
+	}
+	for _, toolName := range []string{
+		orchestratorControlToolName,
+		"project_add_hint",
+		"project_add_intent",
+		"project_graph_overview",
+	} {
+		if allowed, reason := service.missionToolDecision(ctx, toolName, nil); !allowed {
+			t.Fatalf("协调模式应允许主 Agent 使用操舵工具 %s: %s", toolName, reason)
+		}
 	}
 }
 
@@ -2461,8 +2487,8 @@ func TestMainAgentInstructionUsesSingleRolePrompt(t *testing.T) {
 		AgentMode: agentModeFast,
 	})
 	fastInstruction := service.mainAgentInstruction(fastCtx)
-	if !strings.Contains(fastInstruction, "当前运行方式：主 Agent 独立执行模式") {
-		t.Fatalf("独立执行指令缺少运行状态")
+	if !strings.Contains(fastInstruction, "当前运行方式：主 Agent Fast") {
+		t.Fatalf("Fast 指令缺少运行状态")
 	}
 	if strings.Count(fastInstruction, "你是 Sophon 授权渗透测试系统的主 Agent") != 1 {
 		t.Fatalf("主 Agent 指令应只有一个角色身份")
@@ -2473,7 +2499,7 @@ func TestMainAgentInstructionUsesSingleRolePrompt(t *testing.T) {
 		AgentMode: agentModeDeep,
 	})
 	coordinatedInstruction := service.mainAgentInstruction(coordinatedCtx)
-	if !strings.Contains(coordinatedInstruction, "当前运行方式：主 Agent + Planner/Worker 协同模式") {
+	if !strings.Contains(coordinatedInstruction, "当前运行方式：主 Agent 协调（Planner/Worker）") {
 		t.Fatalf("协调模式指令缺少运行状态")
 	}
 	if strings.Count(coordinatedInstruction, "你是 Sophon 授权渗透测试系统的主 Agent") != 1 {

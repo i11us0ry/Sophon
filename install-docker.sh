@@ -431,7 +431,8 @@ install_system_dependencies() {
     python3-dev ruby ruby-dev ruby-addressable autoconf automake libtool bison flex
     libssl-dev libssh-dev libidn11-dev libpcre2-dev libgtk-3-dev
     zlib1g-dev libbz2-dev libgmp-dev libgomp1 default-jdk-headless libcap2-bin
-    openssl util-linux procps iproute2 nmap masscan
+    openssl util-linux procps iproute2 nmap masscan \
+    chromium fonts-noto-cjk fonts-droid-fallback
   )
   local optional=(nbtscan)
   exec_sh 'command -v apt-get >/dev/null 2>&1' || die "基础镜像缺少 apt-get，请使用 Kali/Debian 系镜像"
@@ -450,6 +451,12 @@ install_system_dependencies() {
       warn "当前 apt 源不提供可选工具: ${package}"
     fi
   done
+  if ! exec_sh 'command -v chromium >/dev/null 2>&1 || command -v chromium-browser >/dev/null 2>&1'; then
+    warn "容器内未找到 Chromium，PDF 报告导出不可用"
+  fi
+  if ! exec_sh 'command -v fc-list >/dev/null 2>&1 && fc-list :lang=zh 2>/dev/null | grep -q .'; then
+    warn "容器内未检测到中文字体，PDF 报告中的中文可能显示异常"
+  fi
 }
 
 version_ge() {

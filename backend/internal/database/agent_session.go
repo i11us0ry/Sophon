@@ -318,6 +318,7 @@ func (db *DB) ListAgentSessionDetailsPage(
 	if err := rows.Err(); err != nil {
 		return nil, 0, false, err
 	}
+	db.enrichProcessDetailStopReasons(ctx, items)
 	hasMore := len(items) > limit
 	if hasMore {
 		items = items[:limit]
@@ -326,6 +327,78 @@ func (db *DB) ListAgentSessionDetailsPage(
 		items[left], items[right] = items[right], items[left]
 	}
 	return items, total, hasMore, nil
+}
+
+func (db *DB) enrichProcessDetailStopReasons(
+	ctx context.Context,
+	items []ProcessDetail,
+) {
+	if db == nil || len(items) == 0 {
+		return
+	}
+	hypothesisIDs := make(map[string]struct{})
+	for _, item := range items {
+		if item.Data == nil ||
+			processDetailDataString(item.Data, "stopReason") != "" ||
+			!strings.EqualFold(processDetailDataString(item.Data, "status"), "stopped") {
+			continue
+		}
+		hypothesisID := processDetailDataString(item.Data, "hypothesisId")
+		if hypothesisID != "" {
+			hypothesisIDs[hypothesisID] = struct{}{}
+		}
+	}
+	if len(hypothesisIDs) == 0 {
+		return
+	}
+
+	args := make([]interface{}, 0, len(hypothesisIDs))
+	placeholders := make([]string, 0, len(hypothesisIDs))
+	for hypothesisID := range hypothesisIDs {
+		args = append(args, hypothesisID)
+		placeholders = append(placeholders, "?")
+	}
+	rows, err := db.QueryContext(
+		ctx,
+		`SELECT id, state_reason FROM project_test_results WHERE id IN (`+
+			strings.Join(placeholders, ",")+`)`,
+		args...,
+	)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+
+	reasons := make(map[string]string, len(hypothesisIDs))
+	for rows.Next() {
+		var hypothesisID, reason string
+		if err := rows.Scan(&hypothesisID, &reason); err == nil && strings.TrimSpace(reason) != "" {
+			reasons[hypothesisID] = strings.TrimSpace(reason)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return
+	}
+	for index := range items {
+		item := &items[index]
+		if item.Data == nil ||
+			processDetailDataString(item.Data, "stopReason") != "" ||
+			!strings.EqualFold(processDetailDataString(item.Data, "status"), "stopped") {
+			continue
+		}
+		hypothesisID := processDetailDataString(item.Data, "hypothesisId")
+		if reason := reasons[hypothesisID]; reason != "" {
+			item.Data["stopReason"] = reason
+		}
+	}
+}
+
+func processDetailDataString(data map[string]interface{}, key string) string {
+	value, ok := data[key]
+	if !ok || value == nil {
+		return ""
+	}
+	return strings.TrimSpace(fmt.Sprint(value))
 }
 
 func (db *DB) ListAgentSessionDetailsAfter(

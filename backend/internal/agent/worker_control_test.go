@@ -84,13 +84,17 @@ func TestOrchestratorControlTargetsSingleWorker(t *testing.T) {
 	if _, err := service.controlOrchestration(
 		ctx,
 		"stop_worker",
-		"",
+		"停止重复方向并释放并发槽位",
 		"hypothesis-1",
 	); err != nil {
 		t.Fatalf("停止 Worker 失败: %v", err)
 	}
 	if !cancelled || !control.isStopped() {
 		t.Fatal("停止 Worker 应取消其独立 context")
+	}
+	reason, message := control.stopDetails()
+	if reason != "user_stopped" || message != "停止重复方向并释放并发槽位" {
+		t.Fatalf("Worker 停止原因未保存: reason=%s message=%s", reason, message)
 	}
 }
 
@@ -119,5 +123,9 @@ func TestWorkerStopMetadataDistinguishesPlannerFromUser(t *testing.T) {
 	reason, message := workerStopMetadata(plannerCtx)
 	if reason != "planner_stopped" || !strings.Contains(message, "Planner") {
 		t.Fatalf("Planner 停止 Worker 的审计语义错误: reason=%s message=%s", reason, message)
+	}
+	reason, message = workerStopMetadata(plannerCtx, "回收槽位，转入更高优先级利用链")
+	if reason != "planner_stopped" || message != "回收槽位，转入更高优先级利用链" {
+		t.Fatalf("Planner 自定义停止原因错误: reason=%s message=%s", reason, message)
 	}
 }

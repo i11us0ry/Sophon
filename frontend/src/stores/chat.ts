@@ -20,7 +20,7 @@ const MESSAGE_CACHE_CONVERSATION_LIMIT = 30
 let activeStreamController: AbortController | null = null
 let activeAgentEventsController: AbortController | null = null
 
-export type AgentMode = 'auto' | 'fast' | 'deep'
+export type AgentMode = 'fast' | 'deep'
 
 function stringList(value: unknown): string[] {
   return Array.isArray(value)
@@ -244,6 +244,8 @@ export interface AgentStep {
   maxStreamAttempts?: number
   retryReason?: string
   recoveryReason?: string
+  stopReason?: string
+  stopMessage?: string
   capabilityMode?: string
   workerFocus?: string
   allowedSkills?: string[]
@@ -410,6 +412,7 @@ export const useChatStore = defineStore('chat', {
     autoContinue: true,
     autoContinueLoading: false,
     autoContinueUpdating: false,
+    agentModeUpdating: false,
     assetRestrictionEnabled: true,
     assetRestrictionLoading: false,
     assetRestrictionUpdating: false,
@@ -672,7 +675,6 @@ export const useChatStore = defineStore('chat', {
       this.currentConversationId = conversationId
       this.error = ''
       this.selectedRoleId = conversation?.agentRoleId ?? ''
-      this.agentMode = 'deep'
       this.selectedProjectId = conversation?.projectId ?? ''
       await this.ensureProjectOption(this.selectedProjectId)
       this.responseText = ''
@@ -1471,9 +1473,7 @@ export const useChatStore = defineStore('chat', {
         if (this.currentConversationId === conversationId) {
           this.autoContinue = response.autoContinue
           this.assetRestrictionEnabled = response.assetRestrictionEnabled
-          this.agentMode = response.agentMode === 'fast' || response.agentMode === 'auto'
-            ? response.agentMode
-            : 'deep'
+          this.agentMode = response.agentMode === 'fast' ? 'fast' : 'deep'
         }
       } catch {
         // 读取失败时保持默认自动继续，不影响对话主流程
@@ -1509,6 +1509,35 @@ export const useChatStore = defineStore('chat', {
         this.error = error instanceof Error ? error.message : '保存自动继续设置失败'
       } finally {
         this.autoContinueUpdating = false
+      }
+    },
+    async setAgentMode(mode: AgentMode) {
+      const conversationId = this.currentConversationId
+      if (!conversationId || this.agentModeUpdating || this.streaming) {
+        return
+      }
+      const previous = this.agentMode
+      this.agentModeUpdating = true
+      this.agentMode = mode
+      try {
+        const response = await apiPut<{
+          agentMode?: string
+          autoContinue: boolean
+          assetRestrictionEnabled: boolean
+        }>(
+          `/conversations/${conversationId}/agent-settings`,
+          { agentMode: mode },
+        )
+        if (this.currentConversationId === conversationId) {
+          this.agentMode = response.agentMode === 'fast' ? 'fast' : 'deep'
+          this.autoContinue = response.autoContinue
+          this.assetRestrictionEnabled = response.assetRestrictionEnabled
+        }
+      } catch (error) {
+        this.agentMode = previous
+        this.error = error instanceof Error ? error.message : '保存 Agent 模式失败'
+      } finally {
+        this.agentModeUpdating = false
       }
     },
     async setAssetRestriction(enabled: boolean) {

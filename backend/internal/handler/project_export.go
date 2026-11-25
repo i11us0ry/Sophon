@@ -46,6 +46,7 @@ func (h *ProjectHandler) Export(c *gin.Context) {
 		internalError(c, "project_export_failed", "读取项目漏洞失败")
 		return
 	}
+	coverage, _ := h.db.ProjectCoverage(ctx, project.ID, user.ID)
 
 	format := strings.ToLower(strings.TrimSpace(c.DefaultQuery("format", "docx")))
 	generatedAt := time.Now().UTC()
@@ -62,8 +63,22 @@ func (h *ProjectHandler) Export(c *gin.Context) {
 			"vulnerabilities": findings,
 			"exportedAt":      generatedAt,
 		})
+	case "md", "markdown", "csv", "vulnerabilities", "findings", "pdf", "package", "zip":
+		reportFindings := confirmedReportFindings(findings)
+		markdown := buildProjectReportMarkdown(project, assets, reportFindings, coverage, generatedAt)
+		if err := h.writeProjectReportExport(
+			c,
+			project,
+			assets,
+			reportFindings,
+			format,
+			markdown,
+		); err != nil {
+			internalError(c, "project_export_failed", err.Error())
+			return
+		}
 	default:
-		document, buildErr := buildProjectDocx(project, assets, findings)
+		document, buildErr := buildProjectDocx(project, assets, confirmedReportFindings(findings))
 		if buildErr != nil {
 			internalError(c, "project_export_failed", "生成导出文档失败")
 			return
@@ -102,7 +117,7 @@ func setProjectExportHeaders(c *gin.Context, filename, fallback string) {
 func projectExportFileName(projectName, extension string, generatedAt time.Time) string {
 	name := sanitizeProjectExportName(projectName)
 	return fmt.Sprintf(
-		"%s-实网攻防演习问题隐患报告-%s.%s",
+		"%s-风险评估报告-%s.%s",
 		name,
 		generatedAt.Format("20060102"),
 		extension,
@@ -421,7 +436,7 @@ func writeDocxPackage(documentXML, title string, generatedAt time.Time) ([]byte,
 	coreXML := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:dcmitype="http://purl.org/dc/dcmitype/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
   <dc:title>%s</dc:title>
-  <dc:subject>实网攻防演习问题隐患报告</dc:subject>
+  <dc:subject>风险评估报告</dc:subject>
   <dc:creator>Sophon Security Platform</dc:creator>
   <cp:lastModifiedBy>Sophon Security Platform</cp:lastModifiedBy>
   <dcterms:created xsi:type="dcterms:W3CDTF">%s</dcterms:created>
@@ -971,7 +986,7 @@ func buildProfessionalProjectDocx(
 		`</w:sectPr>` +
 		`</w:body></w:document>`
 
-	return writeDocxPackage(document, project.Name+" 实网攻防演习问题隐患报告", generatedAt)
+	return writeDocxPackage(document, project.Name+" 风险评估报告", generatedAt)
 }
 
 func docxCoverPage(
@@ -1001,7 +1016,7 @@ func docxCoverPage(
 		before:         0,
 		after:          240,
 	}))
-	body.WriteString(docxParagraph("实网攻防演习问题隐患报告", docxTextOptions{
+	body.WriteString(docxParagraph("风险评估报告", docxTextOptions{
 		bold:           true,
 		color:          "475467",
 		sizeHalfPoints: 28,
@@ -1030,7 +1045,7 @@ func docxCoverPage(
 	))
 	body.WriteString(docxSpacer(360))
 	body.WriteString(docxCallout(
-		"本报告由 Sophon 安全评估平台根据项目当前记录自动生成。报告中的资产、漏洞、证据和复测信息以导出时平台数据为准。",
+		"本报告由 Sophon 智能安全助手根据项目当前记录自动生成。报告中的资产、漏洞、证据和复测信息以导出时平台数据为准。",
 		"F8FAFC",
 		"475467",
 	))
@@ -1060,9 +1075,9 @@ func docxDocumentControl(project *database.Project, generatedAt time.Time) strin
 	body.WriteString(docxTableWithOptions(
 		[]string{"控制项", "内容"},
 		[][]string{
-			{"报告名称", project.Name + " 实网攻防演习问题隐患报告"},
+			{"报告名称", project.Name + " 风险评估报告"},
 			{"报告版本", "V1.0"},
-			{"编制方式", "Sophon 安全评估平台自动汇总"},
+			{"编制方式", "Sophon 智能安全助手自动汇总"},
 			{"数据来源", "项目资产清单、漏洞记录、证据和复测记录"},
 			{"报告状态", "正式导出"},
 			{"导出时间", generatedAt.Format("2006-01-02 15:04:05 UTC")},

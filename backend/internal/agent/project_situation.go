@@ -197,7 +197,8 @@ func (s *Service) projectSituationForContext(
 	rankedFacts := facts
 	if len(facts) > 0 {
 		query := ""
-		if messages, err := s.db.GetMessages(ctx, conversationID, 20); err == nil {
+		if messages, err := s.db.GetContextMessages(ctx, conversationID, 20); err == nil {
+			messages = filterProactiveMessages(messages)
 			for index := len(messages) - 1; index >= 0; index-- {
 				if strings.EqualFold(strings.TrimSpace(messages[index].Role), "user") {
 					query = messages[index].Content

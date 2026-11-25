@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -62,7 +63,11 @@ func openProjectToolService(t *testing.T, withProject bool) (*Service, context.C
 		t.Fatalf("创建对话失败: %v", err)
 	}
 
-	service := &Service{db: db, cfg: config.Config{}}
+	service := &Service{
+		db:    db,
+		cfg:   config.Config{},
+		model: &passthroughVulnerabilityWriterModel{},
+	}
 	service.vulnerabilityReviewHook = func(context.Context, database.Vulnerability) error {
 		return nil
 	}
@@ -898,6 +903,96 @@ func TestProjectReportFindingUsesWriterForInvalidNarrativeFields(t *testing.T) {
 	}
 	if started != 1 || completed != 1 {
 		t.Fatalf("漏洞编写生命周期错误: started=%d completed=%d", started, completed)
+	}
+}
+
+func TestProjectReportFindingAlwaysUsesWriterForCompleteFields(t *testing.T) {
+	service, ctx := openProjectToolService(t, true)
+	evidenceRef := completedToolRef(t, service, ctx, "http-probe")
+	writerDraft := vulnerabilityWriterDraft{
+		Description:       "编写 Agent 重写后的漏洞描述。",
+		Preconditions:     "否",
+		ReproductionSteps: "POST /item HTTP/1.1\nHost: writer.example\n\nid=1\n\n```python\nprint('writer')\n```",
+		Evidence:          "登录后凭证：admin / P@ssw0rd。",
+		Impact:            "编写 Agent 重写后的影响。",
+		Recommendation:    "编写 Agent 重写后的修复建议。",
+		RetestNotes:       "无",
+	}
+	encoded, err := json.Marshal(writerDraft)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.model = &vulnerabilityReviewTestModel{content: string(encoded)}
+	out, err := invokeProjectTool(t, service, ctx, "project_report_finding", standardFindingArgs(map[string]interface{}{
+		"severity":      "high",
+		"target":        "https://writer.example/item?id=1",
+		"http_method":   "POST",
+		"evidence_refs": []string{evidenceRef},
+	}))
+	if err != nil || !strings.Contains(out, "已上报漏洞") {
+		t.Fatalf("字段完整时也必须调用漏洞编写 Agent: %q err=%v", out, err)
+	}
+	findings, _, err := service.db.ListVulnerabilitiesFiltered(ctx, database.VulnerabilityFilter{
+		OwnerUserID: "user-1",
+		ProjectID:   "project-tools",
+		Limit:       10,
+	})
+	if err != nil || len(findings) != 1 {
+		t.Fatalf("读取漏洞失败: %+v err=%v", findings, err)
+	}
+	if findings[0].Description != writerDraft.Description ||
+		findings[0].Evidence != writerDraft.Evidence {
+		t.Fatalf("字段完整时仍应使用编写 Agent 结果: %+v", findings[0])
+	}
+}
+
+func TestProjectReportFindingFallsBackToOriginalWhenWriterFails(t *testing.T) {
+	for _, testCase := range []struct {
+		name      string
+		responses []sequenceVulnerabilityResponse
+	}{
+		{
+			name: "call failure",
+			responses: []sequenceVulnerabilityResponse{
+				{err: errors.New("failed to receive stream chunk: unexpected EOF")},
+				{err: errors.New("failed to receive stream chunk: unexpected EOF")},
+			},
+		},
+		{
+			name: "invalid output",
+			responses: []sequenceVulnerabilityResponse{
+				{content: "not a json object"},
+				{content: "still not a json object"},
+			},
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			service, ctx := openProjectToolService(t, true)
+			evidenceRef := completedToolRef(t, service, ctx, "http-probe")
+			service.model = &sequenceVulnerabilityModel{responses: testCase.responses}
+			originalArgs := standardFindingArgs(map[string]interface{}{
+				"severity":      "high",
+				"target":        "https://fallback.example/item?id=1",
+				"http_method":   "POST",
+				"evidence_refs": []string{evidenceRef},
+			})
+			out, err := invokeProjectTool(t, service, ctx, "project_report_finding", originalArgs)
+			if err != nil || !strings.Contains(out, "已上报漏洞") {
+				t.Fatalf("编写失败后应回退原始上报: %q err=%v", out, err)
+			}
+			findings, _, err := service.db.ListVulnerabilitiesFiltered(ctx, database.VulnerabilityFilter{
+				OwnerUserID: "user-1",
+				ProjectID:   "project-tools",
+				Limit:       10,
+			})
+			if err != nil || len(findings) != 1 {
+				t.Fatalf("读取回退漏洞失败: %+v err=%v", findings, err)
+			}
+			if findings[0].Evidence != originalArgs["evidence"] ||
+				findings[0].Description != originalArgs["description"] {
+				t.Fatalf("回退后应保留原始上报字段: %+v", findings[0])
+			}
+		})
 	}
 }
 

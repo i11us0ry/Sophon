@@ -78,6 +78,7 @@ func TestProcessBackgroundUpdateCreatesProactiveMessage(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(messages) != 1 || messages[0].Role != "assistant" ||
+		messages[0].MessageKind != "proactive" ||
 		!strings.Contains(messages[0].Content, "后台进展") ||
 		!strings.Contains(messages[0].Content, "漏洞") {
 		t.Fatalf("主动消息错误: %+v", messages)
@@ -98,6 +99,51 @@ func TestProcessBackgroundUpdateCreatesProactiveMessage(t *testing.T) {
 	}
 	if count, err := service.db.CountPendingBackgroundUpdates(ctx, conversation.ID); err != nil || count != 0 {
 		t.Fatalf("通知事件未完成: count=%d err=%v", count, err)
+	}
+}
+
+func TestProactiveUpdateUsageIsSeparateFromContext(t *testing.T) {
+	service := newSubAgentTestService(t)
+	service.model = &vulnerabilityReviewTestModel{
+		content: "后台进展\n后台摘要已生成",
+	}
+	project, conversation := createProactiveUpdateConversation(t, service, "usage")
+	ctx := context.Background()
+	now := time.Now().UTC()
+	if err := service.db.EnqueueBackgroundUpdate(ctx, database.BackgroundUpdateEvent{
+		ID:             "update-usage-1",
+		ConversationID: conversation.ID,
+		ProjectID:      project.ID,
+		OwnerUserID:    project.OwnerUserID,
+		Kind:           "finding_confirmed",
+		Priority:       100,
+		DedupeKey:      "finding:usage",
+		PayloadJSON:    `{"summary":"测试事件"}`,
+		NotBefore:      now.Add(-time.Second),
+		CreatedAt:      now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !service.processBackgroundUpdateConversation(ctx, conversation.ID, now) {
+		t.Fatal("后台更新未被处理")
+	}
+	messages, err := service.db.GetContextMessages(ctx, conversation.ID, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 0 {
+		t.Fatalf("后台进展不应进入模型上下文: %+v", messages)
+	}
+	var count int
+	if err := service.db.QueryRowContext(
+		ctx,
+		`SELECT COUNT(*) FROM token_usage WHERE conversation_id = ? AND kind = 'proactive'`,
+		conversation.ID,
+	).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count == 0 {
+		t.Fatal("后台播报 Token 未按 proactive 类型单独记录")
 	}
 }
 

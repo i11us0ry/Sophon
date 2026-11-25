@@ -585,6 +585,13 @@ function onTaskProfileChange(event: Event) {
   chat.selectTaskProfile((event.target as HTMLSelectElement).value)
 }
 
+function onAgentModeChange(event: Event) {
+  const mode = (event.target as HTMLSelectElement).value
+  if (mode === 'fast' || mode === 'deep') {
+    void chat.setAgentMode(mode)
+  }
+}
+
 async function stopCurrentTask() {
   if (currentStreaming.value) {
     await chat.cancelTask()
@@ -817,6 +824,8 @@ function agentMeta(data: Record<string, unknown> = {}) {
     maxStreamAttempts: Number(data.maxStreamAttempts || 0),
     retryReason: String(data.retryReason || ''),
     recoveryReason: String(data.recoveryReason || ''),
+    stopReason: String(data.stopReason || ''),
+    stopMessage: String(data.stopMessage || ''),
     workerFocus: String(data.workerFocus || ''),
     allowedSkills: Array.isArray(data.allowedSkills)
       ? data.allowedSkills.map((item) => String(item || '')).filter(Boolean)
@@ -1012,12 +1021,19 @@ const agentLanes = computed<AgentLane[]>(() => {
 })
 
 const workerAgentLanes = computed(() =>
-  agentLanes.value.filter((lane) => lane.role === 'worker'),
+  chat.agentMode === 'fast'
+    ? []
+    : agentLanes.value.filter((lane) => lane.role === 'worker'),
+)
+const visibleAgentLanes = computed(() =>
+  chat.agentMode === 'fast'
+    ? agentLanes.value.filter((lane) => lane.role !== 'planner' && lane.role !== 'worker')
+    : agentLanes.value,
 )
 const selectedAgentLane = computed(
   () =>
-    agentLanes.value.find((lane) => lane.key === selectedAgentLaneKey.value) ||
-    agentLanes.value[0],
+    visibleAgentLanes.value.find((lane) => lane.key === selectedAgentLaneKey.value) ||
+    visibleAgentLanes.value[0],
 )
 const selectedAgentLaneRole = computed(() => selectedAgentLane.value?.role || 'mainagent')
 const selectedAgentLaneTitle = computed(() =>
@@ -1049,7 +1065,7 @@ const workerRunningCount = computed(
   () => workerAgentLanes.value.filter((lane) => lane.status === 'running').length,
 )
 const plannerAgentLane = computed(
-  () => agentLanes.value.find((lane) => lane.role === 'planner'),
+  () => visibleAgentLanes.value.find((lane) => lane.role === 'planner'),
 )
 
 function buildMessageSteps(message: ChatMessage): AgentStep[] {
@@ -1768,7 +1784,7 @@ onUnmounted(() => {
       </header>
       <div class="agent-session-items">
         <button
-          v-for="lane in agentLanes.filter((item) => item.role !== 'worker')"
+          v-for="lane in visibleAgentLanes.filter((item) => item.role !== 'worker')"
           :key="lane.key"
           class="agent-session-row"
           :class="[
@@ -1818,7 +1834,7 @@ onUnmounted(() => {
     <div class="chat-panel">
       <nav class="agent-lane-tabs" :aria-label="t('chat.agentSessions')">
         <button
-          v-for="lane in agentLanes"
+          v-for="lane in visibleAgentLanes"
           :key="lane.key"
           type="button"
           :class="[lane.role, lane.status, { active: selectedAgentLaneKey === lane.key }]"
@@ -2380,6 +2396,32 @@ onUnmounted(() => {
                 <option v-for="role in chat.roles" :key="role.id" :value="role.id">
                   {{ role.name }}
                 </option>
+              </select>
+              <svg class="composer-selector-arrow" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="m6 9 6 6 6-6" />
+              </svg>
+            </label>
+
+            <label class="composer-selector" :title="t('chat.agentModeHint')">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M5 7h14" />
+                <path d="m8 4-3 3 3 3" />
+                <path d="M19 17H5" />
+                <path d="m16 14 3 3-3 3" />
+              </svg>
+              <span>{{ t('chat.agentMode') }}</span>
+              <select
+                :value="chat.agentMode === 'fast' ? 'fast' : 'deep'"
+                :aria-label="t('chat.agentMode')"
+                :disabled="
+                  chat.streaming ||
+                  chat.agentModeUpdating ||
+                  chat.creatingConversation
+                "
+                @change="onAgentModeChange"
+              >
+                <option value="fast">{{ t('chat.fastPath') }}</option>
+                <option value="deep">{{ t('chat.deepPath') }}</option>
               </select>
               <svg class="composer-selector-arrow" viewBox="0 0 24 24" aria-hidden="true">
                 <path d="m6 9 6 6 6-6" />

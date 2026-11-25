@@ -371,6 +371,21 @@ func subagentTerminalDetail(_ error, terminalStatus string) string {
 	}
 }
 
+func workerStoppedDetail(reason, message string) string {
+	message = strings.TrimSpace(message)
+	if message == "" {
+		switch strings.TrimSpace(reason) {
+		case "planner_stopped":
+			message = "Planner 主动停止，用于回收并发槽位或终止重复方向"
+		case "user_stopped":
+			message = "用户主动停止 Worker"
+		default:
+			message = "未记录具体原因"
+		}
+	}
+	return "Worker 已被停止；停止原因：" + message
+}
+
 type workerExecutionAttemptContextKey struct{}
 
 type workerExecutionAttemptInfo struct {
@@ -633,6 +648,10 @@ func (r *subAgentRunner) runWithOptions(
 		event := agentEvent(ctx, observability.TypeSubagentCompleted)
 		event.DurationMS = time.Since(startedAt).Milliseconds()
 		control := workerControlFromContext(ctx)
+		stopReason, stopMessage := "", ""
+		if control != nil {
+			stopReason, stopMessage = control.stopDetails()
+		}
 		terminalStatus := ""
 		switch {
 		case control != nil && control.isStopped():
@@ -649,6 +668,11 @@ func (r *subAgentRunner) runWithOptions(
 			event.EventType = observability.TypeSubagentFailed
 			event.Success = observability.Bool(false)
 			terminalDetail := subagentTerminalDetail(runErr, terminalStatus)
+			if terminalStatus == "stopped" {
+				terminalDetail = workerStoppedDetail(stopReason, stopMessage)
+				lifecycleData["stopReason"] = stopReason
+				lifecycleData["stopMessage"] = truncateProjectText(stopMessage, 2000)
+			}
 			if terminalDetail != "" {
 				event.ErrorCategory = "cancelled"
 				event.Detail = truncateEventDetail(terminalDetail)
@@ -1497,13 +1521,20 @@ func (s *Service) runCoordinatedWorkerLoop(
 			state := current.ExecutionState
 			reason := current.StateReason
 			if control.isStopped() {
+				stopReason, stopMessage := control.stopDetails()
+				if strings.TrimSpace(stopReason) == "" {
+					stopReason = "user_stopped"
+				}
+				if strings.TrimSpace(stopMessage) == "" {
+					stopMessage = "用户停止 Worker"
+				}
 				s.markCoordinatedHypothesisState(
 					ctx,
 					*current,
 					database.ProjectExecutionStopped,
 					database.ProjectOutcomeUnknown,
-					"user_stopped",
-					"用户停止 Worker",
+					stopReason,
+					stopMessage,
 					"",
 				)
 			} else if ctx.Err() != nil {

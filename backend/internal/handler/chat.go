@@ -73,6 +73,21 @@ func optionalAgentMode(c *gin.Context) (string, bool, error) {
 	return mode, true, nil
 }
 
+func (h *ChatHandler) resolveConversationAgentMode(
+	ctx context.Context,
+	conversationID string,
+	requested string,
+) (string, error) {
+	if strings.TrimSpace(requested) != "" {
+		return agentpkg.ParseAgentMode(requested)
+	}
+	saved, err := h.db.GetConversationAgentMode(ctx, conversationID)
+	if err != nil {
+		return "", err
+	}
+	return agentpkg.ParseAgentMode(saved)
+}
+
 func NewChatHandler(
 	db *database.DB,
 	agentService *agentpkg.Service,
@@ -1130,12 +1145,6 @@ func (h *ChatHandler) Stream(c *gin.Context) {
 		badRequest(c, "invalid_message", "消息不能为空且不能超过 64KB")
 		return
 	}
-	agentMode, err := agentpkg.ParseAgentMode(request.AgentMode)
-	if err != nil {
-		badRequest(c, "invalid_agent_mode", err.Error())
-		return
-	}
-
 	conversation, err := h.resolveConversation(c.Request.Context(), user.ID, request)
 	if err != nil {
 		if errors.Is(err, database.ErrProjectInactive) {
@@ -1157,6 +1166,15 @@ func (h *ChatHandler) Stream(c *gin.Context) {
 			"code":    "batch_parent_read_only",
 			"message": "批量任务父对话只用于汇总，请进入资产子对话执行",
 		})
+		return
+	}
+	agentMode, err := h.resolveConversationAgentMode(
+		c.Request.Context(),
+		conversation.ID,
+		request.AgentMode,
+	)
+	if err != nil {
+		badRequest(c, "invalid_agent_mode", err.Error())
 		return
 	}
 	taskItem, occupiedTaskID, err := h.manager.CreateIfIdle(conversation.ID, user.ID)
@@ -1211,6 +1229,14 @@ func (h *ChatHandler) Stream(c *gin.Context) {
 		} else {
 			internalError(c, "update_agent_role_failed", "设置角色失败")
 		}
+		return
+	}
+	if err := h.db.SetConversationAgentMode(
+		c.Request.Context(),
+		conversation.ID,
+		agentMode,
+	); err != nil {
+		internalError(c, "save_agent_mode_failed", "保存 Agent 模式失败")
 		return
 	}
 

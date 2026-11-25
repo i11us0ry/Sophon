@@ -49,7 +49,8 @@ func (s *Service) missionScopeForConversation(ctx context.Context, conversationI
 			scope.AssetIDs = append(scope.AssetIDs, strings.TrimSpace(conversation.AssetID))
 		}
 	}
-	if messages, messageErr := s.db.GetMessages(ctx, conversationID, 20); messageErr == nil {
+	if messages, messageErr := s.db.GetContextMessages(ctx, conversationID, 20); messageErr == nil {
+		messages = filterProactiveMessages(messages)
 		for index := len(messages) - 1; index >= 0; index-- {
 			if strings.EqualFold(strings.TrimSpace(messages[index].Role), "user") {
 				texts = append(texts, messages[index].Content)

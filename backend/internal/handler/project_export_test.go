@@ -102,7 +102,7 @@ func TestProjectExportDocxPackage(t *testing.T) {
 	}
 	disposition := recorder.Header().Get("Content-Disposition")
 	if !strings.Contains(disposition, "filename*=UTF-8''") ||
-		!strings.Contains(disposition, url.PathEscape("导出-测试-项目-实网攻防演习问题隐患报告")) {
+		!strings.Contains(disposition, url.PathEscape("导出-测试-项目-风险评估报告")) {
 		t.Fatalf("下载文件名应按项目名称生成，实际 %s", disposition)
 	}
 	body := recorder.Body.Bytes()
@@ -154,7 +154,7 @@ func TestProjectExportDocxPackage(t *testing.T) {
 	}
 	for _, want := range []string{
 		"导出&lt;测试&gt;项目",
-		"实网攻防演习问题隐患报告",
+		"风险评估报告",
 		"文档控制",
 		"摘要",
 		"关键词",
@@ -223,7 +223,7 @@ func TestProjectExportDocxPackage(t *testing.T) {
 		t.Fatalf("漏洞章节应使用标题前分页")
 	}
 	for want, part := range map[string]string{
-		"导出&lt;测试&gt;项目 实网攻防演习问题隐患报告  |  机密": "word/header1.xml",
+		"导出&lt;测试&gt;项目 风险评估报告  |  机密": "word/header1.xml",
 		"NUMPAGES":       "word/footer1.xml",
 		"updateFields":   "word/settings.xml",
 		"导出&lt;测试&gt;项目": "docProps/core.xml",
@@ -321,11 +321,11 @@ func TestDocxFindingLabelsAndOrdering(t *testing.T) {
 func TestProjectExportFileName(t *testing.T) {
 	generatedAt := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
 	got := projectExportFileName(` 代码/审计:*?"<>| 项目 `, "docx", generatedAt)
-	want := "代码-审计------- 项目-实网攻防演习问题隐患报告-20261110.docx"
+	want := "代码-审计------- 项目-风险评估报告-20261110.docx"
 	if got != want {
 		t.Fatalf("项目文件名不符: got=%q want=%q", got, want)
 	}
-	if fallback := projectExportFileName("...", "json", generatedAt); fallback != "项目安全评估报告-实网攻防演习问题隐患报告-20261110.json" {
+	if fallback := projectExportFileName("...", "json", generatedAt); fallback != "项目安全评估报告-风险评估报告-20261110.json" {
 		t.Fatalf("空项目名回退不符: %q", fallback)
 	}
 }

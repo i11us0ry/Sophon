@@ -719,7 +719,7 @@ func (s *Service) controlOrchestration(
 				hypothesisID[0],
 			)
 		}
-		if err := s.stopWorker(ctx, conversationID, target); err != nil {
+		if err := s.stopWorker(ctx, conversationID, target, message); err != nil {
 			return nil, err
 		}
 		return s.orchestrationStatus(ctx, handle), nil
@@ -835,7 +835,7 @@ func fastModeOrchestratorActionAllowed(action string) bool {
 	}
 }
 
-func (s *Service) pauseOrchestrationForSingleAgent(ctx context.Context, conversationID string) {
+func (s *Service) pauseOrchestrationForFastMode(ctx context.Context, conversationID string) {
 	if s == nil {
 		return
 	}
@@ -845,7 +845,7 @@ func (s *Service) pauseOrchestrationForSingleAgent(ctx context.Context, conversa
 			_, _ = s.controlOrchestration(
 				ctx,
 				"pause",
-				"用户明确要求单 Agent 模式，后台编排已暂停",
+				"当前为主 Agent Fast 模式，后台编排已暂停",
 			)
 		}
 		return
@@ -856,7 +856,7 @@ func (s *Service) pauseOrchestrationForSingleAgent(ctx context.Context, conversa
 	paused, err := s.db.PauseRunningAgentOrchestration(
 		ctx,
 		conversationID,
-		"用户明确要求单 Agent 模式，后台编排已暂停",
+		"当前为主 Agent Fast 模式，后台编排已暂停",
 	)
 	if err != nil || !paused {
 		return
@@ -866,7 +866,7 @@ func (s *Service) pauseOrchestrationForSingleAgent(ctx context.Context, conversa
 			ctx,
 			projectID,
 			conversationID,
-			"用户明确要求单 Agent 模式，Worker 已释放为可恢复状态",
+			"当前为主 Agent Fast 模式，Worker 已释放为可恢复状态",
 		)
 	}
 }
@@ -1091,7 +1091,7 @@ func newOrchestratorControlTool(service *Service) tool.BaseTool {
 				"操作：status | steer | steer_worker | stop_worker | worker_output | worker_trace | resume | resume_project | stop",
 				true,
 			),
-			"message":      stringParam("steer 或 steer_worker 的纠偏内容"),
+			"message":      stringParam("steer 的纠偏内容，或 stop_worker 的具体停止原因"),
 			"hypothesisId": stringParam("steer_worker 或 stop_worker 的目标假设 ID"),
 		},
 		run: func(ctx context.Context, raw string) (string, error) {

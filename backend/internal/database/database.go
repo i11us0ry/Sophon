@@ -457,6 +457,7 @@ func (db *DB) migrate(ctx context.Context) error {
 			id TEXT PRIMARY KEY,
 			conversation_id TEXT NOT NULL,
 			role TEXT NOT NULL,
+				message_kind TEXT NOT NULL DEFAULT 'chat',
 			content TEXT NOT NULL,
 			reasoning_content TEXT NOT NULL DEFAULT '',
 			created_at INTEGER NOT NULL,
@@ -584,6 +585,21 @@ func (db *DB) migrate(ctx context.Context) error {
 		 ON attachments(conversation_id, created_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_attachments_message
 		 ON attachments(message_id)`,
+		`CREATE TABLE IF NOT EXISTS vulnerability_images (
+				id TEXT PRIMARY KEY,
+				project_id TEXT NOT NULL,
+				vulnerability_id TEXT NOT NULL,
+				owner_user_id TEXT NOT NULL,
+				file_name TEXT NOT NULL DEFAULT '',
+				mime_type TEXT NOT NULL,
+				size_bytes INTEGER NOT NULL,
+				image_data BLOB NOT NULL,
+				created_at INTEGER NOT NULL,
+				FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+				FOREIGN KEY (vulnerability_id) REFERENCES vulnerabilities(id) ON DELETE CASCADE
+			)`,
+		`CREATE INDEX IF NOT EXISTS idx_vulnerability_images_owner
+			 ON vulnerability_images(vulnerability_id, owner_user_id, created_at)`,
 		`CREATE TABLE IF NOT EXISTS conversation_summaries (
 			conversation_id TEXT PRIMARY KEY,
 			summary TEXT NOT NULL DEFAULT '',
@@ -1170,6 +1186,37 @@ func (db *DB) migrate(ctx context.Context) error {
 		`ALTER TABLE process_details ADD COLUMN session_id TEXT NOT NULL DEFAULT ''`,
 	); err != nil {
 		return err
+	}
+	if err := db.ensureColumn(
+		ctx,
+		"messages",
+		"message_kind",
+		`ALTER TABLE messages ADD COLUMN message_kind TEXT NOT NULL DEFAULT 'chat'`,
+	); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(
+		ctx,
+		`UPDATE messages
+			 SET message_kind = 'proactive'
+			 WHERE message_kind = 'chat'
+			   AND role = 'assistant'
+			   AND (
+				content LIKE '后台进展%'
+				OR EXISTS (
+					SELECT 1 FROM process_details pd
+					WHERE pd.message_id = messages.id
+					  AND pd.event_type = 'main_agent.proactive'
+				)
+			   )`,
+	); err != nil {
+		return fmt.Errorf("database migration: backfill proactive messages: %w", err)
+	}
+	if _, err := db.ExecContext(
+		ctx,
+		`DELETE FROM conversation_summaries WHERE summary LIKE '%后台进展%'`,
+	); err != nil {
+		return fmt.Errorf("database migration: reset summaries with proactive messages: %w", err)
 	}
 	if err := db.ensureAgentSessionSchema(ctx); err != nil {
 		return err

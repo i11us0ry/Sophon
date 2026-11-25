@@ -2056,11 +2056,11 @@ func validateVulnerabilityReportDraft(item database.Vulnerability) error {
 func (s *Service) reportFindingTool() tool.BaseTool {
 	return &jsonTool{
 		name: "project_report_finding",
-		desc: "把漏洞按平台标准上报。代码审计可使用 verification_state=observed 和源码/调用链证据；verified/exploitable 才要求真实 HTTP PoC。标题由系统按“项目-系统地址-漏洞地址-类型-危害-编号”生成；漏洞类型必须使用规范列表；前置条件没有时直接写“否”。",
+		desc: "上报原始漏洞事实并保存草稿。平台会统一调用漏洞编写 Agent 生成标准描述、复现步骤、证据、影响和修复建议，再执行质量校验与安全审核；编写失败时回退使用本次原始字段。多步骤内容应逐条换行并使用“1. 2. 3.”，不要堆叠为“1）...2）...”或“①...②...”。代码审计可使用 verification_state=observed 和源码/调用链证据；verified/exploitable 才要求真实 HTTP PoC。标题由系统按“项目-系统地址-漏洞地址-类型-危害-编号”生成；漏洞类型必须使用规范列表；前置条件没有时直接写“否”。",
 		params: map[string]*schema.ParameterInfo{
 			"title":         stringParam("兼容短标题；最终标题由系统按固定格式生成"),
 			"severity":      stringParam("严重度：critical/high/medium/low/info，默认 medium"),
-			"description":   stringParam("漏洞概述：包含漏洞位置、类型、原理和测试链路"),
+			"description":   stringParam("漏洞概述：包含漏洞位置、类型、原理；测试链路必须另起一段并使用“1. 2. 3.”逐条编号"),
 			"target":        stringParam("受影响目标；运行时漏洞填 URL/IP/端口，静态代码审计可填源码包、组件或项目资产"),
 			"evidence":      stringParam("证据只写实际执行结果：响应差异、命令回显、注入数据、上传访问证明或敏感数据样本；不要重复复现步骤；纯本地无发包证据可写“无”"),
 			"evidence_refs": stringArrayParam("证据引用；" + evidenceReferenceFormatHint),
@@ -2073,10 +2073,10 @@ func (s *Service) reportFindingTool() tool.BaseTool {
 			"parameter":          stringParam("受影响参数名，例如 id、user、file"),
 			"http_method":        stringParam("HTTP 方法，例如 GET、POST"),
 			"preconditions":      stringParam("仅写实际依赖：账户、Token、Key、权限、时间窗或特殊环境；没有时直接写“否”"),
-			"attack_chain":       stringParam("测试链路；写入漏洞概述"),
-			"recommendation":     stringParam("可落地的修复方案"),
-			"poc":                stringParam("复现步骤：先写复现过程和请求；HTTP 漏洞附完整 Burp 数据包；纯本地执行写“数据包：无”；最后必须附可直接执行的 Python 代码块"),
-			"impact":             stringParam("分层危害分析：直接、数据、系统和其他风险"),
+			"attack_chain":       stringParam("测试链路；多个步骤必须逐条换行并使用“1. 2. 3.”，禁止堆叠连续编号"),
+			"recommendation":     stringParam("可落地的修复方案；多个动作必须逐条换行并使用“1. 2. 3.”"),
+			"poc":                stringParam("复现步骤：逐条换行并使用“1. 2. 3.”；HTTP 漏洞附完整 Burp 数据包；纯本地执行写“数据包：无”；最后必须附可直接执行的 Python 代码块"),
+			"impact":             stringParam("分层危害分析；多层内容使用“- 直接危害：”“- 数据影响：”“- 系统影响：”分条"),
 			"residual_notes":     stringParam("复测与清理备注；没有复测时写“无”"),
 			"reproduction_steps": stringParam("兼容旧调用；poc 为空时作为 Burp HTTP 数据包"),
 			"confidence":         integerParam("结论置信度 0-100，默认按严重度计算"),

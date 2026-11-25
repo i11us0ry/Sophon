@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"strings"
 	"time"
@@ -22,8 +23,9 @@ const (
 	SystemVulnerabilityReviewerID   = "system-vulnerability-reviewer"
 	SystemVulnerabilityReviewerName = "漏洞审核"
 
-	SystemVulnerabilityWriterID   = "system-vulnerability-writer"
-	SystemVulnerabilityWriterName = "漏洞编写"
+	SystemVulnerabilityWriterID         = "system-vulnerability-writer"
+	SystemVulnerabilityWriterName       = "漏洞编写"
+	vulnerabilityWriterLegacySeedSHA256 = "ed6ad46a6c9d650040f649fa358686344729a2ef2267092c51815dd40a01ceda"
 
 	SystemMissionPolicyAgentID   = "system-mission-policy"
 	SystemMissionPolicyAgentName = "安全策略"
@@ -536,11 +538,18 @@ const vulnerabilityWriterPrompt = `你是 Sophon 的独立漏洞编写 Agent。�
 3. description 说明漏洞位置、类型、成因和从入口到影响的完整链路。
 4. preconditions 只写实际依赖如需要普通账户、管理员权限、目标开启什么配置等；没有前置条件时直接写“否”。
 5. reproduction_steps 必须包含可理解的复现过程。HTTP 漏洞必须保留完整可重放请求行和 Host；纯本地代码执行写“数据包：无”。最后一个内容必须是可以直接执行的 fenced code block，优先 Python 3，其次 bash/sh/powershell/pwsh，脚本后不得再有文字。
-6. evidence 只写实际执行结果、响应差异、命令回显、读取到的数据或文件结果，不得复制复现步骤或请求包。输入明确没有发包证据时可以写“无”；存在 evidence_refs 时必须忠实概括引用证据。
+6. evidence 以最直接的方式写实际执行结果，如弱口令、默认密码等给出登录后的凭证；文件上传给出上传后访问凭证；信息泄露给出泄露的数据；未授权访问给出访问到的数据；命令执行给出执行结果；sql注入给出注入差异、回显等，具体情况根据漏洞详情决定由你判断。没有证据直接写无，不要重复复现步骤，不要重复利用步骤
 7. impact 分层说明直接危害、数据影响和系统影响，不得夸大。
 8. recommendation 给出具体、可落地的修复方案。
 9. residual_notes 没有复测和清理事项时写“无”。
 10. 输出必须是一个 JSON 对象，不要输出 Markdown 代码围栏或 JSON 之外的文字。
+11. 标题约束：标题只能按“目标（URL 或 host，仅保留必要信息）-漏洞利用点或触发点（可选）-漏洞类型（必填）-危害（可选）-漏洞编号（必填）”组织。不得在标题中加入项目名称、说明文字或无关上下文。示例：http://xx.xx.xx.xx/xx-/SRM/ScpSupRegHandler-任意文件上传-获取webshell-vuln001。
+12. 所有多步骤内容必须使用规范 Markdown 有序列表：每项单独一行，以“1. ”“2. ”“3. ”开头。禁止把“1）...2）...”“1、...2、...”“①...②...”连续写在同一段。
+13. description 如包含“测试链路”，必须另起一段并使用有序列表，每一步只描述一个链路节点。
+14. reproduction_steps 的步骤必须逐条换行；HTTP 请求、数据包和最终可执行代码块放在对应步骤之后，最后一个内容只能是唯一 fenced code block。
+15. recommendation 有多个修复动作时必须逐条列出；单一步骤可以使用一句完整说明。
+16. evidence 只写最终结果；多个独立结果使用“- ”分条。impact 分层时使用“- 直接危害：”“- 数据影响：”“- 系统影响：”分条。preconditions 没有时固定写“否”，多个条件使用“- ”分条。
+17. 输入中已有的复现截图 Markdown 图片必须原样保留，不得删除、替换或编造图片链接。图片可以位于对应复现步骤之后；脚本后可存在截图，但不得追加其他文字说明。
 
 输出格式：
 {"description":"","preconditions":"","reproduction_steps":"","evidence":"","impact":"","recommendation":"","residual_notes":""}`
@@ -657,12 +666,14 @@ func EnsureSystemAgentRoles(ctx context.Context, db *database.DB) error {
 		upgradeWriterSeed := definition.ID == SystemVulnerabilityWriterID &&
 			strings.Contains(role.Prompt, "preconditions 只写实际依赖；没有前置条件时直接写“否”。") &&
 			!strings.Contains(role.Prompt, "如需要普通账户、管理员权限、目标开启什么配置等")
+		upgradeWriterFormatSeed := definition.ID == SystemVulnerabilityWriterID &&
+			vulnerabilityWriterLegacyPromptMatches(role.Prompt)
 		role.Name = definition.Name
 		role.Builtin = true
 		if !definition.Disableable {
 			role.Enabled = true
 		}
-		if !definition.Editable || wasDeleted || upgradeEditableSeed || upgradeWriterSeed {
+		if !definition.Editable || wasDeleted || upgradeEditableSeed || upgradeWriterSeed || upgradeWriterFormatSeed {
 			role.Description = definition.Description
 			role.Icon = definition.Icon
 			role.Prompt = definition.Prompt
@@ -686,6 +697,16 @@ func EnsureSystemAgentRoles(ctx context.Context, db *database.DB) error {
 		return err
 	}
 	return nil
+}
+
+func vulnerabilityWriterLegacyPromptMatches(prompt string) bool {
+	prompt = strings.TrimSpace(prompt)
+	sum := sha256.Sum256([]byte(prompt))
+	if fmt.Sprintf("%x", sum) == vulnerabilityWriterLegacySeedSHA256 {
+		return true
+	}
+	return strings.HasPrefix(prompt, "你是 Sophon 的独立漏洞编写 Agent。你只负责把已经收集到的真实证据整理成平台标准漏洞正文，不负责测试、不负责判断漏洞是否值得保留，也不能新增任何未提供的攻击事实。") &&
+		strings.HasSuffix(prompt, "示例：http://xx.xx.xx.xx/xx-/SRM/ScpSupRegHandler-任意文件上传-获取webshell-vuln001。")
 }
 
 func findSystemAgentRole(

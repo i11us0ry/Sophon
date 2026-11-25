@@ -25,6 +25,11 @@ interface RequestOptions {
   body?: unknown
 }
 
+export interface DownloadResult {
+  blob: Blob
+  filename: string
+}
+
 export interface SSEEvent {
   type: string
   message: string
@@ -90,6 +95,32 @@ export function apiPost<T>(path: string, body?: unknown): Promise<T> {
   })
 }
 
+export async function apiUploadForm<T>(path: string, body: FormData): Promise<T> {
+  const headers: Record<string, string> = {
+    Accept: 'application/json',
+  }
+  const csrfToken = readCookie('sophon_csrf')
+  if (csrfToken) {
+    headers['X-CSRF-Token'] = csrfToken
+  }
+  const response = await fetch(`${API_BASE_URL}${path}`, {
+    method: 'POST',
+    credentials: 'include',
+    headers,
+    body,
+  })
+  if (!response.ok) {
+    let errorBody: ApiErrorBody = {}
+    try {
+      errorBody = (await response.json()) as ApiErrorBody
+    } catch {
+      errorBody = {}
+    }
+    throw new ApiError(response.status, errorBody)
+  }
+  return (await response.json()) as T
+}
+
 export function apiPut<T>(path: string, body?: unknown): Promise<T> {
   return apiRequest<T>(path, {
     method: 'PUT',
@@ -140,6 +171,59 @@ export function apiDelete<T = void>(path: string): Promise<T> {
 
 export function apiUrl(path: string): string {
   return `${API_BASE_URL}${path}`
+}
+
+export async function apiDownload(
+  path: string,
+  options: RequestOptions = {},
+): Promise<DownloadResult> {
+  const method = (options.method || 'GET').toUpperCase()
+  const headers: Record<string, string> = {}
+  if (!['GET', 'HEAD', 'OPTIONS'].includes(method)) {
+    const csrfToken = readCookie('sophon_csrf')
+    if (csrfToken) {
+      headers['X-CSRF-Token'] = csrfToken
+    }
+  }
+  let body: string | undefined
+  if (options.body !== undefined) {
+    headers['Content-Type'] = 'application/json'
+    body = JSON.stringify(options.body)
+  }
+  const response = await fetch(`${API_BASE_URL}${path}`, {
+    method,
+    credentials: 'include',
+    headers,
+    body,
+  })
+  if (!response.ok) {
+    let errorBody: ApiErrorBody = {}
+    try {
+      errorBody = (await response.json()) as ApiErrorBody
+    } catch {
+      errorBody = {}
+    }
+    throw new ApiError(response.status, errorBody)
+  }
+  return {
+    blob: await response.blob(),
+    filename: downloadFilename(response.headers.get('Content-Disposition')),
+  }
+}
+
+function downloadFilename(disposition: string | null) {
+  if (!disposition) {
+    return 'download'
+  }
+  const encoded = disposition.match(/filename\*=UTF-8''([^;]+)/i)
+  if (encoded?.[1]) {
+    try {
+      return decodeURIComponent(encoded[1])
+    } catch {
+      return encoded[1]
+    }
+  }
+  return disposition.match(/filename="([^"]+)"/i)?.[1] || 'download'
 }
 
 export async function apiUpload<T>(path: string, file: File): Promise<T> {

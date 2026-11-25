@@ -38,6 +38,7 @@ type Message struct {
 	ID               string
 	ConversationID   string
 	Role             string
+	MessageKind      string
 	Content          string
 	ReasoningContent string
 	CreatedAt        time.Time
@@ -586,6 +587,9 @@ func (db *DB) DeleteConversations(
 }
 
 func (db *DB) AddMessage(ctx context.Context, message Message) error {
+	if strings.TrimSpace(message.MessageKind) == "" {
+		message.MessageKind = "chat"
+	}
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -595,11 +599,12 @@ func (db *DB) AddMessage(ctx context.Context, message Message) error {
 	if _, err := tx.ExecContext(
 		ctx,
 		`INSERT INTO messages (
-			id, conversation_id, role, content, reasoning_content, created_at
-		) VALUES (?, ?, ?, ?, ?, ?)`,
+			id, conversation_id, role, message_kind, content, reasoning_content, created_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		message.ID,
 		message.ConversationID,
 		message.Role,
+		message.MessageKind,
 		message.Content,
 		message.ReasoningContent,
 		message.CreatedAt.Unix(),
@@ -762,9 +767,9 @@ func (db *DB) GetMessages(ctx context.Context, conversationID string, limit int)
 	}
 	rows, err := db.QueryContext(
 		ctx,
-		`SELECT id, conversation_id, role, content, reasoning_content, created_at
+		`SELECT id, conversation_id, role, message_kind, content, reasoning_content, created_at
 		 FROM (
-			SELECT id, conversation_id, role, content, reasoning_content, created_at, rowid AS ordering
+			SELECT id, conversation_id, role, message_kind, content, reasoning_content, created_at, rowid AS ordering
 			FROM messages
 			WHERE conversation_id = ?
 			ORDER BY created_at DESC, rowid DESC
@@ -787,6 +792,52 @@ func (db *DB) GetMessages(ctx context.Context, conversationID string, limit int)
 			&message.ID,
 			&message.ConversationID,
 			&message.Role,
+			&message.MessageKind,
+			&message.Content,
+			&message.ReasoningContent,
+			&createdAt,
+		); err != nil {
+			return nil, err
+		}
+		message.CreatedAt = time.Unix(createdAt, 0)
+		messages = append(messages, message)
+	}
+	return messages, rows.Err()
+}
+
+// GetContextMessages 返回参与模型上下文的聊天消息，后台播报等展示消息不计入历史预算。
+func (db *DB) GetContextMessages(ctx context.Context, conversationID string, limit int) ([]Message, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 200
+	}
+	rows, err := db.QueryContext(
+		ctx,
+		`SELECT id, conversation_id, role, message_kind, content, reasoning_content, created_at
+		 FROM (
+			SELECT id, conversation_id, role, message_kind, content, reasoning_content, created_at, rowid AS ordering
+			FROM messages
+			WHERE conversation_id = ? AND message_kind <> 'proactive'
+			ORDER BY created_at DESC, rowid DESC
+			LIMIT ?
+		 )
+		 ORDER BY created_at ASC, ordering ASC`,
+		conversationID,
+		limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	messages := make([]Message, 0)
+	for rows.Next() {
+		var message Message
+		var createdAt int64
+		if err := rows.Scan(
+			&message.ID,
+			&message.ConversationID,
+			&message.Role,
+			&message.MessageKind,
 			&message.Content,
 			&message.ReasoningContent,
 			&createdAt,
@@ -812,9 +863,9 @@ func (db *DB) GetMessagePage(
 	}
 
 	var query strings.Builder
-	query.WriteString(`SELECT id, conversation_id, role, content, reasoning_content, created_at
+	query.WriteString(`SELECT id, conversation_id, role, message_kind, content, reasoning_content, created_at
 		FROM (
-			SELECT id, conversation_id, role, content, reasoning_content, created_at, rowid AS ordering
+			SELECT id, conversation_id, role, message_kind, content, reasoning_content, created_at, rowid AS ordering
 			FROM messages
 			WHERE conversation_id = ?`)
 	args := []interface{}{conversationID}
@@ -857,6 +908,7 @@ func (db *DB) GetMessagePage(
 			&message.ID,
 			&message.ConversationID,
 			&message.Role,
+			&message.MessageKind,
 			&message.Content,
 			&message.ReasoningContent,
 			&createdAt,
@@ -910,7 +962,7 @@ func (db *DB) GetMessagePageAfter(
 
 	rows, err := db.QueryContext(
 		ctx,
-		`SELECT id, conversation_id, role, content, reasoning_content, created_at
+		`SELECT id, conversation_id, role, message_kind, content, reasoning_content, created_at
 		 FROM messages
 		 WHERE conversation_id = ?
 		   AND (created_at > ? OR (created_at = ? AND rowid > ?))
@@ -935,6 +987,7 @@ func (db *DB) GetMessagePageAfter(
 			&message.ID,
 			&message.ConversationID,
 			&message.Role,
+			&message.MessageKind,
 			&message.Content,
 			&message.ReasoningContent,
 			&messageCreatedAt,

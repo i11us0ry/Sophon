@@ -145,3 +145,47 @@ func TestConversationAgentSettingsAndStop(t *testing.T) {
 		t.Fatalf("后台任务应被取消: %+v", taskItem.Snapshot())
 	}
 }
+
+func TestResolveConversationAgentModePriority(t *testing.T) {
+	db, err := database.Open(filepath.Join(t.TempDir(), "chat-agent-mode-priority.db"))
+	if err != nil {
+		t.Fatalf("打开测试数据库失败: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ctx := context.Background()
+	now := time.Now().UTC()
+	if err := db.CreateProject(ctx, database.Project{
+		ID: "project-mode-priority", OwnerUserID: "user-1", Name: "模式优先级",
+		Status: "active", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("创建项目失败: %v", err)
+	}
+	if err := db.CreateConversation(ctx, database.Conversation{
+		ID: "conv-mode-priority", OwnerUserID: "user-1",
+		ProjectID: "project-mode-priority", Title: "模式优先级",
+		CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("创建对话失败: %v", err)
+	}
+	handler := &ChatHandler{db: db}
+
+	if mode, err := handler.resolveConversationAgentMode(ctx, "conv-mode-priority", ""); err != nil ||
+		mode != "deep" {
+		t.Fatalf("未保存模式时应默认协调模式: mode=%q err=%v", mode, err)
+	}
+	if err := db.SetConversationAgentMode(ctx, "conv-mode-priority", "fast"); err != nil {
+		t.Fatalf("保存会话模式失败: %v", err)
+	}
+	if mode, err := handler.resolveConversationAgentMode(ctx, "conv-mode-priority", ""); err != nil ||
+		mode != "fast" {
+		t.Fatalf("请求未指定模式时应使用会话保存值: mode=%q err=%v", mode, err)
+	}
+	if mode, err := handler.resolveConversationAgentMode(ctx, "conv-mode-priority", "deep"); err != nil ||
+		mode != "deep" {
+		t.Fatalf("显式请求模式应覆盖会话保存值: mode=%q err=%v", mode, err)
+	}
+	if mode, err := handler.resolveConversationAgentMode(ctx, "conv-mode-priority", "AUTO"); err != nil ||
+		mode != "deep" {
+		t.Fatalf("旧 auto 值应兼容为协调模式: mode=%q err=%v", mode, err)
+	}
+}

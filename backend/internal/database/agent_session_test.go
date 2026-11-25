@@ -161,6 +161,79 @@ func TestAgentSessionsSeparateRolesAndPageHistory(t *testing.T) {
 	}
 }
 
+func TestAgentSessionDetailsBackfillStoppedWorkerReason(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "agent-stop-reason.db"))
+	if err != nil {
+		t.Fatalf("打开数据库失败: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	ctx := t.Context()
+	now := time.Now().UTC()
+	projectID := "project-stop-reason"
+	conversationID := "conv-stop-reason"
+	hypothesisID := "hypothesis-stop-reason"
+	if err := db.CreateProject(ctx, Project{
+		ID: projectID, OwnerUserID: "user-1", Name: "停止原因测试", Status: "active",
+		CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("创建项目失败: %v", err)
+	}
+	if err := db.CreateConversation(ctx, Conversation{
+		ID: conversationID, OwnerUserID: "user-1", ProjectID: projectID,
+		Title: "停止原因", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("创建会话失败: %v", err)
+	}
+	if _, err := db.ExecContext(
+		ctx,
+		`INSERT INTO project_test_results
+			(id, project_id, dimension, status, created_at, updated_at,
+			 execution_state, outcome_state, state_reason)
+		 VALUES (?, ?, ?, 'stopped', ?, ?, 'stopped', 'unknown', 'planner_stopped')`,
+		hypothesisID,
+		projectID,
+		"测试停止原因",
+		now.Unix(),
+		now.Unix(),
+	); err != nil {
+		t.Fatalf("写入假设状态失败: %v", err)
+	}
+	if err := db.AddProcessDetails(ctx, []ProcessDetail{{
+		ID:             "worker-stopped",
+		ConversationID: conversationID,
+		MessageID:      "message-stop-reason",
+		EventType:      "subagent.failed",
+		Message:        "Worker 已停止",
+		Data: map[string]interface{}{
+			"agentKind":    AgentRoleWorker,
+			"hypothesisId": hypothesisID,
+			"status":       "stopped",
+		},
+		CreatedAt: now,
+	}}); err != nil {
+		t.Fatalf("写入停止事件失败: %v", err)
+	}
+
+	sessionID := AgentSessionID(conversationID, AgentRoleWorker, "", hypothesisID)
+	items, total, hasMore, err := db.ListAgentSessionDetailsPage(
+		ctx,
+		conversationID,
+		sessionID,
+		10,
+		0,
+	)
+	if err != nil {
+		t.Fatalf("读取停止事件失败: %v", err)
+	}
+	if total != 1 || hasMore || len(items) != 1 {
+		t.Fatalf("停止事件数量错误: total=%d hasMore=%v items=%d", total, hasMore, len(items))
+	}
+	if reason, _ := items[0].Data["stopReason"].(string); reason != "planner_stopped" {
+		t.Fatalf("停止原因未回填: %+v", items[0].Data)
+	}
+}
+
 func TestPauseProjectAgentSessionsSettlesActiveRoles(t *testing.T) {
 	db, err := Open(filepath.Join(t.TempDir(), "pause-project-sessions.db"))
 	if err != nil {

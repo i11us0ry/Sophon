@@ -321,11 +321,21 @@ version_ge() {
   [[ "$(printf '%s\n%s\n' "$required" "$current" | sort -V | head -n1)" == "$required" ]]
 }
 
+check_pdf_dependencies() {
+  if ! command -v chromium >/dev/null 2>&1 && ! command -v chromium-browser >/dev/null 2>&1; then
+    warn "未找到 Chromium，PDF 报告导出不可用"
+  fi
+  if command -v fc-list >/dev/null 2>&1 && ! fc-list :lang=zh 2>/dev/null | grep -q .; then
+    warn "未检测到中文字体，PDF 报告中的中文可能显示异常"
+  fi
+}
+
 ensure_apt() {
   local package
 
   ((SKIP_SYSTEM_DEPS == 0)) || {
     warn "已跳过系统依赖安装"
+    check_pdf_dependencies
     return
   }
   configure_os_mirrors
@@ -338,7 +348,8 @@ ensure_apt() {
         libsqlite3-dev sqlite3 libpcap-dev nginx python3 python3-venv python3-pip \
         python3-dev ruby ruby-dev ruby-addressable autoconf automake libtool bison flex \
         libssl-dev libssh-dev libidn11-dev libpcre2-dev libgtk-3-dev \
-        zlib1g-dev libbz2-dev libgmp-dev libgomp1 default-jdk-headless libcap2-bin openssl
+        zlib1g-dev libbz2-dev libgmp-dev libgomp1 default-jdk-headless libcap2-bin openssl \
+        chromium fonts-noto-cjk fonts-droid-fallback
       for package in nmap masscan nbtscan; do
         if apt-cache show "$package" >/dev/null 2>&1; then
           run_apt apt-get install -y "$package" || \
@@ -374,8 +385,17 @@ ensure_apt() {
           warn "当前 yum/dnf 源不提供 $package，稍后由工具校验提示"
         fi
       done
+      for package in chromium google-noto-sans-cjk-fonts; do
+        if run_root "$PKG_MANAGER" info "$package" >/dev/null 2>&1; then
+          run_pkg "$PKG_MANAGER" install -y "$package" || \
+            warn "PDF 依赖 $package 安装失败"
+        else
+          warn "当前软件源不提供 $package，PDF 报告导出可能不可用"
+        fi
+      done
       ;;
   esac
+  check_pdf_dependencies
 }
 
 go_download_candidates() {

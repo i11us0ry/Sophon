@@ -51,8 +51,8 @@ func TestMissionObjectiveCompletionOnlySuppressesAutomaticFollowUps(t *testing.T
 	if !missionSuppressesAutomaticFollowUps(ctx) {
 		t.Fatal("目标完成后必须停止自动派生后续漏洞意图")
 	}
-	if allowed, reason := service.missionToolDecision(ctx, "pent_agent_execute", map[string]interface{}{
-		"task": "继续测试其他入口",
+	if allowed, reason := service.missionToolDecision(ctx, "exec", map[string]interface{}{
+		"command": "printf objective-complete",
 	}); !allowed {
 		t.Fatalf("目标完成状态不应剥夺主 Agent 的执行选择: %s", reason)
 	}
@@ -110,16 +110,19 @@ func TestMissionObjectiveCompletionRequiresExploitEvidence(t *testing.T) {
 	}
 }
 
-func TestMissionObjectiveCompletedSubagentDecisionDoesNotOverrideParent(t *testing.T) {
+func TestMissionObjectiveCompletionDoesNotExposeSubagentEntryTools(t *testing.T) {
 	service := &Service{}
-	ctx := context.Background()
-	ctx = withMissionObjectiveState(ctx)
-	ctx = withMissionExecution(ctx, missionExecution{
-		Plan:  missionPlan{Mode: missionModePentest},
-		Phase: missionPhasePentest,
-	})
-	markMissionObjectiveComplete(ctx, "finding-1", "已完成")
-	if allowed, reason := service.missionToolDecision(ctx, "pent_agent_execute_hypothesis", nil); !allowed {
-		t.Fatalf("目标完成状态不应强制拒绝子 Agent 工具: %s", reason)
+	for _, mode := range []string{agentModeFast, agentModeDeep} {
+		ctx := context.Background()
+		ctx = withMissionObjectiveState(ctx)
+		ctx = withMissionExecution(ctx, missionExecution{
+			Plan:      missionPlan{Mode: missionModePentest},
+			Phase:     missionPhasePentest,
+			AgentMode: mode,
+		})
+		markMissionObjectiveComplete(ctx, "finding-1", "已完成")
+		if allowed, reason := service.missionToolDecision(ctx, "pent_agent_execute_hypothesis", nil); allowed {
+			t.Fatalf("%s 模式不应向主 Agent 暴露子 Agent 入口: %s", mode, reason)
+		}
 	}
 }

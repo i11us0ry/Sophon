@@ -11,6 +11,7 @@ import LoginView from '../views/LoginView.vue'
 import McpView from '../views/McpView.vue'
 import ProjectDetailView from '../views/ProjectDetailView.vue'
 import ProjectListView from '../views/ProjectListView.vue'
+import ProjectReportView from '../views/ProjectReportView.vue'
 import RbacView from '../views/RbacView.vue'
 import RoleView from '../views/RoleView.vue'
 import SettingsView from '../views/SettingsView.vue'
@@ -57,6 +58,12 @@ const router = createRouter({
       path: '/projects/:id',
       name: 'project-detail',
       component: ProjectDetailView,
+      meta: { requiresAuth: true, permission: 'project:read' },
+    },
+    {
+      path: '/projects/:id/report',
+      name: 'project-report',
+      component: ProjectReportView,
       meta: { requiresAuth: true, permission: 'project:read' },
     },
     {

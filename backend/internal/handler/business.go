@@ -819,41 +819,21 @@ func (h *BusinessHandler) UpdateAsset(c *gin.Context) {
 }
 
 func (h *BusinessHandler) generatedVulnerabilityTitle(
-	ctx context.Context,
-	userID string,
-	projectID string,
-	assetID string,
 	target string,
 	vulnerabilityType string,
-	impact string,
-	_ string,
+	titleImpact string,
 	id string,
 ) string {
-	projectName := "未关联系统"
-	projectHints := []string{target, impact}
-	if projectID = strings.TrimSpace(projectID); projectID != "" {
-		if project, err := h.db.GetProject(ctx, projectID, userID); err == nil {
-			if name := strings.TrimSpace(project.Name); name != "" {
-				projectName = name
-			}
-			projectHints = append(projectHints, project.Description, project.Goals, project.Scope)
-		}
+	impact := strings.TrimSpace(titleImpact)
+	if impact == "" {
+		impact = vulnerabilityfmt.ShortImpact(vulnerabilityType)
 	}
-	assetValue := ""
-	assetName := ""
-	if assetID = strings.TrimSpace(assetID); assetID != "" {
-		if asset, err := h.db.GetAsset(ctx, assetID, userID); err == nil {
-			assetValue = asset.Value
-			assetName = asset.Name
-		}
-	}
-	projectHints = append(projectHints, assetName, assetValue)
 	return vulnerabilityfmt.BuildTitle(vulnerabilityfmt.TitleParts{
-		ProjectName:          vulnerabilityfmt.InferProductName(projectName, projectHints...),
-		VulnerabilityAddress: vulnerabilityfmt.VulnerabilityAddress(target, "", impact),
-		VulnerabilityType:    vulnerabilityType,
-		ImpactSummary:        vulnerabilityfmt.ShortImpact(vulnerabilityType),
-		ID:                   id,
+		Target:            target,
+		ExploitPoint:      vulnerabilityfmt.VulnerabilityAddress(target, "", impact),
+		VulnerabilityType: vulnerabilityType,
+		ImpactSummary:     impact,
+		ID:                id,
 	})
 }
 
@@ -957,13 +937,8 @@ func (h *BusinessHandler) CreateVulnerability(c *gin.Context) {
 		AssetID:     strings.TrimSpace(request.AssetID),
 		OwnerUserID: user.ID,
 		Title: truncateRunes(h.generatedVulnerabilityTitle(
-			c.Request.Context(),
-			user.ID,
-			request.ProjectID,
-			request.AssetID,
 			request.Target,
 			vulnerabilityType,
-			request.Impact,
 			request.TitleImpact,
 			id,
 		), 240),
@@ -1230,13 +1205,8 @@ func (h *BusinessHandler) UpdateVulnerability(c *gin.Context) {
 		item.ProjectID = strings.TrimSpace(request.ProjectID)
 		item.AssetID = strings.TrimSpace(request.AssetID)
 		item.Title = truncateRunes(h.generatedVulnerabilityTitle(
-			c.Request.Context(),
-			user.ID,
-			request.ProjectID,
-			request.AssetID,
 			request.Target,
 			vulnerabilityType,
-			request.Impact,
 			request.TitleImpact,
 			existing.ID,
 		), 240)
@@ -1286,21 +1256,18 @@ func (h *BusinessHandler) UpdateVulnerability(c *gin.Context) {
 			return
 		}
 	}
-	if agentpkg.VulnerabilityNeedsReview(*existing, item) {
-		if h.vulnerabilityReviewer == nil {
-			respondVulnerabilityReviewFailure(c, &agentpkg.VulnerabilityReviewUnavailableError{
-				Reason: "审核器未配置",
-			})
-			return
-		}
-		if err := h.vulnerabilityReviewer.ReviewVulnerability(c.Request.Context(), item); err != nil {
-			respondVulnerabilityReviewFailure(c, err)
-			return
-		}
-	}
 	if err := h.db.UpdateVulnerability(c.Request.Context(), item); err != nil {
 		respondMutationError(c, err, "vulnerability_not_found", "漏洞不存在", "update_vulnerability_failed", "更新漏洞失败")
 		return
+	}
+	if _, err := h.db.DeleteUnreferencedVulnerabilityImages(
+		c.Request.Context(),
+		item.ID,
+		user.ID,
+		vulnerabilityImageIDs(item.ID, item.ReproductionSteps),
+		time.Time{},
+	); err != nil {
+		log.Printf("清理未引用复现截图失败: vulnerability=%s err=%v", item.ID, err)
 	}
 	c.Status(http.StatusNoContent)
 }

@@ -1920,10 +1920,11 @@ func mainAgentExecutionContext(plan missionPlan) string {
 	var builder strings.Builder
 	builder.WriteString("\n\n【执行上下文】\n")
 	if plan.Coordinated {
-		builder.WriteString("当前运行方式：主 Agent + Planner/Worker 协同模式。平台已启动后台编排，本轮不直接执行工具。\n")
+		builder.WriteString(mainAgentCoordinatedModeInstruction)
 	} else {
-		builder.WriteString("当前运行方式：主 Agent 独立执行模式。平台已关闭 Planner、Worker 和 pent_agent_* 入口。\n")
+		builder.WriteString(mainAgentFastModeInstruction)
 	}
+	builder.WriteString("\n")
 	if objective := strings.TrimSpace(plan.Objective); objective != "" {
 		builder.WriteString("当前任务目标：")
 		builder.WriteString(objective)
@@ -2316,7 +2317,7 @@ func (s *Service) activeToolsForMission(
 	_ string,
 ) []tool.BaseTool {
 	items := s.activeToolsForMode(ctx, mode)
-	if !plan.Coordinated || normalizeAgentMode(mode) == agentModeFast {
+	if normalizeAgentMode(mode) == agentModeFast {
 		return items
 	}
 	filtered := make([]tool.BaseTool, 0, len(items))
@@ -2355,14 +2356,21 @@ func (s *Service) missionToolDecision(
 		return true, ""
 	}
 	plainName := s.plainToolName(toolName)
-	if normalizeAgentMode(execctx.RunMode(ctx)) == agentModeFast {
+	runMode := normalizeAgentMode(execctx.RunMode(ctx))
+	if strings.TrimSpace(execctx.RunMode(ctx)) == "" {
+		runMode = normalizeAgentMode(execution.AgentMode)
+	}
+	_, isSubagent := execctx.Subagent(ctx)
+	if !isSubagent && runMode == agentModeFast {
 		if isSubAgentEntryToolName(plainName) {
-			return false, "当前为单 Agent 模式，禁止调用 Planner/Worker"
+			return false, "当前为主 Agent Fast 模式，禁止调用 Planner/Worker"
 		}
 		if plainName == orchestratorControlToolName &&
 			!fastModeOrchestratorActionAllowed(modeStringArg(args, "action")) {
-			return false, "单 Agent 模式只允许查看或停止历史 Worker，不能启动、恢复或纠偏编排"
+			return false, "主 Agent Fast 模式只允许查看或停止历史 Worker，不能启动、恢复或纠偏编排"
 		}
+	} else if !isSubagent && runMode == agentModeDeep && !coordinatedMainToolAllowed(plainName) {
+		return false, "当前为主 Agent 协调模式，禁止直接执行工具；请交给 Planner/Worker"
 	}
 	if s.isLocalExecutionTool(plainName) {
 		if blocked, reason := s.localExecutionBlockedByZhizi(ctx); blocked {

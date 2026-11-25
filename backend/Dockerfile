@@ -10,6 +10,11 @@ RUN CGO_ENABLED=1 go build -o /out/sophon-server ./cmd/server \
 
 FROM debian:bookworm-slim
 
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+       chromium fonts-droid-fallback \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN useradd --system --uid 10001 --create-home sophon
 WORKDIR /app
 COPY --from=builder /out/sophon-server /usr/local/bin/sophon-server

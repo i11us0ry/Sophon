@@ -19,6 +19,9 @@ type workerControl struct {
 	mu      sync.Mutex
 	steer   []string
 	stopped bool
+
+	stopReason  string
+	stopMessage string
 }
 
 var errWorkerStopped = fmt.Errorf("Worker 已被停止")
@@ -47,12 +50,26 @@ func (c *workerControl) takeSteer() []string {
 	return items
 }
 
-func (c *workerControl) stop() {
+func (c *workerControl) stop(details ...string) {
 	if c == nil {
 		return
 	}
 	c.mu.Lock()
+	if c.stopped {
+		c.mu.Unlock()
+		return
+	}
+	reason := "user_stopped"
+	message := "用户停止 Worker"
+	if len(details) > 0 && strings.TrimSpace(details[0]) != "" {
+		reason = strings.TrimSpace(details[0])
+	}
+	if len(details) > 1 && strings.TrimSpace(details[1]) != "" {
+		message = strings.TrimSpace(details[1])
+	}
 	c.stopped = true
+	c.stopReason = reason
+	c.stopMessage = message
 	cancel := c.cancel
 	cancelCause := c.cancelCause
 	c.mu.Unlock()
@@ -72,6 +89,15 @@ func (c *workerControl) isStopped() bool {
 	return c.stopped
 }
 
+func (c *workerControl) stopDetails() (string, string) {
+	if c == nil {
+		return "", ""
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.stopReason, c.stopMessage
+}
+
 func (c *workerControl) snapshot() map[string]interface{} {
 	if c == nil {
 		return nil
@@ -81,6 +107,8 @@ func (c *workerControl) snapshot() map[string]interface{} {
 	return map[string]interface{}{
 		"stopped":      c.stopped,
 		"pendingSteer": len(c.steer),
+		"stopReason":   c.stopReason,
+		"stopMessage":  c.stopMessage,
 	}
 }
 
@@ -104,12 +132,19 @@ func workerControlKey(conversationID, hypothesisID string) string {
 	return strings.TrimSpace(conversationID) + "\x00" + strings.TrimSpace(hypothesisID)
 }
 
-func workerStopMetadata(ctx context.Context) (reason string, message string) {
+func workerStopMetadata(ctx context.Context, details ...string) (reason string, message string) {
 	if info, ok := execctx.Subagent(ctx); ok &&
 		strings.EqualFold(strings.TrimSpace(info.Kind), "planner") {
-		return "planner_stopped", "Planner 停止 Worker 以回收并发槽位或终止重复方向"
+		reason = "planner_stopped"
+		message = "Planner 停止 Worker 以回收并发槽位或终止重复方向"
+	} else {
+		reason = "user_stopped"
+		message = "用户停止 Worker"
 	}
-	return "user_stopped", "用户停止 Worker"
+	if len(details) > 0 && strings.TrimSpace(details[0]) != "" {
+		message = strings.TrimSpace(details[0])
+	}
+	return reason, message
 }
 
 func (s *Service) resolveWorkerReference(
@@ -207,6 +242,7 @@ func (s *Service) stopWorker(
 	ctx context.Context,
 	conversationID string,
 	hypothesisID string,
+	details ...string,
 ) error {
 	hypothesisID = strings.TrimSpace(hypothesisID)
 	if hypothesisID == "" {
@@ -217,7 +253,7 @@ func (s *Service) stopWorker(
 		return fmt.Errorf("Worker %s 当前未运行", hypothesisID)
 	}
 	projectID := strings.TrimSpace(execctx.ProjectID(ctx))
-	stopReason, stopMessage := workerStopMetadata(ctx)
+	stopReason, stopMessage := workerStopMetadata(ctx, details...)
 	if s != nil && s.db != nil && projectID != "" {
 		if hypothesis, err := s.db.GetProjectTestResultByID(ctx, projectID, hypothesisID); err == nil &&
 			hypothesis != nil {
@@ -232,7 +268,7 @@ func (s *Service) stopWorker(
 			)
 		}
 	}
-	control.stop()
+	control.stop(stopReason, stopMessage)
 	return nil
 }
 

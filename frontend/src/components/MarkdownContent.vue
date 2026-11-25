@@ -5,10 +5,14 @@ import { markdownRenderer } from '../utils/markdown'
 
 const props = defineProps<{
   content: string
+  imagePolicy?: 'any' | 'reproduction'
 }>()
 
-const rendered = computed(() =>
-  DOMPurify.sanitize(markdownRenderer.render(props.content || ''), {
+const reproductionImagePattern =
+  /^\/api\/vulnerabilities\/[A-Za-z0-9_-]+\/reproduction-images\/[A-Za-z0-9_-]+$/
+
+function sanitizeMarkdown(content: string) {
+  const sanitized = DOMPurify.sanitize(markdownRenderer.render(content), {
     USE_PROFILES: { html: true },
     FORBID_TAGS: [
       'style',
@@ -25,8 +29,28 @@ const rendered = computed(() =>
       'math',
     ],
     FORBID_ATTR: ['style'],
-  }),
-)
+  })
+  if (props.imagePolicy !== 'reproduction' || typeof document === 'undefined') {
+    return sanitized
+  }
+  const template = document.createElement('template')
+  template.innerHTML = sanitized
+  template.content.querySelectorAll('img').forEach((image) => {
+    const src = image.getAttribute('src') || ''
+    if (
+      reproductionImagePattern.test(src) ||
+      /^data:image\/(?:png|jpeg|webp);base64,/i.test(src)
+    ) {
+      return
+    }
+    const replacement = document.createElement('span')
+    replacement.textContent = '[图片不可用]'
+    image.replaceWith(replacement)
+  })
+  return template.innerHTML
+}
+
+const rendered = computed(() => sanitizeMarkdown(props.content || ''))
 </script>
 
 <template>
@@ -161,6 +185,16 @@ const rendered = computed(() =>
   color: var(--accent);
   text-decoration: underline;
   text-underline-offset: 2px;
+}
+
+.markdown-body :deep(img) {
+  display: block;
+  max-width: 100%;
+  max-height: 560px;
+  margin: 10px auto;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  object-fit: contain;
 }
 
 .markdown-body :deep(hr) {

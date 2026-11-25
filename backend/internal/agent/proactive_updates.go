@@ -253,7 +253,14 @@ func (s *Service) processBackgroundUpdateConversation(
 
 	ctx, cancel := context.WithTimeout(parent, proactiveUpdateTimeout)
 	defer cancel()
-	content, notifyErr := s.generateProactiveUpdate(ctx, project.Name, conversation.Title, promptEvents)
+	content, notifyErr := s.generateProactiveUpdate(
+		ctx,
+		conversationID,
+		ownerUserID,
+		project.Name,
+		conversation.Title,
+		promptEvents,
+	)
 	if notifyErr != nil {
 		log.Printf("background updates: generate conversation=%s: %v", conversationID, notifyErr)
 		content = proactiveFallbackSummary(promptEvents)
@@ -280,6 +287,7 @@ func (s *Service) processBackgroundUpdateConversation(
 		ID:             randomID(),
 		ConversationID: conversationID,
 		Role:           "assistant",
+		MessageKind:    "proactive",
 		Content:        content,
 		CreatedAt:      time.Now().UTC(),
 	}
@@ -353,6 +361,8 @@ func (s *Service) suppressBackgroundUpdate(ctx context.Context, id string) {
 
 func (s *Service) generateProactiveUpdate(
 	ctx context.Context,
+	conversationID string,
+	userID string,
 	projectName string,
 	conversationTitle string,
 	events []proactivePromptEvent,
@@ -387,15 +397,27 @@ func (s *Service) generateProactiveUpdate(
 	if withoutTools, toolErr := chatModel.WithTools(nil); toolErr == nil && withoutTools != nil {
 		chatModel = withoutTools
 	}
-	response, err := chatModel.Generate(ctx, []*schema.Message{
+	messages := []*schema.Message{
 		schema.SystemMessage(instruction),
 		schema.UserMessage(user),
-	})
+	}
+	response, err := chatModel.Generate(ctx, messages)
 	if err != nil {
 		return "", err
 	}
 	if response == nil {
 		return "", fmt.Errorf("后台播报模型返回空响应")
+	}
+	if s.db != nil {
+		newUsageTracker(
+			s.db,
+			conversationID,
+			userID,
+			"",
+			messages,
+			"proactive",
+			s.configSnapshot().LLMModel,
+		).record(ctx, response)
 	}
 	return strings.TrimSpace(response.Content), nil
 }

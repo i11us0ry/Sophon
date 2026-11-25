@@ -75,37 +75,46 @@ func TestTolerantToolReturnsErrorAsResult(t *testing.T) {
 	}
 }
 
-func TestMainAgentPromptDefinesTwoExecutionModes(t *testing.T) {
+func TestMainAgentPromptKeepsOneIdentityAndTwoModeBoundaries(t *testing.T) {
 	if len([]rune(mainAgentPrompt)) > 3200 {
 		t.Fatalf("主 Agent 系统提示仍然过长: %d", len([]rune(mainAgentPrompt)))
 	}
 	for _, expected := range []string{
-		"工具与能力",
-		"主 Agent 独立执行模式",
-		"主 Agent + Planner/Worker 协同模式",
-		"用户明确要求不需要 Planner/Worker",
-		"编写 WebShell",
-		"隧道代理",
-		"漏洞成果总结",
-		"mcp_search_tools",
-		"mcp_use_tool",
-		"project_next_targets",
-		"pent_agent_*",
+		"你只有一个主 Agent 身份",
+		"具体执行模式由服务端本轮注入",
+		"通用职责",
+		"工具 Schema 是能力的最终边界",
 		"read_skill",
-		"project_add_hint",
-		"project_add_intent",
-		"steer_worker",
-		"project_add_goal",
-		`memory_kind="constraint"`,
-		"工具失败时先判断错误类型和可修复性",
-		"不得用等价方式绕过授权、拦截或人工审批",
+		"project_list",
+		"结论必须基于真实工具结果",
+		"策略拒绝、权限拒绝或人工审批拒绝必须停止",
 	} {
 		if !strings.Contains(mainAgentPrompt, expected) {
 			t.Fatalf("系统提示缺少基础设施边界 %q", expected)
 		}
 	}
-	if strings.Contains(mainAgentPrompt, "Deep 模式") {
-		t.Fatalf("主 Agent Prompt 不应定义第三种工作模式")
+	for _, expected := range []string{
+		"当前运行方式：主 Agent Fast",
+		"禁止调用 Planner、Worker",
+		"不得因为任务复杂而自行切换协调模式",
+	} {
+		if !strings.Contains(mainAgentFastModeInstruction, expected) {
+			t.Fatalf("Fast 模式指令缺少边界 %q", expected)
+		}
+	}
+	for _, expected := range []string{
+		"当前运行方式：主 Agent 协调",
+		"人类操作员与 Planner/Worker 之间的接口",
+		"不得直接运行 exec、Python、扫描器、反编译、MCP 或智子执行工具",
+		"不得自行降级为直接执行",
+	} {
+		if !strings.Contains(mainAgentCoordinatedModeInstruction, expected) {
+			t.Fatalf("协调模式指令缺少边界 %q", expected)
+		}
+	}
+	if strings.Contains(mainAgentPrompt, "Deep 模式") ||
+		strings.Contains(mainAgentPrompt, "auto 模式") {
+		t.Fatalf("主 Agent Prompt 不应暴露第三种工作模式")
 	}
 }
 

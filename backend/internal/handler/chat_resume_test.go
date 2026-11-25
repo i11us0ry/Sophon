@@ -74,7 +74,7 @@ func TestOptionalAgentModeValidation(t *testing.T) {
 		wantErr  bool
 	}{
 		{name: "absent", wantMode: "", provided: false},
-		{name: "auto", body: `{"agentMode":"AUTO"}`, wantMode: "auto", provided: true},
+		{name: "auto", body: `{"agentMode":"AUTO"}`, wantMode: "deep", provided: true},
 		{name: "fast", body: `{"agentMode":"FAST"}`, wantMode: "fast", provided: true},
 		{name: "deep", body: `{"agentMode":"deep"}`, wantMode: "deep", provided: true},
 		{name: "invalid enum", body: `{"agentMode":"turbo"}`, provided: true, wantErr: true},
