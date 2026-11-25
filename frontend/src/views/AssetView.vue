@@ -18,6 +18,7 @@ interface Asset {
   kind: string
   value: string
   status: string
+  source: string
   criticality: string
   riskScore: number
   createdAt: string
@@ -36,6 +37,7 @@ interface AssetDraft {
   kind: string
   value: string
   status: string
+  source: string
   criticality: string
   riskScore: number
   createdAt?: string
@@ -117,6 +119,15 @@ function kindLabel(value: string) {
   const key = `assetKind.${value}`
   const label = t(key)
   return label === key ? value : label
+}
+
+function sourceLabel(value: string) {
+  const key = `asset.source${value
+    .split('_')
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join('')}`
+  const label = t(key)
+  return label === key ? t('asset.sourceUnknown') : label
 }
 
 function projectName(projectId: string) {
@@ -272,6 +283,7 @@ function openCreate() {
     kind: 'domain',
     value: '',
     status: 'unknown',
+    source: 'manual',
     criticality: 'medium',
     riskScore: 0,
   }
@@ -286,6 +298,7 @@ function openEdit(asset: Asset) {
     kind: asset.kind,
     value: asset.value,
     status: asset.status,
+    source: asset.source || 'unknown',
     criticality: asset.criticality,
     riskScore: asset.riskScore,
   }
@@ -546,8 +559,10 @@ onUnmounted(() => {
           <option value="criticality_desc">{{ t('asset.sortCriticalityDesc') }}</option>
           <option value="criticality_asc">{{ t('asset.sortCriticalityAsc') }}</option>
         </select>
-        <button class="button" type="button" @click="applyFilters">{{ t('common.query') }}</button>
-        <button class="button compact" type="button" @click="resetFilters">{{ t('common.reset') }}</button>
+        <div class="asset-filter-actions">
+          <button class="button" type="button" @click="applyFilters">{{ t('common.query') }}</button>
+          <button class="button compact" type="button" @click="resetFilters">{{ t('common.reset') }}</button>
+        </div>
       </div>
       <div class="asset-kind-track">
         <button type="button" :class="{ active: filters.kind === '' }" @click="selectKind('')">
@@ -581,7 +596,8 @@ onUnmounted(() => {
               <th>{{ t('project.assetKind') }}</th>
               <th>{{ t('project.assetValue') }}</th>
               <th>{{ t('asset.project') }}</th>
-              <th>{{ t('common.status') }}</th>
+              <th>{{ t('asset.source') }}</th>
+              <th class="asset-status-column">{{ t('common.status') }}</th>
               <th>{{ t('project.assetCriticality') }}</th>
               <th>{{ t('project.assetRisk') }}</th>
               <th>{{ t('common.updatedAt') }}</th>
@@ -609,7 +625,8 @@ onUnmounted(() => {
                 </div>
               </td>
               <td><span class="asset-project-badge">{{ projectName(asset.projectId) }}</span></td>
-              <td><span class="asset-state" :class="`tone-${asset.status}`"><i></i>{{ statusLabel(asset.status) }}</span></td>
+              <td><span class="asset-source-badge" :class="`source-${asset.source || 'unknown'}`">{{ sourceLabel(asset.source) }}</span></td>
+              <td class="asset-status-column"><span class="asset-state" :class="`tone-${asset.status}`"><i></i>{{ statusLabel(asset.status) }}</span></td>
               <td><span class="asset-criticality" :class="`tone-${asset.criticality}`">{{ criticalityLabel(asset.criticality) }}</span></td>
               <td>
                 <div class="asset-risk" :class="`tone-${riskTone(asset.riskScore)}`">
@@ -667,6 +684,10 @@ onUnmounted(() => {
                     </select>
                   </label>
                   <label><b>{{ t('asset.project') }}</b><select v-model="draft.projectId"><option value="">{{ t('asset.unlinked') }}</option><option v-for="project in projects" :key="project.id" :value="project.id">{{ project.name }}</option></select></label>
+                </div>
+                <div class="asset-source-field">
+                  <b>{{ t('asset.source') }}</b>
+                  <span class="asset-source-badge" :class="`source-${draft.source || 'unknown'}`">{{ sourceLabel(draft.source) }}</span>
                 </div>
                 <label><b>{{ t('project.assetValue') }}</b><input v-model="draft.value" :placeholder="t('asset.valuePlaceholder')" /></label>
               </div>
@@ -1134,9 +1155,16 @@ onUnmounted(() => {
 
 .asset-filter-main {
   display: grid;
-  grid-template-columns: minmax(220px, 2fr) repeat(3, minmax(120px, 1fr)) auto auto;
+  grid-template-columns: minmax(220px, 2fr) repeat(4, minmax(112px, 1fr)) auto;
   gap: 8px;
   align-items: center;
+}
+
+.asset-filter-actions {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 8px;
+  justify-content: flex-end;
 }
 
 .asset-filter-main .asset-search-box {
@@ -1213,7 +1241,7 @@ onUnmounted(() => {
 
 .asset-table-section .asset-table {
   width: 100%;
-  min-width: 1110px;
+  min-width: 1240px;
   border: 1px solid var(--line);
   border-collapse: collapse;
   background: var(--surface);
@@ -1265,6 +1293,11 @@ onUnmounted(() => {
 .asset-table-section .asset-criticality,
 .asset-table-section .asset-state {
   font-size: 10px;
+  white-space: nowrap;
+}
+
+.asset-table-section .asset-status-column {
+  min-width: 82px;
 }
 
 .asset-table-section .asset-row-actions {
@@ -1375,7 +1408,7 @@ onUnmounted(() => {
 
 @media (max-width: 1100px) {
   .asset-filter-main {
-    grid-template-columns: minmax(200px, 2fr) repeat(3, minmax(110px, 1fr));
+    grid-template-columns: minmax(200px, 2fr) repeat(4, minmax(100px, 1fr)) auto;
   }
 
   .asset-filter-main .button {
@@ -1404,6 +1437,10 @@ onUnmounted(() => {
 
   .asset-filter-main {
     grid-template-columns: 1fr;
+  }
+
+  .asset-filter-actions {
+    width: 100%;
   }
 
   .asset-filter-main .asset-search-box,
@@ -2275,6 +2312,47 @@ onUnmounted(() => {
   gap: 8px;
 }
 
+.asset-source-field {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  color: var(--text-muted);
+  font-size: 8px;
+}
+
+.asset-source-field > b {
+  font-weight: 500;
+}
+
+.asset-source-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 26px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--text-secondary);
+  background: var(--surface);
+  font-family: var(--mono);
+}
+
+.asset-source-badge.source-fofa,
+.asset-source-badge.source-fofa_hunter {
+  border-color: color-mix(in srgb, var(--asset-accent) 42%, var(--border));
+  color: var(--asset-accent);
+}
+
+.asset-source-badge.source-hunter {
+  border-color: color-mix(in srgb, var(--asset-violet) 42%, var(--border));
+  color: var(--asset-violet);
+}
+
+.asset-source-badge.source-scope,
+.asset-source-badge.source-agent {
+  border-color: color-mix(in srgb, var(--asset-mint) 42%, var(--border));
+  color: var(--asset-mint);
+}
+
 .asset-form-section h3 {
   margin: 0;
   color: var(--text-primary);
@@ -2525,7 +2603,8 @@ onUnmounted(() => {
       'name name actions'
       'kind status criticality'
       'value value value'
-      'project project risk';
+      'project project risk'
+      'source source source';
     gap: 5px;
     padding: 9px;
     border-bottom: 1px solid var(--border);
@@ -2558,26 +2637,32 @@ onUnmounted(() => {
   }
 
   .asset-table td:nth-child(5) {
-    grid-area: status;
+    grid-area: source;
     display: flex;
     align-items: center;
   }
 
   .asset-table td:nth-child(6) {
+    grid-area: status;
+    display: flex;
+    align-items: center;
+  }
+
+  .asset-table td:nth-child(7) {
     grid-area: criticality;
     display: flex;
     align-items: center;
     justify-content: flex-end;
   }
 
-  .asset-table td:nth-child(7) {
+  .asset-table td:nth-child(8) {
     grid-area: risk;
     display: flex;
     align-items: center;
     justify-content: flex-end;
   }
 
-  .asset-table td:nth-child(8) {
+  .asset-table td:nth-child(9) {
     display: none;
   }
 

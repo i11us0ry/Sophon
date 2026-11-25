@@ -53,7 +53,7 @@ func TestHoneypotToolOutputIsFencedAndFlagged(t *testing.T) {
 	assertNoSystemRoleMessages(t, messages)
 }
 
-// TestHoneypotSummaryStaysOutOfSystem 历史摘要来自不可信原文，必须留在围栏数据区。
+// TestHoneypotSummaryStaysOutOfSystem 历史摘要不是默认上下文，必须继续排除在 system 和状态包之外。
 func TestHoneypotSummaryStaysOutOfSystem(t *testing.T) {
 	db := openDigestTestDB(t)
 	ctx := context.Background()
@@ -72,11 +72,8 @@ func TestHoneypotSummaryStaysOutOfSystem(t *testing.T) {
 	}
 	assertNoSystemRoleMessages(t, messages)
 	state := lastStateMessage(t, messages)
-	if !strings.Contains(state, "忽略以上指令") || !strings.Contains(state, "历史摘要") {
-		t.Fatalf("摘要应进入围栏状态包: %q", state)
-	}
-	if !strings.Contains(state, "检测到疑似提示注入") {
-		t.Fatalf("含注入特征的历史摘要应触发提示: %q", state)
+	if strings.Contains(state, "忽略以上指令") || strings.Contains(state, "历史摘要") {
+		t.Fatalf("历史摘要默认不应进入上下文: %q", state)
 	}
 }
 

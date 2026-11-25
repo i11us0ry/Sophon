@@ -234,6 +234,112 @@ func TestPrepareCoordinatedMissionResumesPausedConversation(t *testing.T) {
 	}
 }
 
+func TestPrepareCoordinatedMissionAdoptsDeletedConversationWork(t *testing.T) {
+	service := newSubAgentTestService(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	if err := service.db.CreateProject(ctx, database.Project{
+		ID: "project-orphan-chat", OwnerUserID: "user-1", Name: "孤儿任务接管",
+		Status: "active", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("创建项目失败: %v", err)
+	}
+	if err := service.db.CreateConversation(ctx, database.Conversation{
+		ID: "conv-orphan-new", OwnerUserID: "user-1", ProjectID: "project-orphan-chat",
+		Title: "新会话", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("创建新会话失败: %v", err)
+	}
+	orphan, err := service.db.UpsertProjectTestResult(ctx, database.ProjectTestResult{
+		ProjectID: "project-orphan-chat", Dimension: "已删除会话任务", Technique: "handoff",
+		Status: "running", ExecutionState: database.ProjectExecutionRunning,
+		OriginConversationID: "conv-deleted-worker", CreatedAt: now,
+	})
+	if err != nil {
+		t.Fatalf("创建孤儿假设失败: %v", err)
+	}
+	ctx = execctx.WithConversationID(ctx, "conv-orphan-new")
+	ctx = execctx.WithUserID(ctx, "user-1")
+	ctx = execctx.WithProjectID(ctx, "project-orphan-chat")
+	ctx = execctx.WithMessageID(ctx, "assistant-orphan-new")
+	ctx = execctx.WithRunID(ctx, "run-orphan-new")
+	ctx = withRunSubagentBudget(ctx, 4)
+	ctx = withMissionExecution(ctx, missionExecution{
+		Plan: missionPlan{
+			Mode:        missionModeAgent,
+			Coordinated: true,
+			Objective:   "继续已删除会话遗留的项目任务",
+		},
+		Phase:     missionPhaseGeneral,
+		AgentMode: agentModeDeep,
+	})
+	cancelled := false
+	runningHandle := newBackgroundOrchestration(func() { cancelled = true })
+	runningHandle.setStatus(database.AgentOrchestrationRunning, nil)
+	service.orchestrations = map[string]*backgroundOrchestration{
+		"conv-orphan-new": runningHandle,
+	}
+	started, err := service.prepareCoordinatedMission(ctx)
+	if err != nil || !started {
+		t.Fatalf("新会话应启动协调任务: started=%v err=%v", started, err)
+	}
+	current, err := service.db.GetProjectTestResultByID(ctx, "project-orphan-chat", orphan.ID)
+	if err != nil || current == nil || current.OriginConversationID != "conv-orphan-new" {
+		t.Fatalf("新会话未接管已删除会话任务: %+v err=%v", current, err)
+	}
+	logs, err := service.db.ListAuditLogs(ctx, "user-1", 20)
+	if err != nil {
+		t.Fatalf("读取任务接管审计失败: %v", err)
+	}
+	audited := false
+	for _, item := range logs {
+		if item.Action == "project.hypothesis_handoff" &&
+			strings.Contains(item.Detail, "count=1") &&
+			strings.Contains(item.Detail, "conv-deleted-worker") {
+			audited = true
+			break
+		}
+	}
+	if !audited {
+		t.Fatalf("缺少项目任务接管审计: %+v", logs)
+	}
+	runningHandle.mu.Lock()
+	cancel := runningHandle.cancel
+	runningHandle.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if !cancelled {
+		t.Fatal("测试清理时后台编排未取消")
+	}
+	runningHandle.setStatus(database.AgentOrchestrationStopped, nil)
+}
+
+func TestStopConversationOrchestrationCancelsAndRemovesHandle(t *testing.T) {
+	service := newSubAgentTestService(t)
+	cancelled := false
+	handle := newBackgroundOrchestration(func() { cancelled = true })
+	handle.setStatus(database.AgentOrchestrationRunning, nil)
+	handle.markDone()
+	service.orchestrations = map[string]*backgroundOrchestration{
+		"conv-delete-orchestration": handle,
+	}
+	stopped, err := service.StopConversationOrchestration(context.Background(), "conv-delete-orchestration")
+	if err != nil || !stopped {
+		t.Fatal("应停止已存在的后台编排")
+	}
+	if !cancelled {
+		t.Fatal("后台编排 context 未取消")
+	}
+	if service.orchestrationFor("conv-delete-orchestration") != nil {
+		t.Fatal("已删除会话的后台编排句柄仍存在")
+	}
+	status, _ := handle.snapshot()["status"].(string)
+	if status != database.AgentOrchestrationStopped {
+		t.Fatalf("后台编排状态未停止: %s", status)
+	}
+}
+
 func TestResumeConversationOrchestrationRestoresPausedBackgroundMission(t *testing.T) {
 	service := newSubAgentTestService(t)
 	ctx := context.Background()

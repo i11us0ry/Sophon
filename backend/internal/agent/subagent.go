@@ -169,8 +169,8 @@ func newSubAgentRunner(service *Service) *subAgentRunner {
 
 // run 在进程内启动一个复用主模型与工具集的子 Agent，返回最终文本。
 // 子 Agent 只会拿到 baseTools，不包含这 5 个入口工具，避免递归调用。
-// instruction 组装子 Agent 系统提示：渗透角色 + 项目背景 + 项目态势快照 + 写回纪律，
-// 保证每个子任务都知道当前项目的目标、意图、事实与漏洞。
+// instruction 组装子 Agent 系统提示：固定角色、项目摘要、角色专属状态和写回纪律。
+// Planner 获取项目级任务态势，Worker 只获取当前 Intent、资产及其相关证据。
 func (r *subAgentRunner) instruction(ctx context.Context) string {
 	service := r.service
 	conversationID := execctx.ConversationID(ctx)
@@ -207,12 +207,23 @@ func (r *subAgentRunner) instruction(ctx context.Context) string {
 	if briefing := service.projectBriefing(ctx, conversationID, userID); briefing != "" {
 		writeUntrusted(briefing)
 	}
-	if situation := service.projectSituationForConversation(
-		ctx,
-		conversationID,
-		userID,
-	); situation != "" {
-		writeUntrusted(situation)
+	switch strings.ToLower(strings.TrimSpace(info.Kind)) {
+	case "planner":
+		if situation := service.plannerContextBrief(ctx, conversationID, userID); situation != "" {
+			writeUntrusted(situation)
+		}
+	case "worker":
+		if workerContext := service.workerContextBrief(ctx, conversationID, userID); workerContext != "" {
+			writeUntrusted(workerContext)
+		}
+	default:
+		if situation := service.projectSituationForConversation(
+			ctx,
+			conversationID,
+			userID,
+		); situation != "" {
+			writeUntrusted(situation)
+		}
 	}
 	if state.Len() == 0 {
 		return instruction
@@ -1068,6 +1079,19 @@ func (s *Service) prepareCoordinatedMission(ctx context.Context) (bool, error) {
 	if projectID == "" {
 		return false, nil
 	}
+	handoff, err := s.db.ReassignOrphanedProjectHypothesesToConversation(
+		ctx,
+		projectID,
+		execctx.ConversationID(ctx),
+		execctx.UserID(ctx),
+		execctx.RunID(ctx),
+	)
+	if err != nil {
+		return false, fmt.Errorf("接管已删除会话的项目任务失败: %w", err)
+	}
+	if handoff.Count > 0 {
+		s.auditProjectHypothesisHandoff(ctx, projectID, handoff)
+	}
 	if existing := s.orchestrationFor(execctx.ConversationID(ctx)); existing != nil {
 		status, _ := existing.snapshot()["status"].(string)
 		if status == "running" {
@@ -1075,8 +1099,13 @@ func (s *Service) prepareCoordinatedMission(ctx context.Context) (bool, error) {
 			if s.projectHasCompletedWorkerWork(ctx, projectID) {
 				coordinatedStateFromContext(ctx).markWorkerCompleted()
 			}
+			existing.signalPlanner()
+			existing.signalWorkers()
 			return true, nil
 		}
+	}
+	if existing := s.orchestrationFor(execctx.ConversationID(ctx)); existing != nil {
+		status, _ := existing.snapshot()["status"].(string)
 		if status == "paused" {
 			if _, err := s.db.ReassignPausedLegacyProjectHypothesesToConversation(
 				ctx,
@@ -1099,6 +1128,48 @@ func (s *Service) prepareCoordinatedMission(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	return true, nil
+}
+
+func (s *Service) auditProjectHypothesisHandoff(
+	ctx context.Context,
+	projectID string,
+	handoff database.ProjectHypothesisHandoff,
+) {
+	if s == nil || s.db == nil || handoff.Count <= 0 {
+		return
+	}
+	userID := strings.TrimSpace(execctx.UserID(ctx))
+	if userID == "" {
+		return
+	}
+	username := userID
+	if user, err := s.db.GetUserByID(ctx, userID); err == nil && user != nil {
+		username = user.Username
+	}
+	sources := append([]string(nil), handoff.SourceConversationIDs...)
+	if len(sources) > 20 {
+		sources = append(sources[:20], "…")
+	}
+	detail := fmt.Sprintf(
+		"count=%d sources=%s targetConversation=%s runId=%s",
+		handoff.Count,
+		strings.Join(sources, ","),
+		execctx.ConversationID(ctx),
+		execctx.RunID(ctx),
+	)
+	auditCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+	defer cancel()
+	if err := s.db.AddAuditLog(auditCtx, database.AuditLog{
+		UserID:       userID,
+		Username:     username,
+		Action:       "project.hypothesis_handoff",
+		ResourceType: "project",
+		ResourceID:   projectID,
+		Result:       "success",
+		Detail:       detail,
+	}); err != nil {
+		log.Printf("agent: 记录项目任务接管审计失败 project=%s: %v", projectID, err)
+	}
 }
 
 func (s *Service) runCoordinatedMissionLoop(

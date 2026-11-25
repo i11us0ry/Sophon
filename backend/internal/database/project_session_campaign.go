@@ -174,7 +174,7 @@ func insertProjectSessionCampaignEndpointsTx(
 ) (int, error) {
 	rows, err := tx.QueryContext(
 		ctx,
-		`SELECT id, project_id, owner_user_id, name, kind, value, status,
+		`SELECT id, project_id, owner_user_id, name, kind, value, status, source,
 			criticality, risk_score
 		 FROM assets
 		 WHERE project_id = ? AND owner_user_id = ?
@@ -197,6 +197,7 @@ func insertProjectSessionCampaignEndpointsTx(
 			&asset.Kind,
 			&asset.Value,
 			&asset.Status,
+			&asset.Source,
 			&asset.Criticality,
 			&asset.RiskScore,
 		); err != nil {

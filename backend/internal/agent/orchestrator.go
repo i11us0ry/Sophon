@@ -34,6 +34,8 @@ type backgroundOrchestration struct {
 	plannerWake chan struct{}
 	workerWake  chan struct{}
 	drainWake   chan struct{}
+	done        chan struct{}
+	doneOnce    sync.Once
 	draining    bool
 }
 
@@ -52,11 +54,44 @@ func newBackgroundOrchestration(
 		plannerWake: make(chan struct{}, 1),
 		workerWake:  make(chan struct{}, 1),
 		drainWake:   make(chan struct{}, 1),
+		done:        make(chan struct{}),
 	}
 	if len(persist) > 0 {
 		handle.persist = persist[0]
 	}
 	return handle
+}
+
+func (o *backgroundOrchestration) markDone() {
+	if o == nil {
+		return
+	}
+	o.doneOnce.Do(func() {
+		o.mu.Lock()
+		done := o.done
+		o.mu.Unlock()
+		if done != nil {
+			close(done)
+		}
+	})
+}
+
+func (o *backgroundOrchestration) waitDone(ctx context.Context) error {
+	if o == nil {
+		return nil
+	}
+	o.mu.Lock()
+	done := o.done
+	o.mu.Unlock()
+	if done == nil {
+		return nil
+	}
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (o *backgroundOrchestration) signalPlanner() {
@@ -149,6 +184,14 @@ func (o *backgroundOrchestration) drainChannel() <-chan struct{} {
 }
 
 func (o *backgroundOrchestration) setStatus(status string, err error) {
+	o.updateStatus(status, err, true)
+}
+
+func (o *backgroundOrchestration) setStatusLocal(status string, err error) {
+	o.updateStatus(status, err, false)
+}
+
+func (o *backgroundOrchestration) updateStatus(status string, err error, persistStatus bool) {
 	if o == nil {
 		return
 	}
@@ -164,7 +207,7 @@ func (o *backgroundOrchestration) setStatus(status string, err error) {
 	feedback := append([]string(nil), o.feedback...)
 	persist := o.persist
 	o.mu.Unlock()
-	if persist != nil {
+	if persistStatus && persist != nil {
 		persist(status, lastError, feedback)
 	}
 }
@@ -230,6 +273,48 @@ func (s *Service) orchestrationFor(conversationID string) *backgroundOrchestrati
 	s.orchestrationMu.Lock()
 	defer s.orchestrationMu.Unlock()
 	return s.orchestrations[conversationID]
+}
+
+// StopConversationOrchestration 停止并等待已删除会话的内存编排退出，项目任务由数据库接管。
+func (s *Service) StopConversationOrchestration(
+	ctx context.Context,
+	conversationID string,
+) (bool, error) {
+	conversationID = strings.TrimSpace(conversationID)
+	if s == nil || conversationID == "" {
+		return false, nil
+	}
+	s.orchestrationMu.Lock()
+	handle := s.orchestrations[conversationID]
+	if handle != nil {
+		delete(s.orchestrations, conversationID)
+	}
+	s.orchestrationMu.Unlock()
+	if handle == nil {
+		return false, nil
+	}
+	status, _ := handle.snapshot()["status"].(string)
+	handle.setStatusLocal(database.AgentOrchestrationStopped, nil)
+	handle.mu.Lock()
+	cancel := handle.cancel
+	handle.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if status == database.AgentOrchestrationRunning {
+		if err := handle.waitDone(ctx); err != nil {
+			s.orchestrationMu.Lock()
+			if s.orchestrations == nil {
+				s.orchestrations = map[string]*backgroundOrchestration{}
+			}
+			if s.orchestrations[conversationID] == nil {
+				s.orchestrations[conversationID] = handle
+			}
+			s.orchestrationMu.Unlock()
+			return true, fmt.Errorf("等待旧后台编排退出失败: %w", err)
+		}
+	}
+	return true, nil
 }
 
 func (s *Service) currentOrchestrationFeedback(ctx context.Context) []string {
@@ -371,6 +456,7 @@ func (s *Service) startBackgroundOrchestrationWithFeedback(
 	ctx = withProcessDetailBatcher(ctx, batcher)
 
 	go func() {
+		defer handle.markDone()
 		defer cancel()
 		defer releaseZhiziLease()
 		defer func() {
@@ -523,6 +609,7 @@ func (s *Service) restorePausedOrchestration(record database.AgentOrchestration)
 		plannerWake: make(chan struct{}, 1),
 		workerWake:  make(chan struct{}, 1),
 		drainWake:   make(chan struct{}, 1),
+		done:        make(chan struct{}),
 	}
 	s.orchestrationMu.Lock()
 	if s.orchestrations == nil {

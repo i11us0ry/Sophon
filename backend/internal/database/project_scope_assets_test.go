@@ -93,6 +93,11 @@ func TestSyncProjectScopeAssetsIsIdempotent(t *testing.T) {
 	if kinds["203.0.113.10"] != "ip" {
 		t.Fatalf("IP 类型错误: %#v", kinds)
 	}
+	for _, asset := range assets {
+		if asset.Source != AssetSourceScope {
+			t.Fatalf("授权范围转换资产来源错误: %+v", asset)
+		}
+	}
 }
 
 func TestInferAssetKindSkipsAmbiguousBareArtifactName(t *testing.T) {

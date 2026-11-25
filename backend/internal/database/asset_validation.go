@@ -45,9 +45,56 @@ var supportedAssetKinds = map[string]bool{
 }
 
 const (
+	AssetSourceManual     = "manual"
+	AssetSourceFOFA       = "fofa"
+	AssetSourceHunter     = "hunter"
+	AssetSourceFOFAHunter = "fofa_hunter"
+	AssetSourceScope      = "scope"
+	AssetSourceAgent      = "agent"
+	AssetSourceBatch      = "batch"
+	AssetSourceOther      = "other"
+	AssetSourceUnknown    = "unknown"
+)
+
+var assetSources = map[string]bool{
+	AssetSourceManual:     true,
+	AssetSourceFOFA:       true,
+	AssetSourceHunter:     true,
+	AssetSourceFOFAHunter: true,
+	AssetSourceScope:      true,
+	AssetSourceAgent:      true,
+	AssetSourceBatch:      true,
+	AssetSourceOther:      true,
+	AssetSourceUnknown:    true,
+}
+
+const (
 	assetNameMaxRunes  = 120
 	assetValueMaxRunes = 4096
 )
+
+func NormalizeAssetSource(source string) string {
+	switch strings.ToLower(strings.TrimSpace(source)) {
+	case AssetSourceManual, "user", "manual_input":
+		return AssetSourceManual
+	case AssetSourceFOFA:
+		return AssetSourceFOFA
+	case AssetSourceHunter:
+		return AssetSourceHunter
+	case AssetSourceFOFAHunter, "fofa,hunter", "hunter,fofa", "intel":
+		return AssetSourceFOFAHunter
+	case AssetSourceScope, "domain", "domain_transform", "range":
+		return AssetSourceScope
+	case AssetSourceAgent, "auto":
+		return AssetSourceAgent
+	case AssetSourceBatch, "import":
+		return AssetSourceBatch
+	case AssetSourceOther:
+		return AssetSourceOther
+	default:
+		return AssetSourceUnknown
+	}
+}
 
 func IsSupportedAssetKind(kind string) bool {
 	return supportedAssetKinds[strings.ToLower(strings.TrimSpace(kind))]
@@ -252,6 +299,7 @@ func normalizeAssetRecord(item *Asset) error {
 	item.Value = strings.TrimSpace(item.Value)
 	item.Status = strings.ToLower(strings.TrimSpace(item.Status))
 	item.Criticality = strings.ToLower(strings.TrimSpace(item.Criticality))
+	item.Source = NormalizeAssetSource(item.Source)
 
 	if item.ID == "" || item.OwnerUserID == "" {
 		return fmt.Errorf("%w: 资产 ID 和所有者不能为空", ErrInvalidAsset)
@@ -275,6 +323,9 @@ func normalizeAssetRecord(item *Asset) error {
 	}
 	if !assetStatuses[item.Status] {
 		return fmt.Errorf("%w: 资产状态不合法", ErrInvalidAsset)
+	}
+	if !assetSources[item.Source] {
+		return fmt.Errorf("%w: 资产来源不合法", ErrInvalidAsset)
 	}
 	if item.Criticality == "" {
 		item.Criticality = "medium"

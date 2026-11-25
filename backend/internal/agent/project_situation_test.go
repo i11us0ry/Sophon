@@ -258,9 +258,9 @@ func TestMainAgentInstructionIncludesSituation(t *testing.T) {
 	}
 	state := lastStateMessage(t, messages)
 	for _, want := range []string{
-		"当前项目任务态势包",
+		"当前任务进度",
 		"事实索引",
-		"漏洞摘要",
+		"漏洞索引",
 	} {
 		if !strings.Contains(state, want) {
 			t.Fatalf("主 Agent 状态包缺少 %q：\n%s", want, state)

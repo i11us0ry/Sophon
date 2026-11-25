@@ -112,6 +112,20 @@ func TestBatchDeleteCancelsRunningTasks(t *testing.T) {
 	if _, err := os.Stat(conversationDir); !os.IsNotExist(err) {
 		t.Fatalf("对话附件目录应被清理: %v", err)
 	}
+	logs, err := db.ListAuditLogs(context.Background(), "user-1", 20)
+	if err != nil {
+		t.Fatalf("读取删除审计失败: %v", err)
+	}
+	found := false
+	for _, item := range logs {
+		if item.Action == "conversation.delete" && item.ResourceID == "conv-delete" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("缺少会话删除审计: %+v", logs)
+	}
 }
 
 func TestUpdateConversationProjectRejectsNonEmptyConversation(t *testing.T) {

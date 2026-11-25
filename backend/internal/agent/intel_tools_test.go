@@ -72,6 +72,7 @@ func TestIntelSearchImportsCurrentProjectAssets(t *testing.T) {
 		asset.Value != "https://oa.example.com:8443" ||
 		asset.Name != "OA" ||
 		asset.Status != "unknown" ||
+		asset.Source != database.AssetSourceFOFA ||
 		asset.Criticality != "info" ||
 		asset.RiskScore != 0 {
 		t.Fatalf("情报资产映射不符合预期: %+v", asset)

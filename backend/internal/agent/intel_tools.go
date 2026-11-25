@@ -435,6 +435,7 @@ func (s *Service) ImportIntelAssets(
 			Kind:        kind,
 			Value:       value,
 			Status:      "unknown",
+			Source:      intelAssetSource(result),
 			Criticality: "info",
 			RiskScore:   0,
 			CreatedAt:   now,
@@ -461,6 +462,29 @@ func (s *Service) ImportIntelAssets(
 		return summary, fmt.Errorf("%d 个资产写入失败", len(failures))
 	}
 	return summary, nil
+}
+
+func intelAssetSource(result intel.Result) string {
+	hasFOFA := false
+	hasHunter := false
+	for _, source := range result.Sources {
+		switch strings.ToLower(strings.TrimSpace(source)) {
+		case database.AssetSourceFOFA:
+			hasFOFA = true
+		case database.AssetSourceHunter:
+			hasHunter = true
+		}
+	}
+	switch {
+	case hasFOFA && hasHunter:
+		return database.AssetSourceFOFAHunter
+	case hasFOFA:
+		return database.AssetSourceFOFA
+	case hasHunter:
+		return database.AssetSourceHunter
+	default:
+		return database.AssetSourceOther
+	}
 }
 
 func intelAssetTarget(result intel.Result) (string, string, error) {

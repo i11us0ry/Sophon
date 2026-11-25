@@ -1494,6 +1494,134 @@ func (db *DB) ReassignActiveProjectHypothesesToConversation(
 	return result.RowsAffected()
 }
 
+type ProjectHypothesisHandoff struct {
+	Count                 int64
+	SourceConversationIDs []string
+}
+
+// ReassignOrphanedProjectHypothesesToConversation 接管所属会话已删除的未完成任务。
+func (db *DB) ReassignOrphanedProjectHypothesesToConversation(
+	ctx context.Context,
+	projectID string,
+	conversationID string,
+	ownerUserID string,
+	runID string,
+) (ProjectHypothesisHandoff, error) {
+	handoff := ProjectHypothesisHandoff{}
+	projectID = strings.TrimSpace(projectID)
+	conversationID = strings.TrimSpace(conversationID)
+	ownerUserID = strings.TrimSpace(ownerUserID)
+	runID = strings.TrimSpace(runID)
+	if projectID == "" || conversationID == "" || ownerUserID == "" {
+		return handoff, fmt.Errorf("项目、会话和用户不能为空")
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return handoff, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var targetCount int
+	if err := tx.QueryRowContext(
+		ctx,
+		`SELECT COUNT(*) FROM conversations
+		 WHERE id = ? AND project_id = ? AND owner_user_id = ?`,
+		conversationID,
+		projectID,
+		ownerUserID,
+	).Scan(&targetCount); err != nil {
+		return handoff, err
+	}
+	if targetCount == 0 {
+		return handoff, fmt.Errorf("目标会话不属于当前项目和用户")
+	}
+
+	now := time.Now().UTC().Unix()
+	orphanClause := `project_id = ?
+		AND (execution_state IN ('open', 'running', 'paused')
+			OR status IN ('untested', 'running', 'paused'))
+		AND origin_conversation_id <> ''
+		AND NOT EXISTS (
+			SELECT 1 FROM conversations c
+			WHERE c.id = project_test_results.origin_conversation_id
+		)`
+	rows, err := tx.QueryContext(
+		ctx,
+		`SELECT DISTINCT origin_conversation_id
+		 FROM project_test_results
+		 WHERE `+orphanClause+`
+		 ORDER BY origin_conversation_id`,
+		projectID,
+	)
+	if err != nil {
+		return handoff, err
+	}
+	for rows.Next() {
+		var sourceID string
+		if err := rows.Scan(&sourceID); err != nil {
+			_ = rows.Close()
+			return handoff, err
+		}
+		sourceID = strings.TrimSpace(sourceID)
+		if sourceID == "" {
+			sourceID = "(unassigned)"
+		}
+		handoff.SourceConversationIDs = append(handoff.SourceConversationIDs, sourceID)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return handoff, err
+	}
+	_ = rows.Close()
+	if _, err := tx.ExecContext(
+		ctx,
+		`UPDATE project_graph_nodes
+		 SET status = 'open', updated_at = ?
+		 WHERE project_id = ? AND kind = 'intent'
+		   AND id IN (
+		     SELECT intent_id FROM project_test_results
+		     WHERE `+orphanClause+` AND intent_id <> ''
+		   )`,
+		now,
+		projectID,
+		projectID,
+	); err != nil {
+		return ProjectHypothesisHandoff{}, err
+	}
+	result, err := tx.ExecContext(
+		ctx,
+		`UPDATE project_test_results
+		 SET origin_conversation_id = ?,
+		     origin_run_id = CASE WHEN ? <> '' THEN ? ELSE origin_run_id END,
+		     status = CASE
+		         WHEN status IN ('running', 'paused') THEN 'untested'
+		         ELSE status
+		     END,
+		     execution_state = 'open',
+		     state_reason = '',
+		     last_worker_session_id = '',
+		     updated_at = ?
+		 WHERE `+orphanClause,
+		conversationID,
+		runID,
+		runID,
+		now,
+		projectID,
+	)
+	if err != nil {
+		return ProjectHypothesisHandoff{}, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return ProjectHypothesisHandoff{}, err
+	}
+	handoff.Count = affected
+	if err := tx.Commit(); err != nil {
+		return ProjectHypothesisHandoff{}, err
+	}
+	return handoff, nil
+}
+
 func (db *DB) ReassignPausedLegacyProjectHypothesesToConversation(
 	ctx context.Context,
 	projectID string,

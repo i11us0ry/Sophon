@@ -55,55 +55,6 @@ func TestSoftBudgetMessagesKeepsNewestRounds(t *testing.T) {
 	}
 }
 
-func TestPreserveRecentUserMessagesSurvivesHistoryTrimming(t *testing.T) {
-	content := "简短要求"
-	messages := make([]database.Message, 0, 12)
-	for index := 0; index < 6; index++ {
-		messages = append(messages,
-			database.Message{
-				ID:      fmt.Sprintf("u%d", index),
-				Role:    "user",
-				Content: fmt.Sprintf("要求-%d %s", index, content),
-			},
-			database.Message{
-				ID:      fmt.Sprintf("a%d", index),
-				Role:    "assistant",
-				Content: content,
-			},
-		)
-	}
-
-	selected := append([]database.Message(nil), messages[10:]...)
-	out := preserveRecentUserMessages(selected, messages, 1200)
-	present := make(map[string]bool, len(out))
-	for _, message := range out {
-		present[message.ID] = true
-	}
-	for index := 1; index < 6; index++ {
-		id := fmt.Sprintf("u%d", index)
-		if !present[id] {
-			t.Fatalf("裁剪后仍应保留最近的用户要求 %s: %+v", id, out)
-		}
-	}
-	if present["u0"] {
-		t.Fatalf("超出保留窗口的旧用户要求不应被固定保留: %+v", out)
-	}
-	if !present["a5"] {
-		t.Fatalf("最新助手回复应随最新回合保留: %+v", out)
-	}
-
-	large := make([]database.Message, 0, len(messages))
-	longContent := strings.Repeat("很长的用户要求", 100)
-	for _, message := range messages {
-		message.Content = longContent
-		large = append(large, message)
-	}
-	capped := preserveRecentUserMessages([]database.Message{large[len(large)-1]}, large, 900)
-	if got := estimateDatabaseMessagesTokens(capped); got > 900 {
-		t.Fatalf("固定保留最近用户要求后不应超出历史预算: got=%d messages=%+v", got, capped)
-	}
-}
-
 func TestCompactConversationWritesSummaryTranscriptAndUsage(t *testing.T) {
 	db := openDigestTestDB(t)
 	ctx := context.Background()

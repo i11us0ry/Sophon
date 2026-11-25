@@ -455,7 +455,7 @@ func (db *DB) ListProjectAssets(
 ) ([]Asset, error) {
 	rows, err := db.QueryContext(
 		ctx,
-		`SELECT id, project_id, owner_user_id, name, kind, value, status,
+		`SELECT id, project_id, owner_user_id, name, kind, value, status, source,
 			criticality, risk_score, created_at, updated_at
 		 FROM assets
 		 WHERE project_id = ? AND owner_user_id = ?
@@ -481,6 +481,7 @@ func (db *DB) ListProjectAssets(
 			&item.Kind,
 			&item.Value,
 			&item.Status,
+			&item.Source,
 			&item.Criticality,
 			&item.RiskScore,
 			&createdAt,
@@ -515,7 +516,7 @@ func (db *DB) ListProjectAssetsPage(
 
 	rows, err := db.QueryContext(
 		ctx,
-		`SELECT id, project_id, owner_user_id, name, kind, value, status,
+		`SELECT id, project_id, owner_user_id, name, kind, value, status, source,
 			criticality, risk_score, created_at, updated_at
 		 FROM assets
 		 WHERE project_id = ? AND owner_user_id = ?
@@ -544,6 +545,7 @@ func (db *DB) ListProjectAssetsPage(
 			&item.Kind,
 			&item.Value,
 			&item.Status,
+			&item.Source,
 			&item.Criticality,
 			&item.RiskScore,
 			&createdAt,

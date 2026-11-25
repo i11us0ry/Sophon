@@ -451,12 +451,17 @@ func insertConversationTx(ctx context.Context, tx *sql.Tx, conversation Conversa
 }
 
 func insertAssetTx(ctx context.Context, tx *sql.Tx, asset Asset) error {
+	if strings.TrimSpace(asset.Source) == "" {
+		asset.Source = AssetSourceBatch
+	} else {
+		asset.Source = NormalizeAssetSource(asset.Source)
+	}
 	_, err := tx.ExecContext(
 		ctx,
 		`INSERT INTO assets (
-			id, project_id, owner_user_id, name, kind, value, status,
+			id, project_id, owner_user_id, name, kind, value, status, source,
 			criticality, risk_score, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		asset.ID,
 		asset.ProjectID,
 		asset.OwnerUserID,
@@ -464,6 +469,7 @@ func insertAssetTx(ctx context.Context, tx *sql.Tx, asset Asset) error {
 		asset.Kind,
 		asset.Value,
 		asset.Status,
+		asset.Source,
 		asset.Criticality,
 		asset.RiskScore,
 		asset.CreatedAt.Unix(),

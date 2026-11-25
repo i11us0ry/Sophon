@@ -72,6 +72,7 @@ type Asset struct {
 	Kind        string    `json:"kind"`
 	Value       string    `json:"value"`
 	Status      string    `json:"status"`
+	Source      string    `json:"source"`
 	Criticality string    `json:"criticality"`
 	RiskScore   int       `json:"riskScore"`
 	CreatedAt   time.Time `json:"createdAt"`
@@ -1019,9 +1020,9 @@ func (db *DB) CreateAsset(ctx context.Context, item Asset) error {
 	_, err = tx.ExecContext(
 		ctx,
 		`INSERT INTO assets (
-			id, project_id, owner_user_id, name, kind, value, status,
+			id, project_id, owner_user_id, name, kind, value, status, source,
 			criticality, risk_score, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		item.ID,
 		item.ProjectID,
 		item.OwnerUserID,
@@ -1029,6 +1030,7 @@ func (db *DB) CreateAsset(ctx context.Context, item Asset) error {
 		item.Kind,
 		item.Value,
 		item.Status,
+		item.Source,
 		item.Criticality,
 		item.RiskScore,
 		item.CreatedAt.Unix(),
@@ -1043,7 +1045,7 @@ func (db *DB) CreateAsset(ctx context.Context, item Asset) error {
 func (db *DB) ListAssets(ctx context.Context, ownerUserID string) ([]Asset, error) {
 	rows, err := db.QueryContext(
 		ctx,
-		`SELECT id, project_id, owner_user_id, name, kind, value, status,
+		`SELECT id, project_id, owner_user_id, name, kind, value, status, source,
 			criticality, risk_score, created_at, updated_at
 		 FROM assets
 		 WHERE owner_user_id = ?
@@ -1067,6 +1069,7 @@ func (db *DB) ListAssets(ctx context.Context, ownerUserID string) ([]Asset, erro
 			&item.Kind,
 			&item.Value,
 			&item.Status,
+			&item.Source,
 			&item.Criticality,
 			&item.RiskScore,
 			&createdAt,
@@ -1101,7 +1104,7 @@ func (db *DB) ListAssetsPage(
 	}
 	rows, err := db.QueryContext(
 		ctx,
-		`SELECT id, project_id, owner_user_id, name, kind, value, status,
+		`SELECT id, project_id, owner_user_id, name, kind, value, status, source,
 			criticality, risk_score, created_at, updated_at
 		 FROM assets
 		 WHERE owner_user_id = ?
@@ -1128,6 +1131,7 @@ func (db *DB) ListAssetsPage(
 			&item.Kind,
 			&item.Value,
 			&item.Status,
+			&item.Source,
 			&item.Criticality,
 			&item.RiskScore,
 			&createdAt,
@@ -1188,7 +1192,7 @@ func (db *DB) ListAssetsFiltered(
 	where := " WHERE " + strings.Join(clauses, " AND ")
 	rows, err := db.QueryContext(
 		ctx,
-		`SELECT id, project_id, owner_user_id, name, kind, value, status,
+		`SELECT id, project_id, owner_user_id, name, kind, value, status, source,
 			criticality, risk_score, created_at, updated_at
 		 FROM assets`+where+`
 		 ORDER BY updated_at DESC, rowid DESC`,
@@ -1211,6 +1215,7 @@ func (db *DB) ListAssetsFiltered(
 			&item.Kind,
 			&item.Value,
 			&item.Status,
+			&item.Source,
 			&item.Criticality,
 			&item.RiskScore,
 			&createdAt,
@@ -1304,7 +1309,7 @@ func (db *DB) GetAsset(ctx context.Context, id, ownerUserID string) (*Asset, err
 	var updatedAt int64
 	err := db.QueryRowContext(
 		ctx,
-		`SELECT id, project_id, owner_user_id, name, kind, value, status,
+		`SELECT id, project_id, owner_user_id, name, kind, value, status, source,
 			criticality, risk_score, created_at, updated_at
 		 FROM assets
 		 WHERE id = ? AND owner_user_id = ?`,
@@ -1318,6 +1323,7 @@ func (db *DB) GetAsset(ctx context.Context, id, ownerUserID string) (*Asset, err
 		&item.Kind,
 		&item.Value,
 		&item.Status,
+		&item.Source,
 		&item.Criticality,
 		&item.RiskScore,
 		&createdAt,

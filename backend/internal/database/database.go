@@ -453,6 +453,64 @@ func (db *DB) migrate(ctx context.Context) error {
 		 ON agent_runs(conversation_id, started_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_agent_runs_status
 		 ON agent_runs(status, updated_at DESC)`,
+		`CREATE TABLE IF NOT EXISTS conversation_turn_directives (
+			id TEXT PRIMARY KEY,
+			conversation_id TEXT NOT NULL,
+			project_id TEXT NOT NULL,
+			user_message_id TEXT NOT NULL DEFAULT '',
+			run_id TEXT NOT NULL DEFAULT '',
+			kind TEXT NOT NULL,
+			mission_mode TEXT NOT NULL DEFAULT '',
+			objective TEXT NOT NULL DEFAULT '',
+			scope_text TEXT NOT NULL DEFAULT '',
+			target_refs_json TEXT NOT NULL DEFAULT '{}',
+			capability_mode TEXT NOT NULL DEFAULT 'read_only',
+			confidence INTEGER NOT NULL DEFAULT 0,
+			resolver_version TEXT NOT NULL DEFAULT '',
+			created_at INTEGER NOT NULL,
+			FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_turn_directives_conversation
+		 ON conversation_turn_directives(conversation_id, created_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_turn_directives_run
+		 ON conversation_turn_directives(run_id)`,
+		`CREATE TABLE IF NOT EXISTS context_snapshots (
+			id TEXT PRIMARY KEY,
+			run_id TEXT NOT NULL,
+			conversation_id TEXT NOT NULL,
+			project_id TEXT NOT NULL,
+			directive_id TEXT NOT NULL DEFAULT '',
+			mode TEXT NOT NULL DEFAULT '',
+			capability_mode TEXT NOT NULL DEFAULT '',
+			model TEXT NOT NULL DEFAULT '',
+			tool_schema_hash TEXT NOT NULL DEFAULT '',
+			summary_version INTEGER NOT NULL DEFAULT 0,
+			total_tokens INTEGER NOT NULL DEFAULT 0,
+			degraded INTEGER NOT NULL DEFAULT 0,
+			created_at INTEGER NOT NULL,
+			FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+		)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_context_snapshots_run
+		 ON context_snapshots(run_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_context_snapshots_conversation
+		 ON context_snapshots(conversation_id, created_at DESC)`,
+		`CREATE TABLE IF NOT EXISTS context_snapshot_sections (
+			id TEXT PRIMARY KEY,
+			snapshot_id TEXT NOT NULL,
+			section_name TEXT NOT NULL,
+			source_type TEXT NOT NULL DEFAULT '',
+			source_ids_json TEXT NOT NULL DEFAULT '[]',
+			content_hash TEXT NOT NULL DEFAULT '',
+			token_estimate INTEGER NOT NULL DEFAULT 0,
+			trust_level TEXT NOT NULL DEFAULT '',
+			included INTEGER NOT NULL DEFAULT 0,
+			truncated INTEGER NOT NULL DEFAULT 0,
+			omitted_reason TEXT NOT NULL DEFAULT '',
+			created_at INTEGER NOT NULL,
+			FOREIGN KEY (snapshot_id) REFERENCES context_snapshots(id) ON DELETE CASCADE
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_context_sections_snapshot
+		 ON context_snapshot_sections(snapshot_id, created_at ASC)`,
 		`CREATE TABLE IF NOT EXISTS messages (
 			id TEXT PRIMARY KEY,
 			conversation_id TEXT NOT NULL,
@@ -842,6 +900,7 @@ func (db *DB) migrate(ctx context.Context) error {
 			kind TEXT NOT NULL,
 			value TEXT NOT NULL,
 			status TEXT NOT NULL DEFAULT 'unknown',
+			source TEXT NOT NULL DEFAULT 'unknown',
 			criticality TEXT NOT NULL DEFAULT 'medium',
 			risk_score INTEGER NOT NULL DEFAULT 0,
 			created_at INTEGER NOT NULL,
@@ -1192,6 +1251,14 @@ func (db *DB) migrate(ctx context.Context) error {
 		"messages",
 		"message_kind",
 		`ALTER TABLE messages ADD COLUMN message_kind TEXT NOT NULL DEFAULT 'chat'`,
+	); err != nil {
+		return err
+	}
+	if err := db.ensureColumn(
+		ctx,
+		"assets",
+		"source",
+		`ALTER TABLE assets ADD COLUMN source TEXT NOT NULL DEFAULT 'unknown'`,
 	); err != nil {
 		return err
 	}

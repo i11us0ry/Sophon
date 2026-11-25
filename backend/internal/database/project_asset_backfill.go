@@ -348,15 +348,16 @@ func ensureProjectAsset(
 	if _, err := tx.ExecContext(
 		ctx,
 		`INSERT INTO assets (
-			id, project_id, owner_user_id, name, kind, value, status,
+			id, project_id, owner_user_id, name, kind, value, status, source,
 			criticality, risk_score, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, 'active', 'medium', ?, ?, ?)`,
+		) VALUES (?, ?, ?, ?, ?, ?, 'active', ?, 'medium', ?, ?, ?)`,
 		assetID,
 		projectID,
 		ownerUserID,
 		value,
 		kind,
 		value,
+		AssetSourceAgent,
 		riskScore,
 		now.Unix(),
 		now.Unix(),

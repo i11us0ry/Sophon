@@ -1561,22 +1561,36 @@ func (h *ChatHandler) DeleteConversation(c *gin.Context) {
 	}
 	_, _ = cancelConversationWork(h.manager, h.agent, conversationID, user.ID)
 	_ = h.db.ReleaseZhiziLeaseByConversation(c.Request.Context(), conversationID)
+	stopCtx, stopCancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
+	orchestrationStopped, stopErr := h.agent.StopConversationOrchestration(stopCtx, conversationID)
+	stopCancel()
+	if stopErr != nil {
+		internalError(c, "stop_conversation_orchestration_failed", "停止旧后台编排失败，暂未删除会话")
+		return
+	}
 	deleted, err := h.db.DeleteConversations(
 		c.Request.Context(),
 		[]string{conversationID},
 		user.ID,
 	)
 	if err != nil {
+		if orchestrationStopped {
+			_, _ = h.agent.ResumeConversationOrchestration(c.Request.Context(), conversationID, user.ID)
+		}
 		internalError(c, "delete_conversation_failed", "删除对话失败")
 		return
 	}
 	if deleted == 0 {
+		if orchestrationStopped {
+			_, _ = h.agent.ResumeConversationOrchestration(c.Request.Context(), conversationID, user.ID)
+		}
 		c.JSON(http.StatusNotFound, gin.H{
 			"code":    "conversation_not_found",
 			"message": "对话不存在",
 		})
 		return
 	}
+	h.auditConversationDelete(c.Request.Context(), user, conversationID, orchestrationStopped, false)
 	h.removeConversationFiles(conversationID)
 	h.removeConversationWorkspace(conversationID)
 	_, _ = cancelConversationWork(h.manager, h.agent, conversationID, user.ID)
@@ -1602,29 +1616,79 @@ func (h *ChatHandler) BatchDeleteConversations(c *gin.Context) {
 		return
 	}
 	ownedIDs := make([]string, 0, len(ids))
+	stoppedIDs := make(map[string]bool, len(ids))
+	stopCtx, stopCancel := context.WithTimeout(c.Request.Context(), 15*time.Second)
 	for _, id := range ids {
 		if _, err := h.db.GetConversation(c.Request.Context(), id, user.ID); err != nil {
 			continue
 		}
 		ownedIDs = append(ownedIDs, id)
 		_, _ = cancelConversationWork(h.manager, h.agent, id, user.ID)
+		stopped, stopErr := h.agent.StopConversationOrchestration(stopCtx, id)
+		if stopErr != nil {
+			stopCancel()
+			for stoppedID := range stoppedIDs {
+				if stoppedIDs[stoppedID] {
+					_, _ = h.agent.ResumeConversationOrchestration(c.Request.Context(), stoppedID, user.ID)
+				}
+			}
+			internalError(c, "stop_conversation_orchestration_failed", "停止旧后台编排失败，暂未删除会话")
+			return
+		}
+		stoppedIDs[id] = stopped
 	}
+	stopCancel()
 	if len(ownedIDs) == 0 {
 		c.JSON(http.StatusOK, gin.H{"deleted": 0})
 		return
 	}
 	deleted, err := h.db.DeleteConversations(c.Request.Context(), ownedIDs, user.ID)
 	if err != nil {
+		for _, id := range ownedIDs {
+			if stoppedIDs[id] {
+				_, _ = h.agent.ResumeConversationOrchestration(c.Request.Context(), id, user.ID)
+			}
+		}
 		internalError(c, "batch_delete_conversations_failed", "批量删除对话失败")
 		return
 	}
 	for _, id := range ownedIDs {
 		_, _ = cancelConversationWork(h.manager, h.agent, id, user.ID)
 		_ = h.db.ReleaseZhiziLeaseByConversation(c.Request.Context(), id)
+		if deleted > 0 {
+			h.auditConversationDelete(c.Request.Context(), user, id, stoppedIDs[id], true)
+		}
 		h.removeConversationFiles(id)
 		h.removeConversationWorkspace(id)
 	}
 	c.JSON(http.StatusOK, gin.H{"deleted": deleted})
+}
+
+func (h *ChatHandler) auditConversationDelete(
+	ctx context.Context,
+	user *database.User,
+	conversationID string,
+	orchestrationStopped bool,
+	batch bool,
+) {
+	if h == nil || h.db == nil || user == nil {
+		return
+	}
+	auditCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+	defer cancel()
+	_ = h.db.AddAuditLog(auditCtx, database.AuditLog{
+		UserID:       user.ID,
+		Username:     user.Username,
+		Action:       "conversation.delete",
+		ResourceType: "conversation",
+		ResourceID:   conversationID,
+		Result:       "success",
+		Detail: fmt.Sprintf(
+			"batch=%t orchestrationStopped=%t projectTasksDeferred=true",
+			batch,
+			orchestrationStopped,
+		),
+	})
 }
 
 func (h *ChatHandler) ensureZhiziLease(ctx context.Context, conversationID, userID string) error {

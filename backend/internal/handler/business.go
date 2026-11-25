@@ -690,6 +690,7 @@ func (h *BusinessHandler) CreateAsset(c *gin.Context) {
 		Kind:        defaultString(request.Kind, "domain"),
 		Value:       strings.TrimSpace(request.Value),
 		Status:      defaultString(request.Status, "unknown"),
+		Source:      database.AssetSourceManual,
 		Criticality: defaultString(request.Criticality, "medium"),
 		RiskScore:   request.RiskScore,
 		CreatedAt:   now,

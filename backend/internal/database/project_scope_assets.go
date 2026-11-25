@@ -162,15 +162,16 @@ func (db *DB) SyncProjectScopeAssets(
 		if _, err := tx.ExecContext(
 			ctx,
 			`INSERT INTO assets (
-				id, project_id, owner_user_id, name, kind, value, status,
+				id, project_id, owner_user_id, name, kind, value, status, source,
 				criticality, risk_score, created_at, updated_at
-			) VALUES (?, ?, ?, ?, ?, ?, 'active', 'medium', 0, ?, ?)`,
+			) VALUES (?, ?, ?, ?, ?, ?, 'active', ?, 'medium', 0, ?, ?)`,
 			newID(),
 			projectID,
 			ownerUserID,
 			name,
 			kind,
 			item.Value,
+			AssetSourceScope,
 			now.Unix(),
 			now.Unix(),
 		); err != nil {

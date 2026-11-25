@@ -953,7 +953,7 @@ func (db *DB) ListCampaignAssets(
 	rows, err := db.QueryContext(
 		ctx,
 		`SELECT DISTINCT a.id, a.project_id, a.owner_user_id, a.name, a.kind,
-			a.value, a.status, a.criticality, a.risk_score,
+			a.value, a.status, a.source, a.criticality, a.risk_score,
 			a.created_at, a.updated_at
 		 FROM assets a
 		 JOIN campaign_endpoints e ON e.asset_id = a.id
@@ -978,6 +978,7 @@ func (db *DB) ListCampaignAssets(
 			&item.Kind,
 			&item.Value,
 			&item.Status,
+			&item.Source,
 			&item.Criticality,
 			&item.RiskScore,
 			&createdAt,

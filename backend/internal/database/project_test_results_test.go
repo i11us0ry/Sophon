@@ -433,3 +433,115 @@ func TestProjectHypothesesClaimAndResumeAreConversationScoped(t *testing.T) {
 		t.Fatalf("恢复后的历史任务归属错误: item=%+v err=%v", legacy, err)
 	}
 }
+
+func TestDeletedConversationWorkCanBeReassignedWithoutStealingLiveWork(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "orphan-hypothesis-handoff.db"))
+	if err != nil {
+		t.Fatalf("打开数据库失败: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ctx := context.Background()
+	now := time.Now().UTC()
+	if err := db.CreateProject(ctx, Project{
+		ID: "project-orphan-handoff", OwnerUserID: "user-1", Name: "会话接管",
+		Status: "active", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("创建项目失败: %v", err)
+	}
+	if err := db.CreateProject(ctx, Project{
+		ID: "project-orphan-other", OwnerUserID: "user-2", Name: "其他项目",
+		Status: "active", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("创建其他项目失败: %v", err)
+	}
+	if err := db.CreateConversation(ctx, Conversation{
+		ID: "conv-orphan-other", OwnerUserID: "user-2", ProjectID: "project-orphan-other",
+		Title: "其他会话", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("创建其他会话失败: %v", err)
+	}
+	for _, conversationID := range []string{
+		"conv-deleted-source",
+		"conv-live-source",
+		"conv-orphan-target",
+	} {
+		if err := db.CreateConversation(ctx, Conversation{
+			ID: conversationID, OwnerUserID: "user-1", ProjectID: "project-orphan-handoff",
+			Title: conversationID, CreatedAt: now, UpdatedAt: now,
+		}); err != nil {
+			t.Fatalf("创建会话 %s 失败: %v", conversationID, err)
+		}
+	}
+	orphaned, err := db.UpsertProjectTestResult(ctx, ProjectTestResult{
+		ProjectID: "project-orphan-handoff", Dimension: "已删除会话任务", Technique: "orphan",
+		Status: "running", ExecutionState: ProjectExecutionRunning,
+		OriginConversationID: "conv-deleted-source", CreatedAt: now,
+	})
+	if err != nil {
+		t.Fatalf("创建孤儿任务失败: %v", err)
+	}
+	live, err := db.UpsertProjectTestResult(ctx, ProjectTestResult{
+		ProjectID: "project-orphan-handoff", Dimension: "正常会话任务", Technique: "live",
+		Status: "running", ExecutionState: ProjectExecutionRunning,
+		OriginConversationID: "conv-live-source", CreatedAt: now,
+	})
+	if err != nil {
+		t.Fatalf("创建正常会话任务失败: %v", err)
+	}
+	legacyPaused, err := db.UpsertProjectTestResult(ctx, ProjectTestResult{
+		ProjectID: "project-orphan-handoff", Dimension: "人工暂停历史任务", Technique: "legacy-paused",
+		Status: "paused", ExecutionState: ProjectExecutionPaused,
+		StateReason: "人工暂停", CreatedAt: now,
+	})
+	if err != nil {
+		t.Fatalf("创建历史暂停任务失败: %v", err)
+	}
+	if _, err := db.DeleteConversations(ctx, []string{"conv-deleted-source"}, "user-1"); err != nil {
+		t.Fatalf("删除来源会话失败: %v", err)
+	}
+	if _, err := db.ReassignOrphanedProjectHypothesesToConversation(
+		ctx,
+		"project-orphan-handoff",
+		"conv-orphan-other",
+		"user-1",
+		"run-invalid",
+	); err == nil {
+		t.Fatal("跨项目和用户的会话不应接管项目任务")
+	}
+	handoff, err := db.ReassignOrphanedProjectHypothesesToConversation(
+		ctx,
+		"project-orphan-handoff",
+		"conv-orphan-target",
+		"user-1",
+		"run-orphan-target",
+	)
+	if err != nil || handoff.Count != 1 ||
+		len(handoff.SourceConversationIDs) != 1 ||
+		handoff.SourceConversationIDs[0] != "conv-deleted-source" {
+		t.Fatalf("孤儿任务接管结果错误: %+v err=%v", handoff, err)
+	}
+	current, err := db.GetProjectTestResultByID(ctx, "project-orphan-handoff", orphaned.ID)
+	if err != nil || current == nil ||
+		current.OriginConversationID != "conv-orphan-target" ||
+		current.OriginRunID != "run-orphan-target" ||
+		current.Status != "untested" ||
+		current.ExecutionState != ProjectExecutionOpen {
+		t.Fatalf("孤儿任务未恢复并可接管: %+v err=%v", current, err)
+	}
+	liveCurrent, err := db.GetProjectTestResultByID(ctx, "project-orphan-handoff", live.ID)
+	if err != nil || liveCurrent == nil ||
+		liveCurrent.OriginConversationID != "conv-live-source" ||
+		liveCurrent.Status != "running" {
+		t.Fatalf("正常会话任务不应被抢占: %+v err=%v", liveCurrent, err)
+	}
+	legacyCurrent, err := db.GetProjectTestResultByID(
+		ctx,
+		"project-orphan-handoff",
+		legacyPaused.ID,
+	)
+	if err != nil || legacyCurrent == nil ||
+		legacyCurrent.OriginConversationID != "" ||
+		legacyCurrent.Status != "paused" {
+		t.Fatalf("空归属历史暂停任务不应被新会话自动恢复: %+v err=%v", legacyCurrent, err)
+	}
+}

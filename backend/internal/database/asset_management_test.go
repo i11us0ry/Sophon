@@ -2,6 +2,7 @@ package database
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"path/filepath"
 	"testing"
@@ -71,6 +72,104 @@ func TestAssetDuplicateAndProjectMoveProtection(t *testing.T) {
 	asset.UpdatedAt = now.Add(time.Minute)
 	if err := db.UpdateAsset(ctx, asset); !errors.Is(err, ErrAssetInUse) {
 		t.Fatalf("被引用资产跨项目移动应被拒绝，实际 %v", err)
+	}
+}
+
+func TestAssetSourceDefaultsAndCannotBeChangedByAssetUpdate(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "asset-source.db"))
+	if err != nil {
+		t.Fatalf("打开数据库失败: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	ctx := context.Background()
+	now := time.Now().UTC()
+	if err := db.CreateProject(ctx, Project{
+		ID: "asset-source-project", OwnerUserID: "user-1", Name: "资产来源",
+		Status: "active", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("创建项目失败: %v", err)
+	}
+	item := Asset{
+		ID: "asset-source", ProjectID: "asset-source-project", OwnerUserID: "user-1",
+		Name: "来源测试", Kind: "url", Value: "https://source.example.com",
+		Status: "active", Source: AssetSourceManual, Criticality: "medium",
+		CreatedAt: now, UpdatedAt: now,
+	}
+	if err := db.CreateAsset(ctx, item); err != nil {
+		t.Fatalf("创建资产失败: %v", err)
+	}
+	stored, err := db.GetAsset(ctx, item.ID, item.OwnerUserID)
+	if err != nil || stored.Source != AssetSourceManual {
+		t.Fatalf("资产来源未持久化: %+v err=%v", stored, err)
+	}
+
+	item.Name = "来源不可改写"
+	item.Source = AssetSourceHunter
+	item.UpdatedAt = now.Add(time.Minute)
+	if err := db.UpdateAsset(ctx, item); err != nil {
+		t.Fatalf("更新资产失败: %v", err)
+	}
+	stored, err = db.GetAsset(ctx, item.ID, item.OwnerUserID)
+	if err != nil || stored.Source != AssetSourceManual {
+		t.Fatalf("资产编辑不应改写来源: %+v err=%v", stored, err)
+	}
+
+	if got := NormalizeAssetSource("fofa,hunter"); got != AssetSourceFOFAHunter {
+		t.Fatalf("组合情报来源规范化错误: %s", got)
+	}
+	if got := NormalizeAssetSource(""); got != AssetSourceUnknown {
+		t.Fatalf("空来源应回退为历史/未知: %s", got)
+	}
+}
+
+func TestOpenMigratesLegacyAssetsToUnknownSource(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy-asset-source.db")
+	legacy, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatalf("打开旧数据库失败: %v", err)
+	}
+	now := time.Now().UTC().Unix()
+	if _, err := legacy.Exec(`
+		CREATE TABLE assets (
+			id TEXT PRIMARY KEY,
+			project_id TEXT NOT NULL DEFAULT '',
+			owner_user_id TEXT NOT NULL,
+			name TEXT NOT NULL,
+			kind TEXT NOT NULL,
+			value TEXT NOT NULL,
+			status TEXT NOT NULL DEFAULT 'unknown',
+			criticality TEXT NOT NULL DEFAULT 'medium',
+			risk_score INTEGER NOT NULL DEFAULT 0,
+			created_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL
+		);
+		INSERT INTO assets (
+			id, project_id, owner_user_id, name, kind, value, status,
+			criticality, risk_score, created_at, updated_at
+		) VALUES (
+			'asset-legacy-source', '', 'user-1', '历史资产',
+			'domain', 'legacy.example.com', 'active', 'medium', 0, ?, ?
+		)
+	`, now, now); err != nil {
+		_ = legacy.Close()
+		t.Fatalf("创建旧资产表失败: %v", err)
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatalf("关闭旧数据库失败: %v", err)
+	}
+
+	db, err := Open(path)
+	if err != nil {
+		t.Fatalf("迁移旧数据库失败: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	asset, err := db.GetAsset(context.Background(), "asset-legacy-source", "user-1")
+	if err != nil {
+		t.Fatalf("读取迁移后的资产失败: %v", err)
+	}
+	if asset.Source != AssetSourceUnknown {
+		t.Fatalf("旧资产来源应迁移为历史/未知: %+v", asset)
 	}
 }
 
