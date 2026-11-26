@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -76,8 +77,15 @@ func optionalAgentMode(c *gin.Context) (string, bool, error) {
 func (h *ChatHandler) resolveConversationAgentMode(
 	ctx context.Context,
 	conversationID string,
+	executionLane string,
 	requested string,
 ) (string, error) {
+	switch strings.TrimSpace(executionLane) {
+	case database.ConversationLaneCoordinated:
+		return agentpkg.ParseAgentMode("deep")
+	case database.ConversationLaneFast:
+		return agentpkg.ParseAgentMode("fast")
+	}
 	if strings.TrimSpace(requested) != "" {
 		return agentpkg.ParseAgentMode(requested)
 	}
@@ -177,6 +185,55 @@ func (h *ChatHandler) CreateConversation(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusCreated, conversationResponse(conversation))
+}
+
+func (h *ChatHandler) EnsureAgentConversations(c *gin.Context) {
+	user := middleware.UserFromContext(c)
+	if user == nil {
+		unauthorized(c)
+		return
+	}
+	projectID := strings.TrimSpace(c.Param("id"))
+	if projectID == "" {
+		badRequest(c, "project_required", "缺少项目 ID")
+		return
+	}
+	if _, err := h.db.GetActiveProject(c.Request.Context(), projectID, user.ID); err != nil {
+		if errors.Is(err, database.ErrProjectInactive) {
+			c.JSON(http.StatusConflict, gin.H{
+				"code":    "project_inactive",
+				"message": err.Error(),
+			})
+			return
+		}
+		badRequest(c, "invalid_project", "项目不存在或无权访问")
+		return
+	}
+	lanes, err := h.db.EnsureAgentLaneConversations(c.Request.Context(), user.ID, projectID)
+	if err != nil {
+		internalError(c, "ensure_agent_conversations_failed", "创建主 Agent 会话失败")
+		return
+	}
+	if err := h.db.AddAuditLog(c.Request.Context(), database.AuditLog{
+		UserID:       user.ID,
+		Username:     user.Username,
+		Action:       "conversation.agent_lanes.ensure",
+		ResourceType: "project",
+		ResourceID:   projectID,
+		Result:       "success",
+		Detail:       strings.Join(lanes.Changes, "; "),
+	}); err != nil {
+		log.Printf(
+			"agent lanes: 写入通道初始化审计失败 project=%s user=%s: %v",
+			projectID,
+			user.ID,
+			err,
+		)
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"coordinated": conversationResponse(*lanes.Coordinated),
+		"fast":        conversationResponse(*lanes.Fast),
+	})
 }
 
 func (h *ChatHandler) UpdateConversationProject(c *gin.Context) {
@@ -445,6 +502,10 @@ func (h *ChatHandler) SetConversationAgentSettings(c *gin.Context) {
 	}
 	agentMode := ""
 	if request.AgentMode != nil {
+		if strings.TrimSpace(conversation.ExecutionLane) != "" {
+			badRequest(c, "agent_mode_locked", "固定主 Agent 会话不能修改执行通道")
+			return
+		}
 		agentMode = strings.TrimSpace(*request.AgentMode)
 		if agentMode != "" {
 			normalized, err := agentpkg.ParseAgentMode(agentMode)
@@ -592,17 +653,34 @@ func (h *ChatHandler) Resume(c *gin.Context) {
 	if modeProvided {
 		agentMode = requestedMode
 	}
-	agentMode, err = agentpkg.ParseAgentMode(agentMode)
+	agentMode, err = h.resolveConversationAgentMode(
+		c.Request.Context(),
+		conversation.ID,
+		conversation.ExecutionLane,
+		agentMode,
+	)
 	if err != nil {
 		internalError(c, "invalid_resumable_agent_mode", "可恢复任务的 Agent 模式不合法")
 		return
 	}
-	taskItem, occupiedTaskID, err := h.manager.CreateIfIdle(conversation.ID, user.ID)
+	taskItem, occupiedTaskID, err := h.manager.CreateIfIdleScoped(
+		conversation.ID,
+		user.ID,
+		conversation.ProjectID,
+	)
 	if err != nil {
 		if errors.Is(err, task.ErrUserTaskLimit) {
 			c.JSON(http.StatusTooManyRequests, gin.H{
 				"code":    "agent_concurrency_limit",
 				"message": "当前用户同时运行的 Agent 任务已达上限，请等待任务完成",
+			})
+			return
+		}
+		if errors.Is(err, task.ErrProjectBusy) {
+			c.JSON(http.StatusConflict, gin.H{
+				"code":    "project_agent_busy",
+				"message": "该项目已有主 Agent 任务在运行，请等待完成或停止",
+				"taskId":  occupiedTaskID,
 			})
 			return
 		}
@@ -1171,18 +1249,31 @@ func (h *ChatHandler) Stream(c *gin.Context) {
 	agentMode, err := h.resolveConversationAgentMode(
 		c.Request.Context(),
 		conversation.ID,
+		conversation.ExecutionLane,
 		request.AgentMode,
 	)
 	if err != nil {
 		badRequest(c, "invalid_agent_mode", err.Error())
 		return
 	}
-	taskItem, occupiedTaskID, err := h.manager.CreateIfIdle(conversation.ID, user.ID)
+	taskItem, occupiedTaskID, err := h.manager.CreateIfIdleScoped(
+		conversation.ID,
+		user.ID,
+		conversation.ProjectID,
+	)
 	if err != nil {
 		if errors.Is(err, task.ErrUserTaskLimit) {
 			c.JSON(http.StatusTooManyRequests, gin.H{
 				"code":    "agent_concurrency_limit",
 				"message": "当前用户同时运行的 Agent 任务已达上限，请等待任务完成",
+			})
+			return
+		}
+		if errors.Is(err, task.ErrProjectBusy) {
+			c.JSON(http.StatusConflict, gin.H{
+				"code":    "project_agent_busy",
+				"message": "该项目已有主 Agent 任务在运行，请等待完成或停止",
+				"taskId":  occupiedTaskID,
 			})
 			return
 		}
@@ -1385,18 +1476,35 @@ func (h *ChatHandler) Regenerate(c *gin.Context) {
 			agentMode = previousRun.AgentMode
 		}
 	}
-	agentMode, err = agentpkg.ParseAgentMode(agentMode)
+	agentMode, err = h.resolveConversationAgentMode(
+		c.Request.Context(),
+		conversation.ID,
+		conversation.ExecutionLane,
+		agentMode,
+	)
 	if err != nil {
 		internalError(c, "invalid_previous_agent_mode", "上一轮 Agent 模式不合法")
 		return
 	}
 
-	taskItem, occupiedTaskID, err := h.manager.CreateIfIdle(conversation.ID, user.ID)
+	taskItem, occupiedTaskID, err := h.manager.CreateIfIdleScoped(
+		conversation.ID,
+		user.ID,
+		conversation.ProjectID,
+	)
 	if err != nil {
 		if errors.Is(err, task.ErrUserTaskLimit) {
 			c.JSON(http.StatusTooManyRequests, gin.H{
 				"code":    "agent_concurrency_limit",
 				"message": "当前用户同时运行的 Agent 任务已达上限，请等待任务完成",
+			})
+			return
+		}
+		if errors.Is(err, task.ErrProjectBusy) {
+			c.JSON(http.StatusConflict, gin.H{
+				"code":    "project_agent_busy",
+				"message": "该项目已有主 Agent 任务在运行，请等待完成或停止",
+				"taskId":  occupiedTaskID,
 			})
 			return
 		}
@@ -2008,6 +2116,7 @@ func conversationResponse(conversation database.Conversation) gin.H {
 		"id":                   conversation.ID,
 		"projectId":            conversation.ProjectID,
 		"assetId":              conversation.AssetID,
+		"executionLane":        conversation.ExecutionLane,
 		"kind":                 conversation.Kind,
 		"parentConversationId": conversation.ParentConversationID,
 		"batchId":              conversation.BatchID,

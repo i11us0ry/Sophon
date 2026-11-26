@@ -160,8 +160,8 @@ func TestAgentRoleListIncludesMandatoryInternalAgentsOnDemand(t *testing.T) {
 		t.Fatalf("普通列表应只返回 Task Profile: %+v", normalItems)
 	}
 	items := readItems("/api/agent-roles?includeInternal=true")
-	if len(items) != 9 {
-		t.Fatalf("角色管理应返回普通角色和八个系统 Agent: %+v", items)
+	if len(items) != 8 {
+		t.Fatalf("角色管理应返回普通角色和七个系统 Agent: %+v", items)
 	}
 	if !items[0].Internal || !items[1].Internal || !items[2].Internal {
 		t.Fatalf("系统 Agent 应优先展示: %+v", items)
@@ -204,8 +204,8 @@ func TestAgentRoleListIncludesMandatoryInternalAgentsOnDemand(t *testing.T) {
 			}
 		}
 	}
-	if internal != 8 {
-		t.Fatalf("应返回八个系统 Agent，实际 %d", internal)
+	if internal != 7 {
+		t.Fatalf("应返回七个系统 Agent，实际 %d", internal)
 	}
 	if editable != 2 {
 		t.Fatalf("应返回两个可编辑系统 Agent，实际 %d", editable)
@@ -225,7 +225,6 @@ func TestReadOnlySystemAgentsCannotBeEditedDisabledOrDeleted(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	for _, id := range []string{
 		agentpkg.SystemMainAgentID,
-		agentpkg.SystemReportAgentID,
 		agentpkg.SystemRetestAgentID,
 		agentpkg.SystemMissionPolicyAgentID,
 		agentpkg.SystemDeepPathPlannerID,

@@ -126,6 +126,24 @@ func TestConversationAgentSettingsAndStop(t *testing.T) {
 	if mode, err := db.GetConversationAgentMode(ctx, "conv-agent-settings"); err != nil || mode != "fast" {
 		t.Fatalf("Agent 模式未持久化: mode=%q err=%v", mode, err)
 	}
+	if _, err := db.ExecContext(
+		ctx,
+		`UPDATE conversations SET execution_lane = ? WHERE id = ?`,
+		database.ConversationLaneFast,
+		"conv-agent-settings",
+	); err != nil {
+		t.Fatalf("设置固定执行通道失败: %v", err)
+	}
+	locked := call(
+		http.MethodPut,
+		"/api/conversations/conv-agent-settings/agent-settings",
+		`{"agentMode":"deep"}`,
+		handler.SetConversationAgentSettings,
+	)
+	if locked.Code != http.StatusBadRequest ||
+		!strings.Contains(locked.Body.String(), `"code":"agent_mode_locked"`) {
+		t.Fatalf("固定执行通道不能切换模式: status=%d body=%s", locked.Code, locked.Body.String())
+	}
 
 	taskItem, _, err := manager.CreateIfIdle("conv-agent-settings", "user-1")
 	if err != nil {
@@ -169,23 +187,39 @@ func TestResolveConversationAgentModePriority(t *testing.T) {
 	}
 	handler := &ChatHandler{db: db}
 
-	if mode, err := handler.resolveConversationAgentMode(ctx, "conv-mode-priority", ""); err != nil ||
+	if mode, err := handler.resolveConversationAgentMode(ctx, "conv-mode-priority", "", ""); err != nil ||
 		mode != "deep" {
 		t.Fatalf("未保存模式时应默认协调模式: mode=%q err=%v", mode, err)
 	}
 	if err := db.SetConversationAgentMode(ctx, "conv-mode-priority", "fast"); err != nil {
 		t.Fatalf("保存会话模式失败: %v", err)
 	}
-	if mode, err := handler.resolveConversationAgentMode(ctx, "conv-mode-priority", ""); err != nil ||
+	if mode, err := handler.resolveConversationAgentMode(ctx, "conv-mode-priority", "", ""); err != nil ||
 		mode != "fast" {
 		t.Fatalf("请求未指定模式时应使用会话保存值: mode=%q err=%v", mode, err)
 	}
-	if mode, err := handler.resolveConversationAgentMode(ctx, "conv-mode-priority", "deep"); err != nil ||
+	if mode, err := handler.resolveConversationAgentMode(ctx, "conv-mode-priority", "", "deep"); err != nil ||
 		mode != "deep" {
 		t.Fatalf("显式请求模式应覆盖会话保存值: mode=%q err=%v", mode, err)
 	}
-	if mode, err := handler.resolveConversationAgentMode(ctx, "conv-mode-priority", "AUTO"); err != nil ||
+	if mode, err := handler.resolveConversationAgentMode(ctx, "conv-mode-priority", "", "AUTO"); err != nil ||
 		mode != "deep" {
 		t.Fatalf("旧 auto 值应兼容为协调模式: mode=%q err=%v", mode, err)
+	}
+	if mode, err := handler.resolveConversationAgentMode(
+		ctx,
+		"conv-mode-priority",
+		database.ConversationLaneCoordinated,
+		"fast",
+	); err != nil || mode != "deep" {
+		t.Fatalf("协调通道必须忽略请求中的 Fast 模式: mode=%q err=%v", mode, err)
+	}
+	if mode, err := handler.resolveConversationAgentMode(
+		ctx,
+		"conv-mode-priority",
+		database.ConversationLaneFast,
+		"deep",
+	); err != nil || mode != "fast" {
+		t.Fatalf("Fast 通道必须忽略请求中的协调模式: mode=%q err=%v", mode, err)
 	}
 }

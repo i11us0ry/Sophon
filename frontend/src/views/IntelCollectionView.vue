@@ -99,6 +99,13 @@ const historyPagination = reactive({
   totalPages: 1,
 })
 
+const resultPagination = reactive({
+  page: 1,
+  pageSize: 20,
+  total: 0,
+  totalPages: 1,
+})
+
 const providers = computed(() => [
   { value: 'all', label: t('intel.providerAll') },
   { value: 'fofa', label: 'FOFA' },
@@ -121,6 +128,11 @@ const queryEnabled = computed(() => {
 const selectedProjectID = computed(() => selected.value?.projectId || form.projectId)
 const currentResultCount = computed(() => selected.value?.resultCount ?? 0)
 const queryExpanded = computed(() => queryFocused.value)
+const pagedResults = computed(() => {
+  const results = selected.value?.results ?? []
+  const start = (resultPagination.page - 1) * resultPagination.pageSize
+  return results.slice(start, start + resultPagination.pageSize)
+})
 
 async function loadProjects() {
   const loaded: Project[] = []
@@ -202,6 +214,7 @@ async function loadDetail(id: string) {
     selected.value = await apiGet<IntelSearchDetail>(
       `/intel/searches/${encodeURIComponent(id)}`,
     )
+    resetResultPagination()
   } catch (err) {
     error.value = err instanceof Error ? err.message : t('intel.detailLoadFailed')
   } finally {
@@ -236,6 +249,7 @@ async function runSearch() {
       start_time: form.startTime,
     })
     selected.value = response
+    resetResultPagination()
     if (response.persisted === false) {
       warning.value = response.persistWarning || t('intel.persistWarning')
     } else {
@@ -359,6 +373,33 @@ function projectName(projectID: string) {
 function changeHistoryPage(page: number) {
   historyPagination.page = page
   void loadHistory()
+}
+
+function resetResultPagination() {
+  resultPagination.page = 1
+  syncResultPagination()
+}
+
+function syncResultPagination() {
+  resultPagination.total = selected.value?.results.length ?? 0
+  resultPagination.totalPages = Math.max(
+    1,
+    Math.ceil(resultPagination.total / resultPagination.pageSize),
+  )
+  if (resultPagination.page > resultPagination.totalPages) {
+    resultPagination.page = resultPagination.totalPages
+  }
+}
+
+function changeResultPage(page: number) {
+  resultPagination.page = page
+  syncResultPagination()
+}
+
+function changeResultPageSize(pageSize: number) {
+  resultPagination.pageSize = pageSize
+  resultPagination.page = 1
+  syncResultPagination()
 }
 
 function applyProjectFilter() {
@@ -648,7 +689,10 @@ onMounted(async () => {
               </tr>
             </thead>
             <tbody>
-              <tr v-for="(item, index) in selected.results" :key="`${resultTarget(item)}-${index}`">
+              <tr
+                v-for="(item, index) in pagedResults"
+                :key="`${resultTarget(item)}-${resultPagination.page}-${index}`"
+              >
                 <td><span class="intel-source-badge">{{ resultSources(item) }}</span></td>
                 <td>
                   <div class="intel-target-cell">
@@ -664,6 +708,15 @@ onMounted(async () => {
             </tbody>
           </table>
         </div>
+        <DataPagination
+          v-if="selected && resultPagination.total > 0"
+          :total="resultPagination.total"
+          :page="resultPagination.page"
+          :page-size="resultPagination.pageSize"
+          :total-pages="resultPagination.totalPages"
+          @page-change="changeResultPage"
+          @page-size-change="changeResultPageSize"
+        />
       </div>
     </section>
   </section>

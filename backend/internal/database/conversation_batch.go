@@ -429,16 +429,18 @@ func insertConversationTx(ctx context.Context, tx *sql.Tx, conversation Conversa
 	if conversation.Kind == "" {
 		conversation.Kind = "normal"
 	}
+	conversation.ExecutionLane = strings.TrimSpace(conversation.ExecutionLane)
 	_, err := tx.ExecContext(
 		ctx,
 		`INSERT INTO conversations (
-			id, owner_user_id, project_id, asset_id, kind, parent_conversation_id,
+			id, owner_user_id, project_id, asset_id, execution_lane, kind, parent_conversation_id,
 			batch_id, agent_role_id, title, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		conversation.ID,
 		conversation.OwnerUserID,
 		conversation.ProjectID,
 		conversation.AssetID,
+		conversation.ExecutionLane,
 		conversation.Kind,
 		conversation.ParentConversationID,
 		conversation.BatchID,

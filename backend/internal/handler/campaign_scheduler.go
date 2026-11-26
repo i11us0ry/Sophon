@@ -474,12 +474,16 @@ func (s *CampaignScheduler) runTask(
 
 	var taskItem *task.Task
 	for {
-		created, _, err := s.chat.manager.CreateIfIdle(item.ConversationID, userID)
+		created, _, err := s.chat.manager.CreateIfIdleScoped(
+			item.ConversationID,
+			userID,
+			item.ProjectID,
+		)
 		if err == nil {
 			taskItem = created
 			break
 		}
-		if !errors.Is(err, task.ErrUserTaskLimit) {
+		if !errors.Is(err, task.ErrUserTaskLimit) && !errors.Is(err, task.ErrProjectBusy) {
 			_ = s.db.CompleteCampaignTask(
 				context.Background(),
 				item.ID,

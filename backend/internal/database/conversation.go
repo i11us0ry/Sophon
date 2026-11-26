@@ -23,6 +23,7 @@ type Conversation struct {
 	OwnerUserID          string
 	ProjectID            string    `json:"projectId"`
 	AssetID              string    `json:"assetId"`
+	ExecutionLane        string    `json:"executionLane,omitempty"`
 	Kind                 string    `json:"kind"`
 	ParentConversationID string    `json:"parentConversationId"`
 	BatchID              string    `json:"batchId"`
@@ -61,18 +62,20 @@ func (db *DB) CreateConversation(ctx context.Context, conversation Conversation)
 	if conversation.Kind == "" {
 		conversation.Kind = "normal"
 	}
+	conversation.ExecutionLane = strings.TrimSpace(conversation.ExecutionLane)
 	conversation.ParentConversationID = strings.TrimSpace(conversation.ParentConversationID)
 	conversation.BatchID = strings.TrimSpace(conversation.BatchID)
 	_, err := db.ExecContext(
 		ctx,
 		`INSERT INTO conversations (
-			id, owner_user_id, project_id, asset_id, kind, parent_conversation_id,
+			id, owner_user_id, project_id, asset_id, execution_lane, kind, parent_conversation_id,
 			batch_id, agent_role_id, title, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		conversation.ID,
 		conversation.OwnerUserID,
 		conversation.ProjectID,
 		conversation.AssetID,
+		conversation.ExecutionLane,
 		conversation.Kind,
 		conversation.ParentConversationID,
 		conversation.BatchID,
@@ -103,7 +106,7 @@ func (db *DB) ListConversationsPage(
 		limit = 50
 	}
 
-	query := `SELECT id, owner_user_id, project_id, asset_id, kind, parent_conversation_id,
+	query := `SELECT id, owner_user_id, project_id, asset_id, execution_lane, kind, parent_conversation_id,
 			batch_id, agent_role_id, title, created_at, updated_at,
 			(SELECT COUNT(*) FROM conversations child
 			 WHERE child.owner_user_id = conversations.owner_user_id
@@ -154,6 +157,7 @@ func (db *DB) ListConversationsPage(
 			&item.OwnerUserID,
 			&item.ProjectID,
 			&item.AssetID,
+			&item.ExecutionLane,
 			&item.Kind,
 			&item.ParentConversationID,
 			&item.BatchID,
@@ -186,7 +190,7 @@ func (db *DB) GetConversation(ctx context.Context, id, ownerUserID string) (*Con
 	var updatedAt int64
 	err := db.QueryRowContext(
 		ctx,
-		`SELECT id, owner_user_id, project_id, asset_id, kind, parent_conversation_id,
+		`SELECT id, owner_user_id, project_id, asset_id, execution_lane, kind, parent_conversation_id,
 			batch_id, agent_role_id, title, created_at, updated_at,
 			(SELECT COUNT(*) FROM conversations child
 			 WHERE child.owner_user_id = conversations.owner_user_id
@@ -200,6 +204,7 @@ func (db *DB) GetConversation(ctx context.Context, id, ownerUserID string) (*Con
 		&item.OwnerUserID,
 		&item.ProjectID,
 		&item.AssetID,
+		&item.ExecutionLane,
 		&item.Kind,
 		&item.ParentConversationID,
 		&item.BatchID,
@@ -348,7 +353,7 @@ func (db *DB) ListConversationChildren(
 
 	rows, err := db.QueryContext(
 		ctx,
-		`SELECT id, owner_user_id, project_id, asset_id, kind, parent_conversation_id,
+		`SELECT id, owner_user_id, project_id, asset_id, execution_lane, kind, parent_conversation_id,
 			batch_id, agent_role_id, title, created_at, updated_at
 		 FROM conversations
 		 WHERE owner_user_id = ? AND parent_conversation_id = ?
@@ -374,6 +379,7 @@ func (db *DB) ListConversationChildren(
 			&item.OwnerUserID,
 			&item.ProjectID,
 			&item.AssetID,
+			&item.ExecutionLane,
 			&item.Kind,
 			&item.ParentConversationID,
 			&item.BatchID,

@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"strings"
 	"sync"
 	"time"
 )
@@ -22,6 +23,7 @@ const defaultMaxRunningPerUser = 5
 
 var (
 	ErrConversationBusy = errors.New("该对话已有任务在运行")
+	ErrProjectBusy      = errors.New("该项目已有 Agent 任务在运行")
 	ErrUserTaskLimit    = errors.New("当前用户运行中的任务已达上限")
 )
 
@@ -47,6 +49,7 @@ type Task struct {
 	id             string
 	conversationID string
 	userID         string
+	scopeID        string
 	status         Status
 	errText        string
 	createdAt      time.Time
@@ -99,6 +102,23 @@ func (m *Manager) SetMaxPerUser(maxPerUser int) {
 
 // CreateIfIdle 在会话和用户并发额度均可用时创建任务。
 func (m *Manager) CreateIfIdle(conversationID, userID string) (*Task, string, error) {
+	return m.createIfIdle(conversationID, userID, "")
+}
+
+// CreateIfIdleScoped 在会话、用户额度和非空执行域均空闲时创建任务。
+func (m *Manager) CreateIfIdleScoped(
+	conversationID string,
+	userID string,
+	scopeID string,
+) (*Task, string, error) {
+	return m.createIfIdle(conversationID, userID, strings.TrimSpace(scopeID))
+}
+
+func (m *Manager) createIfIdle(
+	conversationID string,
+	userID string,
+	scopeID string,
+) (*Task, string, error) {
 	m.mu.Lock()
 	runningForUser := 0
 	for id, existing := range m.tasks {
@@ -106,6 +126,12 @@ func (m *Manager) CreateIfIdle(conversationID, userID string) (*Task, string, er
 		if snapshot.ConversationID == conversationID && snapshot.Status == StatusRunning {
 			m.mu.Unlock()
 			return nil, id, ErrConversationBusy
+		}
+		if scopeID != "" &&
+			existing.scopeID == scopeID &&
+			snapshot.Status == StatusRunning {
+			m.mu.Unlock()
+			return nil, id, ErrProjectBusy
 		}
 		if snapshot.UserID == userID && snapshot.Status == StatusRunning {
 			runningForUser++
@@ -115,7 +141,7 @@ func (m *Manager) CreateIfIdle(conversationID, userID string) (*Task, string, er
 		m.mu.Unlock()
 		return nil, "", ErrUserTaskLimit
 	}
-	item := newTask(conversationID, userID)
+	item := newTask(conversationID, userID, scopeID)
 	m.tasks[item.id] = item
 	m.mu.Unlock()
 
@@ -207,13 +233,14 @@ func (m *Manager) CancelAll() int {
 }
 
 // newTask 构造运行态任务，由调用方负责注册进 Manager。
-func newTask(conversationID, userID string) *Task {
+func newTask(conversationID, userID, scopeID string) *Task {
 	ctx, cancel := context.WithCancel(context.Background())
 	now := time.Now().UTC()
 	return &Task{
 		id:             randomID(),
 		conversationID: conversationID,
 		userID:         userID,
+		scopeID:        scopeID,
 		status:         StatusRunning,
 		createdAt:      now,
 		updatedAt:      now,

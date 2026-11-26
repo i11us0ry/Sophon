@@ -22,6 +22,7 @@ type AgentRun struct {
 	ConversationID     string    `json:"conversationId"`
 	AssistantMessageID string    `json:"assistantMessageId"`
 	ResumeOf           string    `json:"resumeOf"`
+	ExecutionLane      string    `json:"executionLane,omitempty"`
 	AgentMode          string    `json:"agentMode"`
 	Status             string    `json:"status"`
 	SegmentCount       int       `json:"segmentCount"`
@@ -52,14 +53,15 @@ func (db *DB) CreateAgentRun(ctx context.Context, run AgentRun) error {
 	_, err := db.ExecContext(
 		ctx,
 		`INSERT INTO agent_runs (
-			id, conversation_id, assistant_message_id, resume_of, agent_mode, status,
+			id, conversation_id, assistant_message_id, resume_of, execution_lane, agent_mode, status,
 			segment_count, progress_json, interruption_reason, error,
 			started_at, updated_at, finished_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', '', ?, ?, NULL)`,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', '', ?, ?, NULL)`,
 		run.ID,
 		run.ConversationID,
 		run.AssistantMessageID,
 		run.ResumeOf,
+		strings.TrimSpace(run.ExecutionLane),
 		run.AgentMode,
 		run.Status,
 		run.SegmentCount,
@@ -133,7 +135,7 @@ func (db *DB) GetLatestAgentRun(
 ) (*AgentRun, error) {
 	row := db.QueryRowContext(
 		ctx,
-		`SELECT id, conversation_id, assistant_message_id, resume_of, agent_mode, status,
+		`SELECT id, conversation_id, assistant_message_id, resume_of, execution_lane, agent_mode, status,
 			segment_count, progress_json, interruption_reason, error,
 			started_at, updated_at, COALESCE(finished_at, 0)
 		 FROM agent_runs
@@ -158,7 +160,7 @@ func (db *DB) GetResumableAgentRun(
 ) (*AgentRun, error) {
 	row := db.QueryRowContext(
 		ctx,
-		`SELECT id, conversation_id, assistant_message_id, resume_of, agent_mode, status,
+		`SELECT id, conversation_id, assistant_message_id, resume_of, execution_lane, agent_mode, status,
 			segment_count, progress_json, interruption_reason, error,
 			started_at, updated_at, COALESCE(finished_at, 0)
 		 FROM agent_runs
@@ -215,7 +217,7 @@ func (db *DB) MarkStaleAgentRunsInterrupted(
 ) ([]AgentRun, error) {
 	rows, err := db.QueryContext(
 		ctx,
-		`SELECT id, conversation_id, assistant_message_id, resume_of, agent_mode, status,
+		`SELECT id, conversation_id, assistant_message_id, resume_of, execution_lane, agent_mode, status,
 			segment_count, progress_json, interruption_reason, error,
 			started_at, updated_at, COALESCE(finished_at, 0)
 		 FROM agent_runs
@@ -286,6 +288,7 @@ func scanAgentRun(row agentRunScanner) (*AgentRun, error) {
 		&item.ConversationID,
 		&item.AssistantMessageID,
 		&item.ResumeOf,
+		&item.ExecutionLane,
 		&item.AgentMode,
 		&item.Status,
 		&item.SegmentCount,

@@ -19,6 +19,7 @@ func TestRoutePermissionForAttachments(t *testing.T) {
 		{http.MethodGet, "/api/projects/project-1/assets", "asset:read"},
 		{http.MethodGet, "/api/projects/project-1/graph", "vulnerability:read"},
 		{http.MethodPost, "/api/projects/project-1/graph/sync", "vulnerability:write"},
+		{http.MethodPost, "/api/projects/project-1/agent-conversations", "chat:write"},
 		{http.MethodGet, "/api/vulnerabilities/vuln-1/retests", "vulnerability:read"},
 		{http.MethodPost, "/api/vulnerabilities/vuln-1/retest", "vulnerability:write"},
 		{http.MethodGet, "/api/agent-roles", "agentRole:read"},

@@ -190,3 +190,31 @@ func TestPublishDoesNotDropEvents(t *testing.T) {
 	}
 	taskItem.Complete()
 }
+
+func TestManagerEnforcesProjectScope(t *testing.T) {
+	manager := NewManagerWithLimit(5)
+	first, occupied, err := manager.CreateIfIdleScoped("conv-lane-a", "user-1", "project-1")
+	if err != nil || first == nil || occupied != "" {
+		t.Fatalf("创建项目作用域任务失败: task=%v occupied=%q err=%v", first, occupied, err)
+	}
+	if _, busyID, err := manager.CreateIfIdleScoped(
+		"conv-lane-b",
+		"user-1",
+		"project-1",
+	); !errors.Is(err, ErrProjectBusy) || busyID != first.ID() {
+		t.Fatalf("同项目第二会话应被项目互斥拒绝: busy=%q err=%v", busyID, err)
+	}
+	other, _, err := manager.CreateIfIdleScoped("conv-lane-c", "user-1", "project-2")
+	if err != nil {
+		t.Fatalf("不同项目应允许并发: %v", err)
+	}
+	other.Complete()
+	first.Complete()
+	if _, _, err := manager.CreateIfIdleScoped(
+		"conv-lane-b",
+		"user-1",
+		"project-1",
+	); err != nil {
+		t.Fatalf("项目空闲后应允许新任务: %v", err)
+	}
+}

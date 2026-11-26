@@ -31,17 +31,6 @@ func TestSystemAgentRolesSeedCanonicalIdentityAndPrompt(t *testing.T) {
 	if SystemAgentEditableForRole(*mainRole) || SystemAgentDisableableForRole(*mainRole) {
 		t.Fatalf("主 Agent 必须只读且不可停用")
 	}
-	reportRole, err := db.GetAgentRole(ctx, SystemReportAgentID)
-	if err != nil {
-		t.Fatalf("读取报告生成 Agent 失败: %v", err)
-	}
-	if reportRole.Name != SystemReportAgentName || !reportRole.Enabled || !reportRole.Builtin ||
-		reportRole.Prompt != reportAgentPrompt || reportRole.Icon != "📄" {
-		t.Fatalf("报告生成 Agent 初始状态错误: %+v", reportRole)
-	}
-	if SystemAgentEditableForRole(*reportRole) {
-		t.Fatalf("报告生成 Agent 必须只读")
-	}
 	retestRole, err := db.GetAgentRole(ctx, SystemRetestAgentID)
 	if err != nil {
 		t.Fatalf("读取漏洞复测 Agent 失败: %v", err)
@@ -155,6 +144,41 @@ func TestEditableVulnerabilityReviewerPromptPersists(t *testing.T) {
 	}
 	if !SystemAgentDisableableForRole(*stored) {
 		t.Fatalf("漏洞审核角色应允许停用")
+	}
+}
+
+func TestVulnerabilityReviewerPromptUpgradesLegacySixCategorySeed(t *testing.T) {
+	db, err := database.Open(filepath.Join(t.TempDir(), "vulnerability-reviewer-pagination.db"))
+	if err != nil {
+		t.Fatalf("打开数据库失败: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ctx := context.Background()
+	if err := EnsureSystemAgentRoles(ctx, db); err != nil {
+		t.Fatalf("初始化系统 Agent 失败: %v", err)
+	}
+	role, err := db.GetAgentRole(ctx, SystemVulnerabilityReviewerID)
+	if err != nil {
+		t.Fatalf("读取漏洞审核 Agent 失败: %v", err)
+	}
+	legacyPrompt := "你是独立的漏洞审核 Agent。\n审核规则：\n" +
+		"2. 只允许拒绝以下六类漏洞：\n" +
+		"   - self_xss\n   - cleartext_password\n   - cors_misconfiguration\n" +
+		"   - version_fingerprint\n   - internal_topology\n   - nonsensitive_information"
+	role.Prompt = legacyPrompt
+	if err := db.UpdateAgentRole(ctx, *role); err != nil {
+		t.Fatalf("写入旧版审核 Prompt 失败: %v", err)
+	}
+	if err := EnsureSystemAgentRoles(ctx, db); err != nil {
+		t.Fatalf("升级旧版审核 Prompt 失败: %v", err)
+	}
+	upgraded, err := db.GetAgentRole(ctx, SystemVulnerabilityReviewerID)
+	if err != nil {
+		t.Fatalf("读取升级后的审核 Agent 失败: %v", err)
+	}
+	if upgraded.Prompt != vulnerabilityReviewerPrompt ||
+		!strings.Contains(upgraded.Prompt, "pagination_limit_bypass") {
+		t.Fatalf("旧版审核 Prompt 未升级: %+v", upgraded)
 	}
 }
 
@@ -525,34 +549,37 @@ func TestPlannerAndWorkerUseDivergentThinkingWithoutFixedWorkflow(t *testing.T) 
 	}
 }
 
-func TestReportAgentPromptContainsExportContract(t *testing.T) {
-	if len([]rune(reportAgentPrompt)) < 3000 {
-		t.Fatalf("报告生成 Agent Prompt 过短: %d", len([]rune(reportAgentPrompt)))
+func TestSystemAgentRolesRetireLegacyReportAgent(t *testing.T) {
+	db, err := database.Open(filepath.Join(t.TempDir(), "legacy-report-agent.db"))
+	if err != nil {
+		t.Fatalf("打开数据库失败: %v", err)
 	}
-	for _, phrase := range []string{
-		"基本边界",
-		"数据来源",
-		"总体信息架构",
-		"主报告 + 漏洞卡片 + 证据附录",
-		"VUL-YYYY-001",
-		"第5章先按严重程度分组",
-		"漏洞卡片",
-		"证据分层",
-		"附录A 证据索引",
-		"附录B 复现与IL证据",
-		"正文格式",
-		"white-space: pre-wrap",
-		"实际换行生成独立Word段落",
-		"代码围栏",
-		"版式规范",
-		"导出前质量检查",
-		"表格最多六列",
-		"上下页边距2.5厘米",
-		"证据索引",
-		"未经证据支持的安全结论",
-	} {
-		if !strings.Contains(reportAgentPrompt, phrase) {
-			t.Fatalf("报告生成 Agent Prompt 缺少关键契约 %q", phrase)
-		}
+	t.Cleanup(func() { _ = db.Close() })
+	now := time.Now().UTC()
+	if err := db.CreateAgentRole(t.Context(), database.AgentRole{
+		ID:          legacyReportAgentID,
+		Name:        "报告规范",
+		Description: "旧版报告规范",
+		Prompt:      "旧版报告规范 Prompt",
+		Icon:        "📄",
+		Builtin:     true,
+		Enabled:     true,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}); err != nil {
+		t.Fatalf("创建旧版报告规范 Agent 失败: %v", err)
+	}
+	if err := EnsureSystemAgentRoles(t.Context(), db); err != nil {
+		t.Fatalf("初始化系统 Agent 失败: %v", err)
+	}
+	if _, err := db.GetAgentRole(t.Context(), legacyReportAgentID); !database.NoRows(err) {
+		t.Fatalf("旧版报告规范应退出系统 Agent 列表: %v", err)
+	}
+	legacy, err := db.GetAgentRoleIncludingDeleted(t.Context(), legacyReportAgentID)
+	if err != nil {
+		t.Fatalf("读取旧版报告规范归档记录失败: %v", err)
+	}
+	if !legacy.Deleted || legacy.Enabled {
+		t.Fatalf("旧版报告规范应被软删除并停用: %+v", legacy)
 	}
 }

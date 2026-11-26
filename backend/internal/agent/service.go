@@ -898,6 +898,7 @@ func (s *Service) RunWithOptions(
 		ConversationID:     conversationID,
 		AssistantMessageID: assistantMessageID,
 		ResumeOf:           strings.TrimSpace(options.ResumeOf),
+		ExecutionLane:      conversation.ExecutionLane,
 		AgentMode:          agentMode,
 		Status:             database.AgentRunStatusRunning,
 		ProgressJSON:       string(initialProgress),

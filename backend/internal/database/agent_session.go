@@ -65,6 +65,14 @@ func EnsureCoreAgentSessions(ctx context.Context, db *DB, conversationID string)
 	if db == nil || strings.TrimSpace(conversationID) == "" {
 		return nil
 	}
+	var executionLane string
+	if err := db.QueryRowContext(
+		ctx,
+		`SELECT execution_lane FROM conversations WHERE id = ?`,
+		strings.TrimSpace(conversationID),
+	).Scan(&executionLane); err != nil {
+		return err
+	}
 	now := time.Now().UTC()
 	for _, item := range []struct {
 		role  string
@@ -74,6 +82,9 @@ func EnsureCoreAgentSessions(ctx context.Context, db *DB, conversationID string)
 		{AgentRolePlanner, "规划 Planner"},
 		{AgentRoleSystem, "系统事件"},
 	} {
+		if executionLane == ConversationLaneFast && item.role != AgentRoleMain {
+			continue
+		}
 		session := AgentSession{
 			ID:             AgentSessionID(conversationID, item.role, "", ""),
 			ConversationID: conversationID,

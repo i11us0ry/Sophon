@@ -123,6 +123,9 @@ func RoutePermission(method, path string) string {
 	case strings.HasPrefix(path, "/api/projects/") &&
 		strings.Contains(path, "/graph"):
 		return crudPermission(method, "vulnerability")
+	case strings.HasPrefix(path, "/api/projects/") &&
+		strings.HasSuffix(path, "/agent-conversations"):
+		return crudPermission(method, "chat")
 	case strings.HasPrefix(path, "/api/projects"):
 		if strings.HasPrefix(path, "/api/projects/batch-delete") {
 			return "project:delete"

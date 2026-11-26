@@ -33,6 +33,7 @@ export interface Conversation {
   title: string
   projectId?: string
   assetId?: string
+  executionLane?: 'coordinated' | 'fast' | ''
   kind?: 'normal' | 'batch_parent' | 'batch_child'
   parentConversationId?: string
   batchId?: string
@@ -221,6 +222,7 @@ export interface MessagePage {
 
 export interface AgentStep {
   id: string
+  createdAt?: string
   type:
     | 'reasoning'
     | 'thinking'
@@ -549,14 +551,36 @@ export const useChatStore = defineStore('chat', {
       }
       await this.loadZhiziAvailability()
       if (!this.currentConversationId && this.conversations.length > 0) {
-        await this.selectConversation(this.conversations[0].id)
+        const coordinated = this.conversations.find(
+          (item) => item.executionLane === 'coordinated',
+        )
+        await this.selectConversation((coordinated ?? this.conversations[0]).id)
       }
+    },
+    async ensureAgentLaneConversations(projectId: string) {
+      const targetProjectID = projectId.trim()
+      if (!targetProjectID) {
+        return null
+      }
+      const response = await apiPost<{
+        coordinated: Conversation
+        fast: Conversation
+      }>(`/projects/${targetProjectID}/agent-conversations`, {})
+      for (const conversation of [response.coordinated, response.fast]) {
+        const index = this.conversations.findIndex((item) => item.id === conversation.id)
+        if (index >= 0) {
+          this.conversations[index] = { ...this.conversations[index], ...conversation }
+        } else {
+          this.conversations.unshift(conversation)
+        }
+      }
+      return response
     },
     roleRequestPayload() {
       return this.rolesLoaded ? { roleId: this.selectedRoleId } : {}
     },
     agentModeRequestPayload() {
-      return { agentMode: this.agentMode }
+      return {}
     },
     selectTaskProfile(roleId: string) {
       this.selectedRoleId = roleId
@@ -676,6 +700,7 @@ export const useChatStore = defineStore('chat', {
       this.error = ''
       this.selectedRoleId = conversation?.agentRoleId ?? ''
       this.selectedProjectId = conversation?.projectId ?? ''
+      this.agentMode = conversation?.executionLane === 'fast' ? 'fast' : 'deep'
       await this.ensureProjectOption(this.selectedProjectId)
       this.responseText = ''
       this.liveSteps = []
@@ -1074,6 +1099,21 @@ export const useChatStore = defineStore('chat', {
         }
       }
     },
+    mergeAgentSessionSnapshot(sessions: AgentSession[], conversationId: string) {
+      const merged = new Map<string, AgentSession>()
+      for (const session of this.agentSessions) {
+        if (session.conversationId !== conversationId) {
+          merged.set(session.id, session)
+        }
+      }
+      for (const session of sessions) {
+        merged.set(session.id, {
+          ...session,
+          conversationId: session.conversationId || conversationId,
+        })
+      }
+      this.agentSessions = [...merged.values()]
+    },
     async loadAgentSessions() {
       const conversationId = this.currentConversationId
       if (!conversationId) {
@@ -1081,11 +1121,39 @@ export const useChatStore = defineStore('chat', {
         return
       }
       try {
-        const response = await apiGet<{ items: AgentSession[] }>(
-          `/conversations/${conversationId}/agent-sessions`,
+        const current = this.conversations.find((item) => item.id === conversationId)
+        const conversationIDs = [conversationId]
+        if (current?.executionLane) {
+          for (const item of this.conversations) {
+            if (
+              item.projectId === current.projectId &&
+              item.executionLane &&
+              !conversationIDs.includes(item.id)
+            ) {
+              conversationIDs.push(item.id)
+            }
+          }
+        }
+        const responses = await Promise.allSettled(
+          conversationIDs.map((id) =>
+            apiGet<{ items: AgentSession[] }>(`/conversations/${id}/agent-sessions`),
+          ),
         )
         if (this.currentConversationId === conversationId) {
-          this.agentSessions = response.items ?? []
+          const merged = new Map<string, AgentSession>()
+          responses.forEach((response, index) => {
+            if (response.status !== 'fulfilled') {
+              return
+            }
+            const ownerConversationID = conversationIDs[index]
+            for (const session of response.value.items ?? []) {
+              merged.set(session.id, {
+                ...session,
+                conversationId: session.conversationId || ownerConversationID,
+              })
+            }
+          })
+          this.agentSessions = [...merged.values()]
         }
       } catch {
         if (this.currentConversationId === conversationId) {
@@ -1124,14 +1192,14 @@ export const useChatStore = defineStore('chat', {
                 const sessions = Array.isArray(event.data.sessions)
                   ? (event.data.sessions as AgentSession[])
                   : []
-                this.agentSessions = sessions
+                this.mergeAgentSessionSnapshot(sessions, id)
                 this.agentEventCursor = Number(event.data.cursor || this.agentEventCursor)
               } else if (event.type === 'agent_batch') {
                 const sessions = Array.isArray(event.data.sessions)
                   ? (event.data.sessions as AgentSession[])
                   : []
                 if (sessions.length) {
-                  this.agentSessions = sessions
+                  this.mergeAgentSessionSnapshot(sessions, id)
                 }
                 const items = Array.isArray(event.data.items)
                   ? (event.data.items as ProcessDetail[])
@@ -1206,9 +1274,17 @@ export const useChatStore = defineStore('chat', {
         }
       }
     },
-    async loadAgentSessionDetails(sessionId: string, older = false, refresh = false) {
-      const conversationId = this.currentConversationId
+    async loadAgentSessionDetails(
+      sessionId: string,
+      older = false,
+      refresh = false,
+      conversationIdOverride = '',
+    ) {
       sessionId = sessionId.trim()
+      const conversationId =
+        conversationIdOverride.trim() ||
+        this.agentSessions.find((item) => item.id === sessionId)?.conversationId ||
+        this.currentConversationId
       if (!conversationId || !sessionId) {
         return
       }
@@ -1233,9 +1309,6 @@ export const useChatStore = defineStore('chat', {
         }>(
           `/conversations/${conversationId}/agent-session-details?sessionId=${encodeURIComponent(sessionId)}&before=${before}&limit=200`,
         )
-        if (this.currentConversationId !== conversationId) {
-          return
-        }
         const existing = this.agentSessionActivities[sessionId] ?? []
         const byID = new Map<string, ProcessDetail>()
         for (const item of [...existing, ...(response.items ?? [])]) {
@@ -1259,7 +1332,8 @@ export const useChatStore = defineStore('chat', {
         this.agentSessionMeta[sessionId] = {
           ...meta,
           loading: false,
-          loaded: true,
+          loaded: meta.loaded,
+          hasMore: true,
         }
       }
     },

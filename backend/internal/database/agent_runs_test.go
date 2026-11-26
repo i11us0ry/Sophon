@@ -31,7 +31,8 @@ func TestAgentRunInterruptionAndResumeState(t *testing.T) {
 	if err := db.CreateAgentRun(ctx, AgentRun{
 		ID: "run-1", ConversationID: "conv-agent-run",
 		AssistantMessageID: "assistant-1", Status: AgentRunStatusRunning,
-		AgentMode: AgentRunModeFast, SegmentCount: 1,
+		ExecutionLane: ConversationLaneFast,
+		AgentMode:     AgentRunModeFast, SegmentCount: 1,
 		ProgressJSON: `{"facts":2}`, StartedAt: now,
 	}); err != nil {
 		t.Fatalf("创建运行记录失败: %v", err)
@@ -52,7 +53,8 @@ func TestAgentRunInterruptionAndResumeState(t *testing.T) {
 	}
 	if resumable.Status != AgentRunStatusInterrupted ||
 		resumable.ProgressJSON != `{"facts":9}` ||
-		resumable.AgentMode != AgentRunModeFast {
+		resumable.AgentMode != AgentRunModeFast ||
+		resumable.ExecutionLane != ConversationLaneFast {
 		t.Fatalf("可恢复任务内容错误: %+v", resumable)
 	}
 	if err := db.CreateAgentRun(ctx, AgentRun{

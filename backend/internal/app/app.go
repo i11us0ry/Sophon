@@ -335,6 +335,7 @@ func New(cfg config.Config) (*App, error) {
 	protected.DELETE("/rbac/users/:id", rbacHandler.DeleteUser)
 
 	protected.POST("/conversations", chatHandler.CreateConversation)
+	protected.POST("/projects/:id/agent-conversations", chatHandler.EnsureAgentConversations)
 	protected.PUT("/conversations/:id/project", chatHandler.UpdateConversationProject)
 	protected.POST("/conversation-batches/:id/start", chatHandler.StartCampaign)
 	protected.POST("/conversation-batches/:id/pause", chatHandler.PauseCampaign)

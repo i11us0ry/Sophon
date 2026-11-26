@@ -119,6 +119,7 @@ func (db *DB) migrate(ctx context.Context) error {
 			owner_user_id TEXT NOT NULL,
 			project_id TEXT NOT NULL DEFAULT '',
 			asset_id TEXT NOT NULL DEFAULT '',
+				execution_lane TEXT NOT NULL DEFAULT '',
 			kind TEXT NOT NULL DEFAULT 'normal',
 			parent_conversation_id TEXT NOT NULL DEFAULT '',
 			batch_id TEXT NOT NULL DEFAULT '',
@@ -439,6 +440,7 @@ func (db *DB) migrate(ctx context.Context) error {
 			conversation_id TEXT NOT NULL,
 			assistant_message_id TEXT NOT NULL DEFAULT '',
 			resume_of TEXT NOT NULL DEFAULT '',
+			execution_lane TEXT NOT NULL DEFAULT '',
 			agent_mode TEXT NOT NULL DEFAULT 'deep',
 			status TEXT NOT NULL,
 			segment_count INTEGER NOT NULL DEFAULT 0,
@@ -1351,6 +1353,14 @@ func (db *DB) migrate(ctx context.Context) error {
 	if err := db.ensureColumn(
 		ctx,
 		"agent_runs",
+		"execution_lane",
+		`ALTER TABLE agent_runs ADD COLUMN execution_lane TEXT NOT NULL DEFAULT ''`,
+	); err != nil {
+		return err
+	}
+	if err := db.ensureColumn(
+		ctx,
+		"agent_runs",
 		"agent_mode",
 		`ALTER TABLE agent_runs ADD COLUMN agent_mode TEXT NOT NULL DEFAULT 'deep'`,
 	); err != nil {
@@ -1432,6 +1442,7 @@ func (db *DB) migrate(ctx context.Context) error {
 		return err
 	}
 	for column, statement := range map[string]string{
+		"execution_lane":         "ALTER TABLE conversations ADD COLUMN execution_lane TEXT NOT NULL DEFAULT ''",
 		"kind":                   "ALTER TABLE conversations ADD COLUMN kind TEXT NOT NULL DEFAULT 'normal'",
 		"parent_conversation_id": "ALTER TABLE conversations ADD COLUMN parent_conversation_id TEXT NOT NULL DEFAULT ''",
 		"batch_id":               "ALTER TABLE conversations ADD COLUMN batch_id TEXT NOT NULL DEFAULT ''",
@@ -1445,6 +1456,9 @@ func (db *DB) migrate(ctx context.Context) error {
 		 ON conversations(owner_user_id, parent_conversation_id, updated_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_conversations_batch
 		 ON conversations(batch_id, updated_at DESC)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_conversations_agent_lane
+		 ON conversations(owner_user_id, project_id, execution_lane)
+		 WHERE execution_lane IN ('coordinated', 'fast') AND parent_conversation_id = ''`,
 	} {
 		if _, err := db.ExecContext(ctx, statement); err != nil {
 			return err

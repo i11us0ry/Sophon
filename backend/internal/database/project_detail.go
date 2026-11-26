@@ -570,7 +570,7 @@ func (db *DB) ListProjectConversations(
 ) ([]Conversation, error) {
 	rows, err := db.QueryContext(
 		ctx,
-		`SELECT id, owner_user_id, project_id, asset_id, kind, parent_conversation_id,
+		`SELECT id, owner_user_id, project_id, asset_id, execution_lane, kind, parent_conversation_id,
 			batch_id, agent_role_id, title, created_at, updated_at
 		 FROM conversations
 		 WHERE project_id = ? AND owner_user_id = ?
@@ -593,6 +593,7 @@ func (db *DB) ListProjectConversations(
 			&item.OwnerUserID,
 			&item.ProjectID,
 			&item.AssetID,
+			&item.ExecutionLane,
 			&item.Kind,
 			&item.ParentConversationID,
 			&item.BatchID,
@@ -631,7 +632,7 @@ func (db *DB) ListProjectConversationsPage(
 
 	rows, err := db.QueryContext(
 		ctx,
-		`SELECT id, owner_user_id, project_id, asset_id, kind, parent_conversation_id,
+		`SELECT id, owner_user_id, project_id, asset_id, execution_lane, kind, parent_conversation_id,
 			batch_id, agent_role_id, title, created_at, updated_at
 		 FROM conversations
 		 WHERE project_id = ? AND owner_user_id = ? AND parent_conversation_id = ''
@@ -657,6 +658,7 @@ func (db *DB) ListProjectConversationsPage(
 			&item.OwnerUserID,
 			&item.ProjectID,
 			&item.AssetID,
+			&item.ExecutionLane,
 			&item.Kind,
 			&item.ParentConversationID,
 			&item.BatchID,

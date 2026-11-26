@@ -8,6 +8,7 @@ import MarkdownContent from '../components/MarkdownContent.vue'
 import { useAuthStore } from '../stores/auth'
 import {
   useChatStore,
+  type AgentSession,
   type AgentStep,
   type ChatMessage,
   type Conversation,
@@ -40,11 +41,13 @@ interface AgentLane {
   role: AgentLaneRole
   label: string
   agentId: string
+  conversationId: string
   intentId: string
   subtitle: string
   status: AgentLaneStatus
   stepCount: number
   sessionId: string
+  sessionIds?: string[]
 }
 function readCollapsedConversationGroups(): Record<ConversationGroupKey, boolean> {
   const defaults: Record<ConversationGroupKey, boolean> = {
@@ -92,6 +95,7 @@ const conversationListCollapsed = ref(
 )
 const agentRailCollapsed = ref(false)
 const selectedAgentLaneKey = ref('')
+const selectedAgentSessionIDsState = ref<string[]>([])
 const priorityGroupId = ref('')
 const priorityBusinessSystem = ref('')
 const priorityBusinessPriority = ref(50)
@@ -181,13 +185,19 @@ const selectedProjectStatus = computed(() =>
     : t('chat.projectUnavailableStatus'),
 )
 const selectableConversations = computed(() =>
-  chat.conversations.filter((conversation) => conversation.kind !== 'batch_parent'),
+  chat.conversations.filter(
+    (conversation) =>
+      conversation.kind !== 'batch_parent' && conversation.executionLane !== 'fast',
+  ),
+)
+const visibleConversations = computed(() =>
+  chat.conversations.filter((conversation) => conversation.executionLane !== 'fast'),
 )
 const conversationGroups = computed(() => {
   const queued: Conversation[] = []
   const running: Conversation[] = []
   const completed: Conversation[] = []
-  for (const conversation of chat.conversations) {
+  for (const conversation of visibleConversations.value) {
     switch (conversation.status) {
       case 'queued':
         queued.push(conversation)
@@ -326,12 +336,35 @@ function conversationInitial(conversation: Conversation) {
   return (Array.from(conversation.title.trim())[0] || 'C').toUpperCase()
 }
 
+function conversationDisplayTitle(conversation: Conversation) {
+  const suffix = ' · 主 Agent - 协调'
+  if (conversation.executionLane === 'coordinated' && conversation.title.endsWith(suffix)) {
+    return conversation.title.slice(0, -suffix.length)
+  }
+  return conversation.title || t('chat.empty')
+}
+
+function conversationShellActive(conversation: Conversation) {
+  if (conversation.id === chat.currentConversationId) {
+    return true
+  }
+  if (conversation.executionLane !== 'coordinated') {
+    return false
+  }
+  return chat.conversations.some(
+    (item) =>
+      item.id === chat.currentConversationId &&
+      item.executionLane === 'fast' &&
+      item.projectId === conversation.projectId,
+  )
+}
+
 function collapsedConversationLabel(conversation: Conversation) {
   const status =
     conversation.status && conversation.status !== 'idle'
       ? ` · ${statusLabel(conversation.status)}`
       : ''
-  return `${conversation.title || t('chat.empty')}${status}`
+  return `${conversationDisplayTitle(conversation)}${status}`
 }
 
 function compactQuestionPreview(content: string) {
@@ -415,9 +448,22 @@ function toggleAll() {
   selected.value = selectableConversations.value.map((item) => item.id)
 }
 
-async function createConversation() {
+async function ensureAgentConversations(projectId: string, selectCoordinated = false) {
+  const targetProjectID = projectId.trim()
+  if (!targetProjectID) {
+    return null
+  }
   notice.value = ''
-  await chat.createConversation()
+  try {
+    const lanes = await chat.ensureAgentLaneConversations(targetProjectID)
+    if (selectCoordinated && lanes) {
+      await chat.selectConversation(lanes.coordinated.id)
+    }
+    return lanes
+  } catch (err) {
+    chat.error = err instanceof Error ? err.message : '创建主 Agent 会话失败'
+    return null
+  }
 }
 
 function isBatchExpanded(conversationId: string) {
@@ -585,13 +631,6 @@ function onTaskProfileChange(event: Event) {
   chat.selectTaskProfile((event.target as HTMLSelectElement).value)
 }
 
-function onAgentModeChange(event: Event) {
-  const mode = (event.target as HTMLSelectElement).value
-  if (mode === 'fast' || mode === 'deep') {
-    void chat.setAgentMode(mode)
-  }
-}
-
 async function stopCurrentTask() {
   if (currentStreaming.value) {
     await chat.cancelTask()
@@ -639,10 +678,19 @@ function toggleAgentRail() {
   agentRailCollapsed.value = !agentRailCollapsed.value
 }
 
-function selectAgentLane(key: string) {
+async function selectAgentLane(key: string) {
   if (!key) return
+  const lane = agentLanes.value.find((item) => item.key === key)
+  if (
+    lane?.role === 'mainagent' &&
+    lane.conversationId &&
+    lane.conversationId !== chat.currentConversationId
+  ) {
+    await chat.selectConversation(lane.conversationId)
+  }
   selectedAgentLaneKey.value = key
-  void chat.loadAgentSessionDetails(key)
+  selectedAgentSessionIDsState.value = agentLaneSessionIDs(lane)
+  void loadAgentLaneDetails(lane, false, true)
   stickToBottom.value = true
   stickToAgentLaneBottom.value = true
   void nextTick(() => {
@@ -650,6 +698,42 @@ function selectAgentLane(key: string) {
     scrollAgentLaneToBottom()
     updateActiveQuestionBar()
   })
+}
+
+function agentLaneSessionIDs(lane: AgentLane | undefined) {
+  if (!lane) {
+    return []
+  }
+  if (lane.sessionIds?.length) {
+    return lane.sessionIds
+  }
+  return lane.sessionId ? [lane.sessionId] : []
+}
+
+function selectedAgentSessionIDs(lane = selectedAgentLane.value) {
+  if (selectedAgentSessionIDsState.value.length) {
+    return selectedAgentSessionIDsState.value
+  }
+  return agentLaneSessionIDs(lane)
+}
+
+function syncSelectedAgentSessionIDs(lane = selectedAgentLane.value) {
+  selectedAgentSessionIDsState.value = agentLaneSessionIDs(lane)
+}
+
+async function loadAgentLaneDetails(
+  lane: AgentLane | undefined,
+  older = false,
+  refresh = false,
+) {
+  const conversationId = lane?.conversationId || ''
+  for (const sessionId of selectedAgentSessionIDs(lane)) {
+    await chat.loadAgentSessionDetails(sessionId, older, refresh, conversationId)
+  }
+}
+
+async function loadSelectedAgentLaneDetails(older = false, refresh = false) {
+  await loadAgentLaneDetails(selectedAgentLane.value, older, refresh)
 }
 
 function agentLaneStatusLabel(status: AgentLaneStatus) {
@@ -915,6 +999,7 @@ function detailToAgentStep(detail: ProcessDetail): AgentStep | null {
   if (detail.eventType === 'reasoning') {
     return {
       id: detail.id,
+      createdAt: detail.createdAt,
       type: 'reasoning',
       ...agentMeta(data),
       content: String(data.reasoning || detail.message),
@@ -923,6 +1008,7 @@ function detailToAgentStep(detail: ProcessDetail): AgentStep | null {
   if (detail.eventType === 'thinking') {
     return {
       id: detail.id,
+      createdAt: detail.createdAt,
       type: 'thinking',
       ...agentMeta(data),
       content: detail.message,
@@ -931,6 +1017,7 @@ function detailToAgentStep(detail: ProcessDetail): AgentStep | null {
   if (detail.eventType === 'tool_call') {
     return {
       id: detail.id,
+      createdAt: detail.createdAt,
       type: 'tool_call',
       ...agentMeta(data),
       toolName: detail.message,
@@ -941,6 +1028,7 @@ function detailToAgentStep(detail: ProcessDetail): AgentStep | null {
   if (detail.eventType === 'tool_result') {
     return {
       id: detail.id,
+      createdAt: detail.createdAt,
       type: 'tool_result',
       ...agentMeta(data),
       toolName: detail.message,
@@ -955,6 +1043,7 @@ function detailToAgentStep(detail: ProcessDetail): AgentStep | null {
   ) {
     return {
       id: detail.id,
+      createdAt: detail.createdAt,
       type:
         detail.eventType === 'subagent.started'
           ? 'agent_started'
@@ -973,66 +1062,146 @@ function detailToAgentStep(detail: ProcessDetail): AgentStep | null {
   return null
 }
 
+function mainAgentLaneStatus(conversation: Conversation, session?: AgentSession): AgentLaneStatus {
+  if (session?.status) {
+    return session.status as AgentLaneStatus
+  }
+  switch (conversation.status) {
+    case 'running':
+    case 'queued':
+      return 'running'
+    case 'waiting':
+      return 'waiting'
+    default:
+      return 'idle'
+  }
+}
+
+const mainAgentLaneOptions = computed<AgentLane[]>(() =>
+  chat.conversations
+    .filter(
+      (conversation) =>
+        Boolean(conversation.executionLane) &&
+        conversation.projectId === chat.selectedProjectId,
+    )
+    .sort(
+      (left, right) =>
+        (left.executionLane === 'coordinated' ? 0 : 1) -
+        (right.executionLane === 'coordinated' ? 0 : 1),
+    )
+    .map((conversation) => {
+      const session = chat.agentSessions
+        .filter(
+          (item) =>
+            item.conversationId === conversation.id && item.role === 'mainagent',
+        )
+        .sort((left, right) => right.lastActivityAt.localeCompare(left.lastActivityAt))[0]
+      const fast = conversation.executionLane === 'fast'
+      return {
+        key: `main-lane:${conversation.id}`,
+        sessionId: session?.id || '',
+        role: 'mainagent' as const,
+        label: fast ? t('chat.mainAgentFast') : t('chat.mainAgentCoordinated'),
+        agentId: 'mainagent',
+        conversationId: conversation.id,
+        intentId: '',
+        subtitle: '',
+        status: mainAgentLaneStatus(conversation, session),
+        stepCount: session?.activityCount || 0,
+      }
+    }),
+)
+
 const agentLanes = computed<AgentLane[]>(() => {
+  const fastConversationIDs = new Set(
+    chat.conversations
+      .filter((conversation) => conversation.executionLane === 'fast')
+      .map((conversation) => conversation.id),
+  )
+  const systemSessions: AgentSession[] = []
   const sessions = chat.agentSessions.filter(
     (session) =>
-      !(
-        session.role === 'system' &&
-        session.agentId === 'system-mission-policy' &&
-        session.status !== 'failed'
-      ),
+      session.role !== 'mainagent' &&
+      !(fastConversationIDs.has(session.conversationId) && session.role === 'planner') &&
+      !(fastConversationIDs.has(session.conversationId) && session.role === 'system'),
   )
-  if (sessions.length) {
-    return sessions.map((session) => {
-      const role = normalizeAgentLaneRole(session.role)
-      return {
-        key: session.id,
-        sessionId: session.id,
-        role,
-        label:
-          role === 'worker'
-            ? session.title || session.agentName || t('chat.agentWorker')
-            : session.title || agentLaneLabel(role),
-        agentId: session.agentId,
-        intentId: '',
-        subtitle:
-          role === 'worker'
-            ? session.agentName || session.hypothesisId
-            : role === 'planner'
-              ? '态势研判'
-              : '',
-        status: session.status as AgentLaneStatus,
-        stepCount: session.activityCount,
-      }
+  const sessionLanes = sessions.flatMap((session) => {
+    const role = normalizeAgentLaneRole(session.role)
+    if (role === 'system' && !session.agentId) {
+      systemSessions.push(session)
+      return []
+    }
+    return [{
+      key: session.id,
+      sessionId: session.id,
+      role,
+      label:
+        role === 'worker'
+          ? session.title || session.agentName || t('chat.agentWorker')
+          : session.title || agentLaneLabel(role),
+      agentId: session.agentId,
+      conversationId: session.conversationId,
+      intentId: '',
+      subtitle:
+        role === 'worker'
+          ? session.agentName || session.hypothesisId
+          : role === 'planner'
+            ? '态势研判'
+            : '',
+      status: session.status as AgentLaneStatus,
+      stepCount: session.activityCount,
+    }]
+  })
+  const genericSystemSession = systemSessions.sort((left, right) =>
+    right.lastActivityAt.localeCompare(left.lastActivityAt),
+  )[0]
+  if (genericSystemSession) {
+    sessionLanes.push({
+      key: `system-events:${genericSystemSession.conversationId}`,
+      sessionId: genericSystemSession.id,
+      role: 'system',
+      label: agentLaneLabel('system'),
+      agentId: 'system',
+      conversationId: genericSystemSession.conversationId,
+      intentId: '',
+      subtitle: '',
+      status: genericSystemSession.status as AgentLaneStatus,
+      stepCount: genericSystemSession.activityCount,
     })
   }
+  if (sessionLanes.length) {
+    return [...mainAgentLaneOptions.value, ...sessionLanes]
+  }
   const baseStatus: AgentLaneStatus = currentConversationRunning.value ? 'running' : 'idle'
-  return (['mainagent', 'planner', 'system'] as const).map((role) => ({
+  const fallback = (['planner', 'system'] as const).map((role) => ({
     key: role,
     sessionId: '',
     role,
     label: agentLaneLabel(role),
     agentId: role,
+    conversationId: chat.currentConversationId,
     intentId: '',
     subtitle: '',
-    status: role === 'mainagent' || role === 'planner' ? baseStatus : 'idle',
+    status: role === 'planner' ? baseStatus : 'idle',
     stepCount: 0,
   }))
+  return [...mainAgentLaneOptions.value, ...fallback]
 })
 
 const workerAgentLanes = computed(() =>
-  chat.agentMode === 'fast'
-    ? []
-    : agentLanes.value.filter((lane) => lane.role === 'worker'),
+  agentLanes.value.filter((lane) => lane.role === 'worker'),
 )
-const visibleAgentLanes = computed(() =>
-  chat.agentMode === 'fast'
-    ? agentLanes.value.filter((lane) => lane.role !== 'planner' && lane.role !== 'worker')
-    : agentLanes.value,
-)
+const visibleAgentLanes = computed(() => agentLanes.value)
+const activeMainAgentLaneKey = computed(() => {
+  const conversation = chat.conversations.find(
+    (item) => item.id === chat.currentConversationId,
+  )
+  return conversation?.executionLane ? `main-lane:${conversation.id}` : ''
+})
 const selectedAgentLane = computed(
   () =>
     visibleAgentLanes.value.find((lane) => lane.key === selectedAgentLaneKey.value) ||
+    visibleAgentLanes.value.find((lane) => lane.key === activeMainAgentLaneKey.value) ||
     visibleAgentLanes.value[0],
 )
 const selectedAgentLaneRole = computed(() => selectedAgentLane.value?.role || 'mainagent')
@@ -1042,23 +1211,45 @@ const selectedAgentLaneTitle = computed(() =>
     : agentLaneLabel(selectedAgentLaneRole.value),
 )
 const selectedAgentSessionMeta = computed(() => {
-  const sessionId = selectedAgentLane.value?.sessionId
-  return sessionId ? chat.agentSessionMeta[sessionId] : undefined
+  const sessionIDs = selectedAgentSessionIDs()
+  if (sessionIDs.length <= 1) {
+    return sessionIDs[0] ? chat.agentSessionMeta[sessionIDs[0]] : undefined
+  }
+  const metas = sessionIDs
+    .map((sessionId) => chat.agentSessionMeta[sessionId])
+    .filter((meta): meta is NonNullable<typeof meta> => Boolean(meta))
+  if (!metas.length) {
+    return undefined
+  }
+  return {
+    loaded: metas.every((meta) => meta.loaded),
+    loading: metas.some((meta) => meta.loading),
+    hasMore: metas.some((meta) => meta.hasMore),
+    nextBefore: Math.min(...metas.map((meta) => meta.nextBefore || 0)),
+    total: metas.reduce((total, meta) => total + meta.total, 0),
+  }
 })
 const selectedAgentLaneSteps = computed<AgentStep[]>(() => {
-  const sessionId = selectedAgentLane.value?.sessionId || ''
-  if (!sessionId) {
+  const sessionIDs = selectedAgentSessionIDs()
+  if (!sessionIDs.length) {
     return EMPTY_AGENT_STEPS
   }
   const steps: AgentStep[] = []
-  for (const detail of chat.agentSessionActivities[sessionId] || []) {
-    const step = detailToAgentStep(detail)
-    if (step) steps.push(step)
+  for (const sessionId of sessionIDs) {
+    for (const detail of chat.agentSessionActivities[sessionId] || []) {
+      const step = detailToAgentStep(detail)
+      if (step) steps.push(step)
+    }
   }
   for (const step of chat.liveSteps) {
-    if (liveAgentSessionID(step) !== sessionId) continue
+    if (!sessionIDs.includes(liveAgentSessionID(step))) continue
     steps.push(step)
   }
+  steps.sort(
+    (left, right) =>
+      (left.createdAt || '').localeCompare(right.createdAt || '') ||
+      left.id.localeCompare(right.id),
+  )
   return visibleSteps(steps)
 })
 const workerRunningCount = computed(
@@ -1309,9 +1500,7 @@ async function refreshChatPage() {
     await chat.refreshSelectedProject()
     await chat.refreshConversationStatuses()
     await chat.loadAgentSessions()
-    if (selectedAgentLaneKey.value) {
-      await chat.loadAgentSessionDetails(selectedAgentLaneKey.value, false, true)
-    }
+    await loadSelectedAgentLaneDetails(false, true)
     if (currentBatchCampaignId.value) {
       await chat.loadCampaignOverview(currentBatchCampaignId.value)
     }
@@ -1389,7 +1578,12 @@ watch(
   async () => {
     cancelEdit()
     showRunSettings.value = false
-    selectedAgentLaneKey.value = ''
+    selectedAgentLaneKey.value = activeMainAgentLaneKey.value
+    syncSelectedAgentSessionIDs(
+      mainAgentLaneOptions.value.find(
+        (lane) => lane.key === activeMainAgentLaneKey.value,
+      ),
+    )
     stickToBottom.value = true
     stickToAgentLaneBottom.value = true
     await nextTick()
@@ -1404,20 +1598,24 @@ watch(
   () => {
     const sessions = chat.agentSessions
     if (!sessions.length) {
-      selectedAgentLaneKey.value = ''
+      selectedAgentLaneKey.value =
+        activeMainAgentLaneKey.value || mainAgentLaneOptions.value[0]?.key || ''
+      syncSelectedAgentSessionIDs()
       return
     }
-    if (!sessions.some((session) => session.id === selectedAgentLaneKey.value)) {
+    if (!visibleAgentLanes.value.some((lane) => lane.key === selectedAgentLaneKey.value)) {
       selectedAgentLaneKey.value =
-        sessions.find((session) => session.role === 'mainagent')?.id || sessions[0].id
+        activeMainAgentLaneKey.value || mainAgentLaneOptions.value[0]?.key || sessions[0].id
+      syncSelectedAgentSessionIDs()
     }
   },
   { immediate: true },
 )
 
-watch(selectedAgentLaneKey, (sessionId) => {
-  if (sessionId) {
-    void chat.loadAgentSessionDetails(sessionId)
+watch(selectedAgentLaneKey, (key) => {
+  if (key) {
+    syncSelectedAgentSessionIDs()
+    void loadSelectedAgentLaneDetails()
   }
 })
 
@@ -1478,7 +1676,7 @@ watch(
       await chat.updateCurrentConversationProject(projectId)
       return
     }
-    void chat.createConversation()
+    void ensureAgentConversations(projectId, true)
   },
 )
 
@@ -1488,6 +1686,8 @@ onMounted(async () => {
   const conversationId = String(route.query.conversationId ?? '')
   if (conversationId && conversationId !== chat.currentConversationId) {
     await chat.selectConversation(conversationId)
+  } else if (!conversationId && chat.selectedProjectId) {
+    await ensureAgentConversations(chat.selectedProjectId, true)
   }
   const scheduleRefresh = () => {
     if (!refreshSchedulerActive) {
@@ -1570,15 +1770,7 @@ onUnmounted(() => {
           </button>
         </div>
         <div class="conversation-header-actions">
-          <span class="conversation-count">{{ chat.conversations.length }}</span>
-          <button
-            class="button compact"
-            type="button"
-            :disabled="projectBlocked || chat.creatingConversation || chat.updatingConversationProject"
-            @click="createConversation"
-          >
-            {{ t('chat.newConversation') }}
-          </button>
+          <span class="conversation-count">{{ visibleConversations.length }}</span>
         </div>
       </div>
 
@@ -1588,10 +1780,10 @@ onUnmounted(() => {
         :aria-label="t('nav.chat')"
       >
         <button
-          v-for="conversation in chat.conversations"
+          v-for="conversation in visibleConversations"
           :key="conversation.id"
           class="conversation-collapsed-chip"
-          :class="{ active: conversation.id === chat.currentConversationId }"
+          :class="{ active: conversationShellActive(conversation) }"
           type="button"
           :title="collapsedConversationLabel(conversation)"
           :aria-label="collapsedConversationLabel(conversation)"
@@ -1619,7 +1811,7 @@ onUnmounted(() => {
       </label>
 
       <div class="conversation-items" @scroll.passive="hideConversationPreview(true)">
-        <template v-if="chat.conversations.length">
+        <template v-if="visibleConversations.length">
           <section
             v-for="group in conversationGroups"
             :key="group.key"
@@ -1652,7 +1844,7 @@ onUnmounted(() => {
                 v-for="conversation in group.items"
                 :key="conversation.id"
                 class="conversation-row"
-                :class="{ active: conversation.id === chat.currentConversationId }"
+                :class="{ active: conversationShellActive(conversation) }"
               >
                 <button
                   v-if="conversation.kind === 'batch_parent'"
@@ -1675,7 +1867,7 @@ onUnmounted(() => {
                   type="button"
                   @click="chat.selectConversation(conversation.id)"
                 >
-                  <span class="conversation-title">{{ conversation.title }}</span>
+                  <span class="conversation-title">{{ conversationDisplayTitle(conversation) }}</span>
                   <span class="conversation-meta">
                     <span v-if="conversation.kind === 'batch_parent'" class="batch-count">
                       {{ t('chat.batchChildren', { count: conversation.childCount || 0 }) }}
@@ -1740,7 +1932,7 @@ onUnmounted(() => {
             </p>
           </section>
         </template>
-        <p v-if="!chat.conversations.length" class="empty-hint">{{ t('chat.empty') }}</p>
+        <p v-if="!visibleConversations.length" class="empty-hint">{{ t('chat.empty') }}</p>
         <button
           v-if="chat.conversationsHasMore"
           class="load-more-conversations"
@@ -2347,10 +2539,7 @@ onUnmounted(() => {
             :loaded="selectedAgentSessionMeta?.loaded || false"
             :loading="selectedAgentSessionMeta?.loading || false"
             :has-more="selectedAgentSessionMeta?.hasMore || false"
-            @load-more="
-              selectedAgentLane?.sessionId &&
-                chat.loadAgentSessionDetails(selectedAgentLane.sessionId, true)
-            "
+            @load-more="loadSelectedAgentLaneDetails(true)"
           />
           <p v-else class="message-empty">{{ t('chat.agentSessionEmpty') }}</p>
         </div>
@@ -2396,32 +2585,6 @@ onUnmounted(() => {
                 <option v-for="role in chat.roles" :key="role.id" :value="role.id">
                   {{ role.name }}
                 </option>
-              </select>
-              <svg class="composer-selector-arrow" viewBox="0 0 24 24" aria-hidden="true">
-                <path d="m6 9 6 6 6-6" />
-              </svg>
-            </label>
-
-            <label class="composer-selector" :title="t('chat.agentModeHint')">
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M5 7h14" />
-                <path d="m8 4-3 3 3 3" />
-                <path d="M19 17H5" />
-                <path d="m16 14 3 3-3 3" />
-              </svg>
-              <span>{{ t('chat.agentMode') }}</span>
-              <select
-                :value="chat.agentMode === 'fast' ? 'fast' : 'deep'"
-                :aria-label="t('chat.agentMode')"
-                :disabled="
-                  chat.streaming ||
-                  chat.agentModeUpdating ||
-                  chat.creatingConversation
-                "
-                @change="onAgentModeChange"
-              >
-                <option value="fast">{{ t('chat.fastPath') }}</option>
-                <option value="deep">{{ t('chat.deepPath') }}</option>
               </select>
               <svg class="composer-selector-arrow" viewBox="0 0 24 24" aria-hidden="true">
                 <path d="m6 9 6 6 6-6" />
