@@ -3,6 +3,7 @@ package database
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -29,6 +30,15 @@ func TestFactMaterializationIncludesTestedAuditCells(t *testing.T) {
 		ObjectKey:   "not_audited",
 	}) {
 		t.Fatal("未审计单元不应作为攻击路径证据")
+	}
+}
+
+func TestGraphFindingStatusFailsClosedForUnknownValues(t *testing.T) {
+	if got := graphFindingStatus("future-unknown-status"); got != "open" {
+		t.Fatalf("未知漏洞状态不应默认确认，实际 %s", got)
+	}
+	if got := graphFindingStatus("confirmed"); got != "confirmed" {
+		t.Fatalf("confirmed 应保持确认状态，实际 %s", got)
 	}
 }
 
@@ -117,6 +127,55 @@ func TestSyncProjectGraphCreatesSkeletonAndBackfill(t *testing.T) {
 	}
 	if second.CreatedNodes != 0 || second.CreatedEdges != 0 {
 		t.Fatalf("重复补全应幂等: %+v", second)
+	}
+}
+
+func TestSyncProjectGraphStoresSafetyConstraintsAsFacts(t *testing.T) {
+	db := openGraphSyncTestDB(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	project := Project{
+		ID: "proj-constraints", OwnerUserID: "user-1", Name: "constraints",
+		Goals: `资产扩展：可以扫描端口
+漏洞目标：验证 SQL 注入
+权限目标：获取 shell
+安全红线：
+- 禁止删除操作
+- 禁止修改密码`,
+		Status: "active", CreatedAt: now, UpdatedAt: now,
+	}
+	if err := db.CreateProject(ctx, project); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SyncProjectGraph(ctx, project); err != nil {
+		t.Fatal(err)
+	}
+	nodes, err := db.ListProjectGraphNodes(ctx, project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	goals := 0
+	constraints := 0
+	for _, node := range nodes {
+		if node.Kind == "goal" {
+			goals++
+			if strings.Contains(node.Title, "安全红线") || strings.Contains(node.Title, "禁止修改密码") {
+				t.Fatalf("安全红线不应成为 Goal: %+v", node)
+			}
+		}
+		if node.Kind == "fact" && node.Source == "project-constraint" {
+			constraints++
+		}
+	}
+	if goals != 3 || constraints != 2 {
+		t.Fatalf("目标/约束拆分错误: goals=%d constraints=%d nodes=%+v", goals, constraints, nodes)
+	}
+	stored, err := db.GetProject(ctx, project.ID, project.OwnerUserID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Constraints != "禁止删除操作\n禁止修改密码" {
+		t.Fatalf("项目约束投影错误: %q", stored.Constraints)
 	}
 }
 

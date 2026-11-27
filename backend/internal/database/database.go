@@ -152,6 +152,11 @@ func (db *DB) migrate(ctx context.Context) error {
 				created_at INTEGER NOT NULL,
 				updated_at INTEGER NOT NULL
 			)`,
+		`CREATE TABLE IF NOT EXISTS app_metadata (
+			key TEXT PRIMARY KEY,
+			value TEXT NOT NULL DEFAULT '',
+			updated_at INTEGER NOT NULL
+		)`,
 		`CREATE TABLE IF NOT EXISTS zhizi_conversation_settings (
 				conversation_id TEXT PRIMARY KEY,
 				enabled INTEGER NOT NULL DEFAULT 0,
@@ -901,6 +906,8 @@ func (db *DB) migrate(ctx context.Context) error {
 			name TEXT NOT NULL,
 			kind TEXT NOT NULL,
 			value TEXT NOT NULL,
+				normalized_value TEXT NOT NULL DEFAULT '',
+				quality_status TEXT NOT NULL DEFAULT 'valid',
 			status TEXT NOT NULL DEFAULT 'unknown',
 			source TEXT NOT NULL DEFAULT 'unknown',
 			criticality TEXT NOT NULL DEFAULT 'medium',
@@ -910,6 +917,27 @@ func (db *DB) migrate(ctx context.Context) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_assets_owner
 		 ON assets(owner_user_id, updated_at DESC)`,
+		`CREATE TABLE IF NOT EXISTS project_asset_work (
+				project_id TEXT NOT NULL,
+				owner_user_id TEXT NOT NULL,
+				asset_id TEXT NOT NULL,
+				authorization_state TEXT NOT NULL DEFAULT 'discovered',
+				work_state TEXT NOT NULL DEFAULT 'queued',
+				priority INTEGER NOT NULL DEFAULT 0,
+				state_reason TEXT NOT NULL DEFAULT '',
+				lease_owner TEXT NOT NULL DEFAULT '',
+				lease_conversation_id TEXT NOT NULL DEFAULT '',
+				lease_until INTEGER NOT NULL DEFAULT 0,
+				last_progress_at INTEGER NOT NULL DEFAULT 0,
+				closeout_reason TEXT NOT NULL DEFAULT '',
+				created_at INTEGER NOT NULL,
+				updated_at INTEGER NOT NULL,
+				PRIMARY KEY (project_id, asset_id)
+			)`,
+		`CREATE INDEX IF NOT EXISTS idx_project_asset_work_queue
+			 ON project_asset_work(project_id, owner_user_id, authorization_state, work_state, priority DESC, updated_at ASC)`,
+		`CREATE INDEX IF NOT EXISTS idx_project_asset_work_lease
+			 ON project_asset_work(lease_conversation_id, lease_until)`,
 		`CREATE TABLE IF NOT EXISTS vulnerabilities (
 				id TEXT PRIMARY KEY,
 				project_id TEXT NOT NULL DEFAULT '',
@@ -1263,6 +1291,14 @@ func (db *DB) migrate(ctx context.Context) error {
 		`ALTER TABLE assets ADD COLUMN source TEXT NOT NULL DEFAULT 'unknown'`,
 	); err != nil {
 		return err
+	}
+	for column, statement := range map[string]string{
+		"normalized_value": "ALTER TABLE assets ADD COLUMN normalized_value TEXT NOT NULL DEFAULT ''",
+		"quality_status":   "ALTER TABLE assets ADD COLUMN quality_status TEXT NOT NULL DEFAULT 'valid'",
+	} {
+		if err := db.ensureColumn(ctx, "assets", column, statement); err != nil {
+			return err
+		}
 	}
 	if _, err := db.ExecContext(
 		ctx,
@@ -1871,6 +1907,18 @@ func (db *DB) migrate(ctx context.Context) error {
 			return err
 		}
 	}
+	if err := db.backfillAssetNormalization(ctx); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(
+		ctx,
+		`UPDATE assets
+		 SET status = 'retired', quality_status = ?
+		 WHERE LOWER(TRIM(kind)) = 'port'`,
+		AssetQualityLegacyUnsupported,
+	); err != nil {
+		return fmt.Errorf("retire legacy port assets: %w", err)
+	}
 	// 先回填历史资产归属，再清理图节点并创建资产维度唯一索引。
 	// 否则两个未归属节点在回填到同一资产后可能撞上唯一索引。
 	if err := db.backfillProjectAssets(ctx); err != nil {
@@ -1878,6 +1926,9 @@ func (db *DB) migrate(ctx context.Context) error {
 	}
 	// 把项目「资产范围」文本同步为可执行资产，保证升级后 Policy Engine 立即生效。
 	if err := db.backfillProjectScopeAssets(ctx); err != nil {
+		return err
+	}
+	if err := db.markProjectScopeDerivedAssets(ctx); err != nil {
 		return err
 	}
 	// 修复项目级后台会话缺失的 Campaign 授权资产映射。
@@ -1889,6 +1940,9 @@ func (db *DB) migrate(ctx context.Context) error {
 	}
 	// 清理历史重复的攻击路径节点/连线并建立唯一索引（并发同步曾产生重复）。
 	if err := db.dedupeProjectGraph(ctx); err != nil {
+		return err
+	}
+	if err := db.backfillProjectBriefGraphs(ctx); err != nil {
 		return err
 	}
 	if err := db.cleanupOrphanProjectData(ctx); err != nil {

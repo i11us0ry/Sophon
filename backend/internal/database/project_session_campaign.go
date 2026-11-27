@@ -172,13 +172,26 @@ func insertProjectSessionCampaignEndpointsTx(
 	tx *sql.Tx,
 	batch ConversationBatch,
 ) (int, error) {
+	var projectScope string
+	if err := tx.QueryRowContext(
+		ctx,
+		`SELECT scope FROM projects WHERE id = ? AND owner_user_id = ?`,
+		batch.ProjectID,
+		batch.OwnerUserID,
+	).Scan(&projectScope); err != nil {
+		return 0, err
+	}
 	rows, err := tx.QueryContext(
 		ctx,
-		`SELECT id, project_id, owner_user_id, name, kind, value, status, source,
+		`SELECT id, project_id, owner_user_id, name, kind, value, normalized_value, quality_status, status, source,
 			criticality, risk_score
 		 FROM assets
 		 WHERE project_id = ? AND owner_user_id = ?
 		   AND LOWER(TRIM(status)) = 'active'
+			   AND LOWER(TRIM(kind)) IN ('ip', 'domain', 'url', 'source')
+			   AND LOWER(TRIM(quality_status)) NOT IN (
+			       'duplicate', 'cross_type_duplicate', 'invalid', 'legacy_unsupported'
+			   )
 		 ORDER BY created_at ASC, id ASC`,
 		batch.ProjectID,
 		batch.OwnerUserID,
@@ -196,6 +209,8 @@ func insertProjectSessionCampaignEndpointsTx(
 			&asset.Name,
 			&asset.Kind,
 			&asset.Value,
+			&asset.NormalizedValue,
+			&asset.QualityStatus,
 			&asset.Status,
 			&asset.Source,
 			&asset.Criticality,
@@ -216,6 +231,9 @@ func insertProjectSessionCampaignEndpointsTx(
 
 	inserted := 0
 	for _, asset := range assets {
+		if !assetTestingEligible(projectScope, asset) {
+			continue
+		}
 		endpoint := campaignEndpointForAsset(batch.ID, "", asset)
 		result, err := tx.ExecContext(
 			ctx,

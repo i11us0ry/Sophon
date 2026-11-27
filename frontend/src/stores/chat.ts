@@ -822,23 +822,14 @@ export const useChatStore = defineStore('chat', {
       }
     },
     async resumeConversation(conversationId: string) {
-      if (!conversationId || this.streaming) {
+      if (!conversationId || this.streaming || this.resumableRunLoading) {
         return
       }
       this.currentConversationId = conversationId
-      try {
-        const orchestration = await apiPost<{ resumed: boolean }>(
-          `/conversations/${conversationId}/orchestration/resume`,
-          {},
-        )
-        if (orchestration.resumed) {
-          await this.selectConversation(conversationId)
-          return
-        }
-      } catch {
-        // Fall through to the normal interrupted-run resume path.
-      }
-      await this.runStream(`/conversations/${conversationId}/resume`, {})
+      this.error = ''
+      await this.runStream(`/conversations/${conversationId}/resume`, {
+        conversationId,
+      })
       await this.loadResumableRun(conversationId)
     },
     async loadLatestMessages(): Promise<ChatMessage[]> {
@@ -1654,12 +1645,13 @@ export const useChatStore = defineStore('chat', {
       await this.loadResumableRun(targetID)
       return response.cancelled ?? 0
     },
-    async createConversation() {
-      if (!this.selectedProjectId) {
+    async createConversation(projectId = this.selectedProjectId) {
+      const targetProjectID = projectId.trim()
+      if (!targetProjectID) {
         this.error = translate('chat.projectRequired')
         return
       }
-      if (!this.projectAllowsWork(this.selectedProjectId)) {
+      if (!this.projectAllowsWork(targetProjectID)) {
         return
       }
       if (this.creatingConversation || this.updatingConversationProject) {
@@ -1670,7 +1662,7 @@ export const useChatStore = defineStore('chat', {
       try {
         const conversation = await apiPost<Conversation>('/conversations', {
           title: '新对话',
-          projectId: this.selectedProjectId,
+          projectId: targetProjectID,
           ...this.roleRequestPayload(),
         })
         this.conversations.unshift(conversation)

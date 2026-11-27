@@ -172,6 +172,54 @@ func TestProjectPlanHypothesesSkipsNormalizedDuplicateDimensions(t *testing.T) {
 	}
 }
 
+func TestWorkerCannotCompleteAnotherHypothesis(t *testing.T) {
+	service, ctx := openProjectToolService(t, true)
+	now := time.Now().UTC()
+	if err := service.db.CreateAsset(ctx, database.Asset{
+		ID: "asset-worker-scope", ProjectID: "project-tools", OwnerUserID: "user-1",
+		Name: "Worker 边界目标", Kind: "url", Value: "https://worker-scope.example/item",
+		Status: "active", Criticality: "medium", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("创建资产失败: %v", err)
+	}
+	current, err := service.db.UpsertProjectTestResult(ctx, database.ProjectTestResult{
+		ProjectID: "project-tools", AssetID: "asset-worker-scope",
+		Dimension: "当前 Worker 假设", Technique: "current",
+		Status: "running", IntentID: "intent-current",
+		OriginConversationID: "conv-tools", CreatedAt: now, UpdatedAt: now,
+	})
+	if err != nil {
+		t.Fatalf("创建当前假设失败: %v", err)
+	}
+	other, err := service.db.UpsertProjectTestResult(ctx, database.ProjectTestResult{
+		ProjectID: "project-tools", AssetID: "asset-worker-scope",
+		Dimension: "其他 Worker 假设", Technique: "other",
+		Status: "running", IntentID: "intent-other",
+		OriginConversationID: "conv-tools", CreatedAt: now, UpdatedAt: now,
+	})
+	if err != nil {
+		t.Fatalf("创建其他假设失败: %v", err)
+	}
+	workerCtx := execctx.WithSubagent(ctx, execctx.SubagentInfo{
+		ID: "worker-scope", Kind: "worker",
+		HypothesisID: current.ID, IntentID: current.IntentID,
+	})
+	if _, err := invokeProjectTool(t, service, workerCtx, "project_complete_hypothesis", map[string]interface{}{
+		"hypothesis_id": other.ID,
+		"status":        "blocked",
+		"result":        "不应允许写回其他假设",
+	}); err == nil || !strings.Contains(err.Error(), "当前 Worker") {
+		t.Fatalf("Worker 操作其他假设应被拒绝，实际: %v", err)
+	}
+	if _, err := invokeProjectTool(t, service, workerCtx, "project_complete_hypothesis", map[string]interface{}{
+		"hypothesis_id": current.ID,
+		"status":        "blocked",
+		"result":        "当前假设已阻断",
+	}); err != nil {
+		t.Fatalf("Worker 操作当前假设应允许: %v", err)
+	}
+}
+
 func TestProjectRecordTestReusesCurrentWorkerHypothesis(t *testing.T) {
 	service, ctx := openProjectToolService(t, true)
 	now := time.Now().UTC()

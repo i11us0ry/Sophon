@@ -260,7 +260,7 @@ func TestProjectListAggregatesReadOnlyListTools(t *testing.T) {
 			break
 		}
 	}
-	if resourceParam == nil || !resourceParam.Required || len(resourceParam.Enum) != 6 {
+	if resourceParam == nil || !resourceParam.Required || len(resourceParam.Enum) != 8 {
 		t.Fatalf("project_list.resource schema 异常: %+v", resourceParam)
 	}
 
@@ -271,6 +271,24 @@ func TestProjectListAggregatesReadOnlyListTools(t *testing.T) {
 	})
 	if err != nil || !strings.Contains(output, "没有匹配的资产") {
 		t.Fatalf("project_list assets 查询失败: %q %v", output, err)
+	}
+	for resource, status := range map[string]string{
+		"intents":       "open",
+		"evidence_gaps": "missing_evidence",
+	} {
+		output, err := invokeProjectTool(t, service, ctx, "project_list", map[string]interface{}{
+			"resource": resource,
+			"status":   status,
+			"query":    "不存在",
+			"limit":    1,
+			"offset":   0,
+		})
+		if err != nil {
+			t.Fatalf("project_list %s 查询失败: %v", resource, err)
+		}
+		if !strings.Contains(output, "total=0") {
+			t.Fatalf("project_list %s 结果异常: %q", resource, output)
+		}
 	}
 	if _, err := invokeProjectTool(t, service, ctx, "project_list", map[string]interface{}{
 		"resource": "assets",
@@ -303,6 +321,63 @@ func TestProjectListAggregatesReadOnlyListTools(t *testing.T) {
 		}); err != nil {
 			t.Fatalf("resource=%s 应支持 name/size 兼容参数: %v", resource, err)
 		}
+	}
+}
+
+func TestProjectListAssetsAndFindingsHonorOffset(t *testing.T) {
+	service, ctx := openProjectToolService(t, true)
+	now := time.Now().UTC()
+	for index, item := range []database.Asset{
+		{
+			ID: "asset-list-first", ProjectID: "project-tools", OwnerUserID: "user-1",
+			Name: "first-asset", Kind: "domain", Value: "first.example.com",
+			Status: "active", Source: database.AssetSourceManual, Criticality: "medium",
+			CreatedAt: now, UpdatedAt: now,
+		},
+		{
+			ID: "asset-list-second", ProjectID: "project-tools", OwnerUserID: "user-1",
+			Name: "second-asset", Kind: "domain", Value: "second.example.com",
+			Status: "active", Source: database.AssetSourceManual, Criticality: "medium",
+			CreatedAt: now.Add(time.Second), UpdatedAt: now.Add(time.Second),
+		},
+	} {
+		if err := service.db.CreateAsset(ctx, item); err != nil {
+			t.Fatalf("创建第 %d 个资产失败: %v", index, err)
+		}
+	}
+	for index, item := range []database.Vulnerability{
+		{
+			ID: "finding-list-first", ProjectID: "project-tools", OwnerUserID: "user-1",
+			Title: "first finding", Severity: "medium", Status: "open",
+			VulnerabilityType: "信息泄露", Target: "https://first.example.com/a",
+			Evidence: "response", CreatedAt: now, UpdatedAt: now,
+		},
+		{
+			ID: "finding-list-second", ProjectID: "project-tools", OwnerUserID: "user-1",
+			Title: "second finding", Severity: "medium", Status: "open",
+			VulnerabilityType: "信息泄露", Target: "https://second.example.com/a",
+			Evidence: "response", CreatedAt: now.Add(time.Second), UpdatedAt: now.Add(time.Second),
+		},
+	} {
+		if err := service.db.CreateVulnerability(ctx, item); err != nil {
+			t.Fatalf("创建第 %d 个漏洞失败: %v", index, err)
+		}
+	}
+	assetPage, err := invokeProjectTool(t, service, ctx, "project_list", map[string]interface{}{
+		"resource": "assets",
+		"limit":    1,
+		"offset":   1,
+	})
+	if err != nil || !strings.Contains(assetPage, "first-asset") || strings.Contains(assetPage, "second-asset") {
+		t.Fatalf("资产 offset 未生效: output=%q err=%v", assetPage, err)
+	}
+	findingPage, err := invokeProjectTool(t, service, ctx, "project_list", map[string]interface{}{
+		"resource": "findings",
+		"limit":    1,
+		"offset":   1,
+	})
+	if err != nil || !strings.Contains(findingPage, "first finding") || strings.Contains(findingPage, "second finding") {
+		t.Fatalf("漏洞 offset 未生效: output=%q err=%v", findingPage, err)
 	}
 }
 
@@ -653,10 +728,11 @@ func TestProjectAssetToolRejectsUnsupportedKinds(t *testing.T) {
 	_, err := invokeProjectTool(t, service, ctx, "project_insert_assets", map[string]interface{}{
 		"assets_json": `[
 			{"name":"合法项","kind":"url","value":"https://a.com"},
-			{"name":"非法项","kind":"endpoint","value":"https://b.com"}
+				{"name":"非法项","kind":"endpoint","value":"https://b.com"},
+				{"name":"端口项","kind":"port","value":"443"}
 		]`,
 	})
-	if err == nil || !strings.Contains(err.Error(), "只能是 domain/ip/url/port/host") {
+	if err == nil || !strings.Contains(err.Error(), "只能是 domain/ip/url/source") {
 		t.Fatalf("非标准资产类型应被拒绝: %v", err)
 	}
 	assets, err := service.db.ListProjectAssets(ctx, "project-tools", "user-1")
@@ -668,27 +744,23 @@ func TestProjectAssetToolRejectsUnsupportedKinds(t *testing.T) {
 	}
 }
 
-func TestProjectAssetToolAcceptsExpandedKinds(t *testing.T) {
+func TestProjectAssetToolRejectsLegacyHostKind(t *testing.T) {
 	service, ctx := openProjectToolService(t, true)
-	out, err := invokeProjectTool(t, service, ctx, "project_insert_assets", map[string]interface{}{
+	_, err := invokeProjectTool(t, service, ctx, "project_insert_assets", map[string]interface{}{
 		"assets_json": `[
-			{"name":"端口","kind":"port","value":"443"},
 			{"name":"主机","kind":"host","value":"app.internal"},
 			{"name":"源码包","kind":"source","value":"seeyon20250422"}
 		]`,
 	})
-	if err != nil {
-		t.Fatalf("写入 port/host/source 资产失败: %v", err)
-	}
-	if !strings.Contains(out, "共写入 3 个资产") {
-		t.Fatalf("port/host/source 写入结果异常: %q", out)
+	if err == nil || !strings.Contains(err.Error(), "只能是 domain/ip/url/source") {
+		t.Fatalf("host 类型应被拒绝: %v", err)
 	}
 	assets, err := service.db.ListProjectAssets(ctx, "project-tools", "user-1")
 	if err != nil {
 		t.Fatalf("读取项目资产失败: %v", err)
 	}
-	if len(assets) != 3 {
-		t.Fatalf("应写入 3 个资产: %+v", assets)
+	if len(assets) != 0 {
+		t.Fatalf("批次含非法类型时不应部分写入: %+v", assets)
 	}
 }
 
@@ -697,11 +769,11 @@ func TestInferFindingAssetKindReturnsSupportedKinds(t *testing.T) {
 		"https://a.com/x": "url",
 		"10.0.0.1":        "ip",
 		"a.com":           "domain",
-		"443":             "port",
-		"10.0.0.0/24":     "host",
+		"443":             "",
+		"10.0.0.0/24":     "ip",
 		"internal-host":   "",
 		"seeyon20250422":  "",
-		"app.internal":    "host",
+		"app.internal":    "domain",
 		"opaque target":   "",
 		"internal target": "",
 		"src/WebSite/bin/Kingdee.BOS.FileServer.Web.dll : Kingdee.BOS.FileServer.Web.FileService.Upload2Attachment rva=0x2D24": "",
@@ -739,7 +811,7 @@ func TestProjectFindingAndGraphTools(t *testing.T) {
 	out, err = invokeProjectTool(t, service, ctx, "project_list_findings", map[string]interface{}{})
 	if err != nil ||
 		!strings.Contains(out, "SQL 注入") ||
-		!strings.Contains(out, "[high/open/verified]") ||
+		!strings.Contains(out, "[high/open/observed]") ||
 		!strings.Contains(out, "evidenceRefs=2") {
 		t.Fatalf("漏洞列表异常: %q, err=%v", out, err)
 	}
@@ -753,6 +825,7 @@ func TestProjectFindingAndGraphTools(t *testing.T) {
 	}
 	if !strings.Contains(findings[0].ReproductionSteps, "GET /x?id=1%20AND%201=1") ||
 		!strings.Contains(findings[0].ReproductionSteps, "Host: a.com") ||
+		findings[0].VerificationState != "observed" ||
 		findings[0].Impact != "可读取数据库数据" ||
 		len(findings[0].EvidenceRefs) != 2 ||
 		findings[0].AssetID == "" {

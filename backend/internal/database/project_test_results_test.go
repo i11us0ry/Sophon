@@ -355,6 +355,19 @@ func TestVulnerabilityEvidenceValidation(t *testing.T) {
 	}
 }
 
+func TestVulnerabilityEvidenceValidationLeavesContentSemanticsToReviewer(t *testing.T) {
+	item := Vulnerability{
+		Target:            "https://a.com/x?id=1",
+		Severity:          "high",
+		ReproductionSteps: "```http\nGET /x?id=1 HTTP/1.1\nHost: a.com\n```\n\n```python\nimport requests\nprint(requests.get('https://a.com/x?id=1', timeout=10).status_code)\n```",
+		Evidence:          "1) GET https://a.com/x?id=1 -> 200\n2) POST https://a.com/x?id=1 -> 200\nHost: a.com\nCookie: session=test\nUser-Agent: checker",
+		VerificationState: "verified",
+	}
+	if err := ValidateVulnerabilityEvidence(item); err != nil {
+		t.Fatalf("证据内容语义应由漏洞审核 Agent 判断，结构校验不应拒绝: %v", err)
+	}
+}
+
 func TestProjectHypothesesClaimAndResumeAreConversationScoped(t *testing.T) {
 	db, err := Open(filepath.Join(t.TempDir(), "conversation-scoped-hypotheses.db"))
 	if err != nil {

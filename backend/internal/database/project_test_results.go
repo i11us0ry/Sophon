@@ -248,10 +248,32 @@ func scanProjectTestResult(scanner rowScanner) (ProjectTestResult, error) {
 	return item, nil
 }
 
+type projectTestResultExecer interface {
+	ExecContext(context.Context, string, ...interface{}) (sql.Result, error)
+}
+
 func (db *DB) UpsertProjectTestResult(
 	ctx context.Context,
 	item ProjectTestResult,
 ) (*ProjectTestResult, error) {
+	saved, err := upsertProjectTestResult(ctx, db, item)
+	if err != nil {
+		return nil, err
+	}
+	return db.GetProjectTestResult(
+		ctx,
+		saved.ProjectID,
+		saved.AssetID,
+		saved.Dimension,
+		saved.Technique,
+	)
+}
+
+func upsertProjectTestResult(
+	ctx context.Context,
+	execer projectTestResultExecer,
+	item ProjectTestResult,
+) (ProjectTestResult, error) {
 	item.ProjectID = strings.TrimSpace(item.ProjectID)
 	item.AssetID = strings.TrimSpace(item.AssetID)
 	item.Dimension = strings.TrimSpace(item.Dimension)
@@ -281,7 +303,7 @@ func (db *DB) UpsertProjectTestResult(
 	if rawExecution == "" && rawOutcome == "" {
 		status, statusOK = NormalizeProjectTestResultStatus(rawStatus)
 		if !statusOK {
-			return nil, fmt.Errorf("测试状态不合法")
+			return ProjectTestResult{}, fmt.Errorf("测试状态不合法")
 		}
 		execution = projectExecutionStateFromStatus(status)
 		outcome = projectOutcomeStateFromStatus(status)
@@ -289,7 +311,7 @@ func (db *DB) UpsertProjectTestResult(
 		execution, executionOK = NormalizeProjectExecutionState(rawExecution)
 		outcome, outcomeOK = NormalizeProjectOutcomeState(rawOutcome)
 		if !executionOK || !outcomeOK {
-			return nil, fmt.Errorf("测试执行状态或结果状态不合法")
+			return ProjectTestResult{}, fmt.Errorf("测试执行状态或结果状态不合法")
 		}
 		status = ProjectStatusFromExecution(execution, outcome)
 		if rawStatus != "" && rawStatus != status {
@@ -302,7 +324,7 @@ func (db *DB) UpsertProjectTestResult(
 		}
 	}
 	if item.ProjectID == "" || item.Dimension == "" {
-		return nil, fmt.Errorf("项目和测试维度不能为空")
+		return ProjectTestResult{}, fmt.Errorf("项目和测试维度不能为空")
 	}
 	if item.Confidence < 0 {
 		item.Confidence = 0
@@ -324,7 +346,7 @@ func (db *DB) UpsertProjectTestResult(
 	}
 	evidenceRefs, err := encodeEvidenceRefs(item.EvidenceRefs)
 	if err != nil {
-		return nil, err
+		return ProjectTestResult{}, err
 	}
 	now := time.Now().UTC()
 	if item.ID == "" {
@@ -343,7 +365,7 @@ func (db *DB) UpsertProjectTestResult(
 	item.ExecutionState = execution
 	item.OutcomeState = outcome
 	item.UpdatedAt = now
-	_, err = db.ExecContext(
+	_, err = execer.ExecContext(
 		ctx,
 		`INSERT INTO project_test_results (
 			id, project_id, asset_id, dimension, technique, status,
@@ -481,15 +503,9 @@ func (db *DB) UpsertProjectTestResult(
 		item.OriginRunID,
 	)
 	if err != nil {
-		return nil, err
+		return ProjectTestResult{}, err
 	}
-	return db.GetProjectTestResult(
-		ctx,
-		item.ProjectID,
-		item.AssetID,
-		item.Dimension,
-		item.Technique,
-	)
+	return item, nil
 }
 
 func (db *DB) GetProjectTestResult(
@@ -860,7 +876,7 @@ func (db *DB) ClaimNextProjectHypothesis(
 	ctx context.Context,
 	projectID string,
 ) (*ProjectTestResult, error) {
-	return db.claimNextProjectHypothesis(ctx, projectID, "")
+	return db.claimNextProjectHypothesis(ctx, projectID, "", "")
 }
 
 func (db *DB) ClaimNextProjectHypothesisForConversation(
@@ -872,18 +888,37 @@ func (db *DB) ClaimNextProjectHypothesisForConversation(
 	if conversationID == "" {
 		return nil, nil
 	}
-	return db.claimNextProjectHypothesis(ctx, projectID, conversationID)
+	return db.claimNextProjectHypothesis(ctx, projectID, conversationID, "")
+}
+
+func (db *DB) ClaimNextProjectHypothesisForConversationAsset(
+	ctx context.Context,
+	projectID string,
+	conversationID string,
+	assetID string,
+) (*ProjectTestResult, error) {
+	conversationID = strings.TrimSpace(conversationID)
+	assetID = strings.TrimSpace(assetID)
+	if conversationID == "" || assetID == "" {
+		return nil, nil
+	}
+	return db.claimNextProjectHypothesis(ctx, projectID, conversationID, assetID)
 }
 
 func (db *DB) claimNextProjectHypothesis(
 	ctx context.Context,
 	projectID string,
 	originConversationID string,
+	assetID string,
 ) (*ProjectTestResult, error) {
 	now := time.Now().UTC()
 	originFilter := ""
 	if strings.TrimSpace(originConversationID) != "" {
 		originFilter = " AND candidate.origin_conversation_id = ?"
+	}
+	assetFilter := ""
+	if strings.TrimSpace(assetID) != "" {
+		assetFilter = " AND candidate.asset_id = ?"
 	}
 	query := `UPDATE project_test_results
 		 SET status = 'running',
@@ -899,6 +934,7 @@ func (db *DB) claimNextProjectHypothesis(
 			SELECT candidate.id FROM project_test_results AS candidate
 			WHERE candidate.project_id = ?
 			  ` + originFilter + `
+			  ` + assetFilter + `
 			  AND (candidate.execution_state = 'open' OR candidate.status = 'untested')
 			ORDER BY (
 				candidate.priority + MIN(
@@ -923,6 +959,9 @@ func (db *DB) claimNextProjectHypothesis(
 	}
 	if strings.TrimSpace(originConversationID) != "" {
 		args = append(args, strings.TrimSpace(originConversationID))
+	}
+	if strings.TrimSpace(assetID) != "" {
+		args = append(args, strings.TrimSpace(assetID))
 	}
 	row := db.QueryRowContext(ctx, query, args...)
 	item, err := scanProjectTestResult(row)
@@ -1254,6 +1293,30 @@ func (db *DB) CountActiveProjectHypothesesForConversation(
 		   )`,
 		strings.TrimSpace(projectID),
 		strings.TrimSpace(conversationID),
+	).Scan(&count)
+	return count, err
+}
+
+func (db *DB) CountActiveProjectHypothesesForConversationAsset(
+	ctx context.Context,
+	projectID string,
+	conversationID string,
+	assetID string,
+) (int, error) {
+	var count int
+	err := db.QueryRowContext(
+		ctx,
+		`SELECT COUNT(*) FROM project_test_results
+		 WHERE project_id = ?
+		   AND origin_conversation_id = ?
+		   AND asset_id = ?
+		   AND (
+		     execution_state IN ('open', 'running', 'paused')
+		     OR status IN ('untested', 'running', 'paused')
+		   )`,
+		strings.TrimSpace(projectID),
+		strings.TrimSpace(conversationID),
+		strings.TrimSpace(assetID),
 	).Scan(&count)
 	return count, err
 }

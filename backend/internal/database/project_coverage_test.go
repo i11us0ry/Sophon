@@ -30,13 +30,13 @@ func TestProjectCoverageComputesQueueAndRatio(t *testing.T) {
 		{
 			ID: "asset-tested", ProjectID: "project-cov", OwnerUserID: "user-1",
 			Name: "已测主机", Kind: "url", Value: "https://a.com/x?id=1",
-			Status: "active", Criticality: "medium", RiskScore: 10,
+			Status: "active", Source: AssetSourceManual, Criticality: "medium", RiskScore: 10,
 			CreatedAt: now, UpdatedAt: now,
 		},
 		{
 			ID: "asset-untested", ProjectID: "project-cov", OwnerUserID: "user-1",
 			Name: "未测主机", Kind: "ip", Value: "10.0.0.2",
-			Status: "active", Criticality: "critical", RiskScore: 90,
+			Status: "active", Source: AssetSourceManual, Criticality: "critical", RiskScore: 90,
 			CreatedAt: now, UpdatedAt: now,
 		},
 	}
@@ -156,13 +156,13 @@ func TestProjectCoverageTracksPartialAndLargeResultSets(t *testing.T) {
 		{
 			ID: "asset-partial", ProjectID: "project-partial", OwnerUserID: "user-1",
 			Name: "部分覆盖", Kind: "url", Value: "https://partial.example",
-			Status: "active", Criticality: "high", RiskScore: 60,
+			Status: "active", Source: AssetSourceManual, Criticality: "high", RiskScore: 60,
 			CreatedAt: now, UpdatedAt: now,
 		},
 		{
 			ID: "asset-covered", ProjectID: "project-partial", OwnerUserID: "user-1",
 			Name: "完整覆盖", Kind: "url", Value: "https://covered.example",
-			Status: "active", Criticality: "medium", RiskScore: 30,
+			Status: "active", Source: AssetSourceManual, Criticality: "medium", RiskScore: 30,
 			CreatedAt: now, UpdatedAt: now,
 		},
 		{
@@ -261,7 +261,7 @@ func TestAggregateProjectVulnerabilityCoverageDoesNotTruncate(t *testing.T) {
 	if err := db.CreateAsset(ctx, Asset{
 		ID: "asset-findings", ProjectID: "project-findings", OwnerUserID: "user-1",
 		Name: "漏洞资产", Kind: "url", Value: "https://findings.example",
-		Status: "active", Criticality: "high", RiskScore: 80,
+		Status: "active", Source: AssetSourceManual, Criticality: "high", RiskScore: 80,
 		CreatedAt: now, UpdatedAt: now,
 	}); err != nil {
 		t.Fatalf("创建资产失败: %v", err)

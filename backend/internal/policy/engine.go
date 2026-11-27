@@ -61,9 +61,9 @@ func (e *Engine) Evaluate(
 	}
 	if len(result.Targets) > 0 && execctx.AssetRestrictionEnabled(ctx) {
 		campaignID := strings.TrimSpace(execctx.CampaignID(ctx))
-		assets, err := e.db.ListProjectAssets(ctx, projectID, userID)
+		assets, err := e.db.ListAuthorizedProjectAssets(ctx, projectID, userID)
 		if campaignID != "" {
-			assets, err = e.db.ListCampaignAssets(ctx, campaignID, userID)
+			assets, err = e.db.ListAuthorizedCampaignAssets(ctx, campaignID, userID)
 		}
 		if err != nil {
 			result.Kind = DecisionDeny

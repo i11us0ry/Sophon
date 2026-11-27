@@ -550,6 +550,7 @@ func seedProjectForBatchStartWithAssetStatus(
 		Kind:        "domain",
 		Value:       projectID + ".example.com",
 		Status:      status,
+		Source:      database.AssetSourceManual,
 		Criticality: "medium",
 		CreatedAt:   now,
 		UpdatedAt:   now,

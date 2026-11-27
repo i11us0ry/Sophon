@@ -9,6 +9,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -559,6 +560,16 @@ func (r *subAgentRunner) runWithOptions(
 	if err := reserveRunSubagent(ctx); err != nil {
 		return "", err
 	}
+	if err := r.service.checkLLMCircuit(); err != nil {
+		return "", err
+	}
+	defer func() {
+		if runErr != nil {
+			runErr = r.service.observeLLMError(runErr)
+			return
+		}
+		r.service.markLLMHealthy()
+	}()
 	prompt = strings.TrimSpace(prompt)
 	if prompt == "" {
 		return "", fmt.Errorf("任务描述不能为空")
@@ -1223,6 +1234,30 @@ func (s *Service) runCoordinatedMissionLoop(
 		cancelWorkers()
 		workerWG.Wait()
 	}()
+	var currentFocus *database.ProjectAssetWork
+	deferredAssets := make(map[string]bool)
+	defer func() {
+		if currentFocus == nil {
+			return
+		}
+		releaseCtx, releaseCancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+		defer releaseCancel()
+		_ = s.db.ReleaseProjectAssetWork(
+			releaseCtx,
+			projectID,
+			execctx.UserID(ctx),
+			currentFocus.AssetID,
+			execctx.ConversationID(ctx),
+			database.AssetWorkQueued,
+			"编排结束，释放资产焦点",
+		)
+		s.auditAssetWork(
+			releaseCtx,
+			"asset_work.release",
+			currentFocus.AssetID,
+			"编排结束释放资产焦点",
+		)
+	}()
 
 	heartbeatInterval := coordinatedPlannerHeartbeat
 	if heartbeatInterval <= 0 {
@@ -1286,11 +1321,28 @@ func (s *Service) runCoordinatedMissionLoop(
 			defer cancel()
 			_ = s.db.ReleaseAgentTriggers(releaseCtx, triggerIDs)
 		}
-		beforeActive, countErr := s.db.CountActiveProjectHypothesesForConversation(
-			ctx,
-			projectID,
-			execctx.ConversationID(ctx),
-		)
+		assetFocus, focusErr := s.coordinatedAssetFocus(ctx, projectID, deferredAssets)
+		if focusErr != nil {
+			releaseTriggers()
+			return false, focusErr
+		}
+		currentFocus = assetFocus
+		countActive := func() (int, error) {
+			if assetFocus != nil {
+				return s.db.CountActiveProjectHypothesesForConversationAsset(
+					ctx,
+					projectID,
+					execctx.ConversationID(ctx),
+					assetFocus.AssetID,
+				)
+			}
+			return s.db.CountActiveProjectHypothesesForConversation(
+				ctx,
+				projectID,
+				execctx.ConversationID(ctx),
+			)
+		}
+		beforeActive, countErr := countActive()
 		if countErr != nil {
 			releaseTriggers()
 			return false, countErr
@@ -1305,12 +1357,22 @@ func (s *Service) runCoordinatedMissionLoop(
 		if todos, todoErr := s.db.ListAgentPlannerTodos(ctx, execctx.ConversationID(ctx)); todoErr == nil {
 			task += renderPlannerTodos(todos)
 		}
+		plannerCtx := ctx
+		if assetFocus != nil {
+			plannerCtx = execctx.WithAssetID(ctx, assetFocus.AssetID)
+			task += coordinatedAssetFocusTask(*assetFocus)
+		} else {
+			task += "\n\n【资产工作队列】\n当前没有可领取的授权资产工作项。仅处理项目级 Goal 或等待用户补充授权。"
+		}
 		if !workersStarted && beforeActive > 0 {
 			startWorkers()
 			handle.signalWorkers()
 		}
-		if _, err := s.runCoordinatedPlannerWithRetry(ctx, task); err != nil {
+		if _, err := s.runCoordinatedPlannerWithRetry(plannerCtx, task); err != nil {
 			releaseTriggers()
+			if isGlobalLLMError(err) {
+				return false, s.observeLLMError(err)
+			}
 			if beforeActive == 0 {
 				return false, fmt.Errorf("Planner 第 %d 轮规划失败: %w", plannerRounds+1, err)
 			}
@@ -1335,23 +1397,62 @@ func (s *Service) runCoordinatedMissionLoop(
 		}
 		handle.signalWorkers()
 
-		afterActive, countErr := s.db.CountActiveProjectHypothesesForConversation(
-			ctx,
-			projectID,
-			execctx.ConversationID(ctx),
-		)
+		afterActive, countErr := countActive()
 		if countErr != nil {
 			return false, countErr
 		}
-		goalTotal, goalOpen := s.projectGoalStats(ctx, projectID)
-		if goalTotal > 0 && goalOpen == 0 {
-			// Goal 已完成后停止领取新任务，但让当前 Worker 把证据和终态写回。
-			handle.beginDrain()
-			handle.signalWorkers()
-			workerWG.Wait()
-			return false, nil
-		}
 		if afterActive == 0 {
+			if assetFocus != nil {
+				closeout, closeoutErr := s.db.AssetCloseoutStatus(
+					ctx,
+					projectID,
+					execctx.UserID(ctx),
+					assetFocus.AssetID,
+				)
+				if closeoutErr != nil {
+					return false, closeoutErr
+				}
+				if closeout.CanClose {
+					if completeErr := s.db.CompleteProjectAssetWork(
+						ctx,
+						projectID,
+						execctx.UserID(ctx),
+						assetFocus.AssetID,
+						execctx.ConversationID(ctx),
+						"资产关闭门禁通过",
+					); completeErr == nil {
+						s.auditAssetWork(
+							ctx,
+							"asset_work.complete",
+							assetFocus.AssetID,
+							"资产关闭门禁通过",
+						)
+						assetFocus = nil
+						currentFocus = nil
+						continue
+					}
+				}
+				missing := strings.TrimSpace(strings.Join(closeout.Missing, "；"))
+				if missing == "" {
+					missing = "资产关闭门禁未通过"
+				}
+				if releaseErr := s.db.ReleaseProjectAssetWork(
+					ctx,
+					projectID,
+					execctx.UserID(ctx),
+					assetFocus.AssetID,
+					execctx.ConversationID(ctx),
+					database.AssetWorkNeedsFollowup,
+					missing,
+				); releaseErr != nil {
+					return false, fmt.Errorf("释放待跟进资产失败: %w", releaseErr)
+				}
+				deferredAssets[assetFocus.AssetID] = true
+				s.auditAssetWork(ctx, "asset_work.needs_followup", assetFocus.AssetID, missing)
+				assetFocus = nil
+				currentFocus = nil
+				continue
+			}
 			if !s.projectHasOpenGoals(ctx, projectID) {
 				if pending, pendingErr := s.db.CountPendingAgentTriggers(
 					ctx,
@@ -1386,6 +1487,7 @@ const (
 	coordinatedTriggerDebounce  = 750 * time.Millisecond
 	coordinatedPlannerAttempts  = 3
 	coordinatedPlannerRetryBase = 500 * time.Millisecond
+	coordinatedAssetLeaseTTL    = 30 * time.Minute
 	workerStreamAttempts        = 3
 	workerStreamRetryBase       = time.Second
 	workerExecutionMaxAttempts  = 8
@@ -1447,6 +1549,9 @@ func shouldRequeueWorkerFailure(
 	hypothesis database.ProjectTestResult,
 	runErr error,
 ) bool {
+	if isGlobalLLMError(runErr) {
+		return false
+	}
 	return hypothesis.Attempts < workerExecutionMaxAttempts &&
 		streamErrorRetryable(runErr)
 }
@@ -1472,11 +1577,68 @@ func (s *Service) runCoordinatedWorkerLoop(
 		if handle != nil && handle.isDraining() {
 			return
 		}
-		hypothesis, err := s.db.ClaimNextProjectHypothesisForConversation(
+		conversationID := strings.TrimSpace(execctx.ConversationID(ctx))
+		ownerUserID := strings.TrimSpace(execctx.UserID(ctx))
+		assetFocus, err := s.db.GetActiveProjectAssetWorkForConversation(
 			ctx,
 			projectID,
-			execctx.ConversationID(ctx),
+			ownerUserID,
+			conversationID,
 		)
+		if err != nil {
+			if ctx.Err() == nil {
+				reportError(err)
+			}
+			return
+		}
+		var hypothesis *database.ProjectTestResult
+		if assetFocus != nil {
+			if err := s.db.RenewProjectAssetWorkLease(
+				ctx,
+				projectID,
+				ownerUserID,
+				assetFocus.AssetID,
+				conversationID,
+				coordinatedAssetLeaseTTL,
+			); err != nil {
+				reportError(err)
+				select {
+				case <-ctx.Done():
+					return
+				case <-handle.workerChannel():
+				case <-idle.C:
+				}
+				continue
+			}
+			hypothesis, err = s.db.ClaimNextProjectHypothesisForConversationAsset(
+				ctx,
+				projectID,
+				conversationID,
+				assetFocus.AssetID,
+			)
+		} else {
+			// 兼容没有资产工作项的旧会话；一旦项目进入资产队列，失去焦点
+			// 的 Worker 必须等待，不能回退到全项目 Hypothesis。
+			hasAssetWork, workErr := s.db.ProjectHasAssetWork(ctx, projectID, ownerUserID)
+			if workErr != nil {
+				reportError(workErr)
+				return
+			}
+			if hasAssetWork {
+				select {
+				case <-ctx.Done():
+					return
+				case <-handle.workerChannel():
+				case <-idle.C:
+				}
+				continue
+			}
+			hypothesis, err = s.db.ClaimNextProjectHypothesisForConversation(
+				ctx,
+				projectID,
+				conversationID,
+			)
+		}
 		if err != nil {
 			if ctx.Err() == nil {
 				reportError(err)
@@ -1494,12 +1656,23 @@ func (s *Service) runCoordinatedWorkerLoop(
 			}
 			continue
 		}
+		if assetFocus != nil {
+			if err := s.db.MarkProjectAssetWorkTesting(
+				ctx,
+				projectID,
+				ownerUserID,
+				assetFocus.AssetID,
+				conversationID,
+			); err != nil {
+				reportError(err)
+				continue
+			}
+		}
 		focus := normalizeWorkerFocus(hypothesis.Dimension)
 		agentName := name
 		if focus != "" {
 			agentName = focus
 		}
-		conversationID := strings.TrimSpace(execctx.ConversationID(ctx))
 		workerCtx, workerCancel := context.WithCancelCause(ctx)
 		control := s.registerWorkerControl(conversationID, hypothesis.ID, func() {
 			workerCancel(errWorkerStopped)
@@ -1509,6 +1682,17 @@ func (s *Service) runCoordinatedWorkerLoop(
 		workerPrompt := prompt
 		recoveryReason := workerPreservedRetryReason(hypothesis.StateReason)
 		retryReason := ""
+		heartbeatStop := func() {}
+		if assetFocus != nil {
+			heartbeatStop = s.startAssetLeaseHeartbeat(
+				workerCtx,
+				projectID,
+				ownerUserID,
+				assetFocus.AssetID,
+				conversationID,
+				workerCancel,
+			)
+		}
 		var runErr error
 		for attempt := 1; attempt <= workerStreamAttempts; attempt++ {
 			if attempt > 1 {
@@ -1542,7 +1726,7 @@ func (s *Service) runCoordinatedWorkerLoop(
 				nil,
 			)
 			if runErr == nil || workerCtx.Err() != nil || control.isStopped() ||
-				!streamErrorRetryable(runErr) {
+				!s.streamErrorRetryable(runErr) {
 				break
 			}
 			if current, currentErr := s.db.GetProjectTestResultByID(ctx, projectID, hypothesis.ID); currentErr == nil &&
@@ -1574,6 +1758,7 @@ func (s *Service) runCoordinatedWorkerLoop(
 					"请先读取当前假设、已写回事实和证据，只继续未完成部分；不要重复已成功执行的长命令，优先增量写回。"
 			}
 		}
+		heartbeatStop()
 		workerCancel(nil)
 		s.unregisterWorkerControl(conversationID, hypothesis.ID, control)
 		current, currentErr := s.db.GetProjectTestResultByID(ctx, projectID, hypothesis.ID)
@@ -1619,6 +1804,10 @@ func (s *Service) runCoordinatedWorkerLoop(
 				if !requeued {
 					s.markCoordinatedHypothesisBlocked(ctx, *current, runErr)
 				}
+				if isGlobalLLMError(runErr) {
+					reportError(s.observeLLMError(runErr))
+					return
+				}
 			} else if !database.IsProjectTestResultTerminal(current.Status) {
 				s.markCoordinatedHypothesisState(
 					ctx,
@@ -1653,6 +1842,62 @@ func (s *Service) runCoordinatedWorkerLoop(
 		} else {
 			handle.signalPlanner()
 		}
+	}
+}
+
+func (s *Service) startAssetLeaseHeartbeat(
+	parent context.Context,
+	projectID string,
+	ownerUserID string,
+	assetID string,
+	conversationID string,
+	cancelWorker context.CancelCauseFunc,
+) func() {
+	if s == nil || s.db == nil || strings.TrimSpace(assetID) == "" {
+		return func() {}
+	}
+	interval := coordinatedAssetLeaseTTL / 3
+	if interval < 30*time.Second {
+		interval = 30 * time.Second
+	}
+	done := make(chan struct{})
+	var stopOnce sync.Once
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-parent.Done():
+				return
+			case <-done:
+				return
+			case <-ticker.C:
+				renewCtx, renewCancel := context.WithTimeout(
+					context.WithoutCancel(parent),
+					5*time.Second,
+				)
+				err := s.db.RenewProjectAssetWorkLease(
+					renewCtx,
+					projectID,
+					ownerUserID,
+					assetID,
+					conversationID,
+					coordinatedAssetLeaseTTL,
+				)
+				renewCancel()
+				if err != nil {
+					if cancelWorker != nil {
+						cancelWorker(err)
+					}
+					return
+				}
+			}
+		}
+	}()
+	return func() {
+		stopOnce.Do(func() {
+			close(done)
+		})
 	}
 }
 
@@ -1878,6 +2123,128 @@ func coordinatedPlannerTask(plan missionPlan) string {
 	return builder.String()
 }
 
+func (s *Service) coordinatedAssetFocus(
+	ctx context.Context,
+	projectID string,
+	excludedAssets map[string]bool,
+) (*database.ProjectAssetWork, error) {
+	projectID = strings.TrimSpace(projectID)
+	ownerUserID := strings.TrimSpace(execctx.UserID(ctx))
+	conversationID := strings.TrimSpace(execctx.ConversationID(ctx))
+	if projectID == "" || ownerUserID == "" || conversationID == "" {
+		return nil, nil
+	}
+	active, err := s.db.GetActiveProjectAssetWorkForConversation(
+		ctx,
+		projectID,
+		ownerUserID,
+		conversationID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if active != nil {
+		if err := s.db.RenewProjectAssetWorkLease(
+			ctx,
+			projectID,
+			ownerUserID,
+			active.AssetID,
+			conversationID,
+			coordinatedAssetLeaseTTL,
+		); err == nil {
+			return active, nil
+		}
+	}
+	leaseOwner := conversationID
+	if runID := strings.TrimSpace(execctx.RunID(ctx)); runID != "" {
+		leaseOwner += ":" + runID
+	}
+	excludedIDs := make([]string, 0, len(excludedAssets))
+	for assetID := range excludedAssets {
+		if strings.TrimSpace(assetID) != "" {
+			excludedIDs = append(excludedIDs, assetID)
+		}
+	}
+	sort.Strings(excludedIDs)
+	var claimed *database.ProjectAssetWork
+	if len(excludedIDs) > 0 {
+		claimed, err = s.db.ClaimNextProjectAssetWorkExcluding(
+			ctx,
+			projectID,
+			ownerUserID,
+			conversationID,
+			leaseOwner,
+			coordinatedAssetLeaseTTL,
+			excludedIDs,
+		)
+	} else {
+		claimed, err = s.db.ClaimNextProjectAssetWork(
+			ctx,
+			projectID,
+			ownerUserID,
+			conversationID,
+			leaseOwner,
+			coordinatedAssetLeaseTTL,
+		)
+	}
+	if err == nil && claimed != nil {
+		s.auditAssetWork(
+			ctx,
+			"asset_work.claim",
+			claimed.AssetID,
+			"Planner 领取资产焦点",
+		)
+	}
+	return claimed, err
+}
+
+func (s *Service) auditAssetWork(
+	ctx context.Context,
+	action string,
+	assetID string,
+	detail string,
+) {
+	if s == nil || s.db == nil || strings.TrimSpace(assetID) == "" {
+		return
+	}
+	userID := strings.TrimSpace(execctx.UserID(ctx))
+	if userID == "" {
+		return
+	}
+	username := userID
+	if user, err := s.db.GetUserByID(ctx, userID); err == nil && user != nil {
+		username = user.Username
+	}
+	auditCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+	defer cancel()
+	_ = s.db.AddAuditLog(auditCtx, database.AuditLog{
+		UserID:       userID,
+		Username:     username,
+		Action:       action,
+		ResourceType: "project_asset_work",
+		ResourceID:   assetID,
+		Result:       "success",
+		Detail:       detail,
+	})
+}
+
+func coordinatedAssetFocusTask(focus database.ProjectAssetWork) string {
+	var builder strings.Builder
+	builder.WriteString("\n\n【当前资产工作焦点】\n")
+	builder.WriteString("- asset_id：")
+	builder.WriteString(focus.AssetID)
+	builder.WriteString("\n- 类型：")
+	builder.WriteString(focus.AssetKind)
+	builder.WriteString("\n- 值：")
+	builder.WriteString(focus.AssetValue)
+	builder.WriteString("\n- 优先级：")
+	builder.WriteString(fmt.Sprint(focus.Priority))
+	builder.WriteString("\n")
+	builder.WriteString("- 本轮只规划该资产的未覆盖方向；新发现的其他资产写入资产队列，不直接切换。\n")
+	builder.WriteString("- 当前资产被阻塞、需要用户输入或已完成时，才允许释放焦点。\n")
+	return builder.String()
+}
+
 func (s *Service) runCoordinatedPlannerWithRetry(ctx context.Context, task string) (string, error) {
 	var lastErr error
 	for attempt := 1; attempt <= coordinatedPlannerAttempts; attempt++ {
@@ -1886,7 +2253,7 @@ func (s *Service) runCoordinatedPlannerWithRetry(ctx context.Context, task strin
 			return result, nil
 		}
 		lastErr = err
-		if attempt >= coordinatedPlannerAttempts || !streamErrorRetryable(err) {
+		if attempt >= coordinatedPlannerAttempts || !s.streamErrorRetryable(err) {
 			return "", err
 		}
 		delay := coordinatedPlannerRetryBase * time.Duration(attempt)

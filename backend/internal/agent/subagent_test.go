@@ -474,6 +474,48 @@ func TestDrainedWorkerDoesNotClaimNewHypothesis(t *testing.T) {
 	}
 }
 
+func TestWorkerDoesNotFallbackWhenAssetWorkQueueExists(t *testing.T) {
+	service := newSubAgentTestService(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	if err := service.db.CreateProject(ctx, database.Project{
+		ID: "project-asset-focus", OwnerUserID: "user-1", Name: "资产焦点",
+		Status: "active", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("创建项目失败: %v", err)
+	}
+	if err := service.db.CreateAsset(ctx, database.Asset{
+		ID: "asset-focus", ProjectID: "project-asset-focus", OwnerUserID: "user-1",
+		Name: "焦点资产", Kind: "domain", Value: "focus.example.com",
+		Status: "active", Source: database.AssetSourceManual, Criticality: "medium",
+		CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("创建资产失败: %v", err)
+	}
+	if err := service.db.SyncProjectAssetWork(ctx, "project-asset-focus", "user-1"); err != nil {
+		t.Fatalf("同步资产队列失败: %v", err)
+	}
+	item, err := service.db.UpsertProjectTestResult(ctx, database.ProjectTestResult{
+		ProjectID: "project-asset-focus", AssetID: "asset-focus",
+		Dimension: "SQL注入", Technique: "boolean", Status: "untested",
+		CreatedAt: now, UpdatedAt: now,
+	})
+	if err != nil {
+		t.Fatalf("创建假设失败: %v", err)
+	}
+	ctx = execctx.WithConversationID(ctx, "conv-asset-focus")
+	ctx = execctx.WithUserID(ctx, "user-1")
+	ctx = execctx.WithProjectID(ctx, "project-asset-focus")
+	runCtx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+	defer cancel()
+	handle := newBackgroundOrchestration(func() {})
+	service.runCoordinatedWorkerLoop(runCtx, "project-asset-focus", "work#1", handle, func(error) {})
+	current, err := service.db.GetProjectTestResultByID(ctx, "project-asset-focus", item.ID)
+	if err != nil || current == nil || current.Status != "untested" {
+		t.Fatalf("项目已有资产队列时，失去焦点的 Worker 不应回退领取全项目假设: %+v err=%v", current, err)
+	}
+}
+
 func TestWorkerDispatchContinuesWhenPlannerModelFails(t *testing.T) {
 	service := newSubAgentTestService(t)
 	service.model = &vulnerabilityReviewTestModel{err: errors.New("status code: 503")}

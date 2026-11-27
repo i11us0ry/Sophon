@@ -291,13 +291,15 @@ func (s *Service) processBackgroundUpdateConversation(
 		Content:        content,
 		CreatedAt:      time.Now().UTC(),
 	}
-	if err := s.db.AddMessage(ctx, message); err != nil {
+	writeCtx, writeCancel := context.WithTimeout(context.WithoutCancel(parent), 3*time.Second)
+	defer writeCancel()
+	if err := s.db.AddMessage(writeCtx, message); err != nil {
 		log.Printf("background updates: save message conversation=%s: %v", conversationID, err)
 		release()
 		return false
 	}
 
-	eventCtx := execctx.WithConversationID(ctx, conversationID)
+	eventCtx := execctx.WithConversationID(writeCtx, conversationID)
 	eventCtx = execctx.WithUserID(eventCtx, ownerUserID)
 	eventCtx = execctx.WithProjectID(eventCtx, projectID)
 	eventCtx = execctx.WithMessageID(eventCtx, message.ID)
@@ -928,6 +930,9 @@ func (s *Service) enqueueOrchestrationUpdate(
 	if status == database.AgentOrchestrationFailed {
 		kind = "orchestration_failed"
 		summary = "后台编排执行失败"
+	} else if status == database.AgentOrchestrationPaused {
+		kind = "orchestration_paused"
+		summary = "后台编排已暂停"
 	}
 	if lastError != nil {
 		summary += "：" + redact.Text(lastError.Error())

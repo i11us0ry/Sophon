@@ -15,6 +15,16 @@ ok() { printf '\033[32m[+]\033[0m %s\n' "$*"; }
 warn() { printf '\033[33m[!]\033[0m %s\n' "$*"; }
 die() { printf '\033[31m[x]\033[0m %s\n' "$*" >&2; exit 1; }
 
+cleanup_stage() {
+  local stage="${STAGE_DIR:-}"
+  [[ -n "$stage" ]] || return 0
+  [[ -d "$stage" ]] || return 0
+  case "$stage" in
+    "${ROOT_DIR}"/.release-stage.*) rm -rf "$stage" ;;
+  esac
+}
+trap cleanup_stage EXIT
+
 usage() {
   cat <<'EOF'
 准备 Sophon Git 发布目录
@@ -107,7 +117,8 @@ copy_release() {
     --exclude='/server' \
     --exclude='/sophon-server' \
     --exclude='/sophon-mcp-tools' \
-    --exclude='/sophon-tool-runner'
+    --exclude='/sophon-tool-runner' \
+    --exclude='/sophon-process-supervisor'
   copy_tree "${ROOT_DIR}/frontend" "${release}/frontend" \
     --exclude='node_modules/' \
     --exclude='dist/' \
@@ -246,10 +257,22 @@ run_tests() {
     return
   }
   command -v "$GO_BIN" >/dev/null 2>&1 || die "缺少 Go 命令: ${GO_BIN}"
-  info "运行发布副本后端测试..."
+  # 测试二进制只能在当前主机执行。若 Go 环境被设置为交叉编译
+  # （例如 go env -w GOOS=linux GOARCH=amd64），go test 会因 exec format error 失败，
+  # 因此这里显式使用主机平台，交叉编译设置只应作用于发布产物构建。
+  local test_os test_arch env_os env_arch
+  env_os="$("$GO_BIN" env GOOS)"
+  env_arch="$("$GO_BIN" env GOARCH)"
+  test_os="${TEST_GOOS:-$("$GO_BIN" env GOHOSTOS)}"
+  test_arch="${TEST_GOARCH:-$("$GO_BIN" env GOHOSTARCH)}"
+  if [[ "$env_os" != "$test_os" || "$env_arch" != "$test_arch" ]]; then
+    warn "Go 环境为 ${env_os}/${env_arch}，测试强制使用主机平台 ${test_os}/${test_arch}"
+  fi
+  info "运行发布副本后端测试 (${test_os}/${test_arch})..."
   (
     cd "${release}/backend"
-    "$GO_BIN" test ./... -count=1
+    GOOS="$test_os" GOARCH="$test_arch" CGO_ENABLED="${TEST_CGO_ENABLED:-1}" \
+      "$GO_BIN" test ./... -count=1
   )
   (
     cd "$release"

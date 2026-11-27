@@ -369,6 +369,7 @@ func (s *Service) startBackgroundOrchestrationWithFeedback(
 	if s == nil || s.db == nil {
 		return nil
 	}
+	s.resetLLMCircuit()
 	conversationID := strings.TrimSpace(execctx.ConversationID(parent))
 	projectID = strings.TrimSpace(projectID)
 	ownerUserID := strings.TrimSpace(execctx.UserID(parent))
@@ -466,6 +467,11 @@ func (s *Service) startBackgroundOrchestrationWithFeedback(
 		}()
 		_, runErr := s.runCoordinatedMissionLoop(ctx, execution, projectID, false, handle)
 		status, _ := handle.snapshot()["status"].(string)
+		if runErr != nil && isGlobalLLMError(runErr) {
+			handle.setStatus(database.AgentOrchestrationPaused, runErr)
+			s.enqueueOrchestrationUpdate(ctx, database.AgentOrchestrationPaused, runErr)
+			return
+		}
 		if status != database.AgentOrchestrationPaused &&
 			status != database.AgentOrchestrationStopped {
 			terminalStatus := database.AgentOrchestrationCompleted

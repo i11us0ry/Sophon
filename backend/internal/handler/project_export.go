@@ -2831,8 +2831,6 @@ func docxAssetKindLabel(value string) string {
 		return "URL"
 	case "service":
 		return "服务"
-	case "port":
-		return "端口"
 	case "host":
 		return "主机"
 	case "other":

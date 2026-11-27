@@ -237,6 +237,7 @@ func (h *BusinessHandler) CreateProject(c *gin.Context) {
 	if _, err := h.db.SyncProjectGraph(c.Request.Context(), item); err != nil {
 		_ = err
 	}
+	item.Constraints = database.ProjectConstraintsText(item.Goals)
 	c.JSON(http.StatusCreated, item)
 }
 
@@ -549,6 +550,22 @@ func (h *BusinessHandler) ListProjectFacts(c *gin.Context) {
 	}
 	limit := clampQueryInt(c.Query("limit"), 200, 1, 500)
 	offset := clampQueryInt(c.Query("offset"), 0, 0, 1000000)
+	query := strings.TrimSpace(c.Query("query"))
+	if len([]rune(query)) > 200 {
+		badRequest(c, "invalid_fact_query", "事实搜索内容过长")
+		return
+	}
+	factType := strings.TrimSpace(c.Query("factType"))
+	if factType == "" {
+		factType = strings.TrimSpace(c.Query("kind"))
+	}
+	status := strings.ToLower(strings.TrimSpace(c.Query("status")))
+	switch status {
+	case "", "all", "with_evidence", "evidence", "missing_evidence", "tainted", "conflict", "conflicted", "pinned":
+	default:
+		badRequest(c, "invalid_fact_status", "事实状态不合法")
+		return
+	}
 	assetID, err := h.validateProjectAssetID(
 		c.Request.Context(),
 		c.Param("id"),
@@ -559,12 +576,17 @@ func (h *BusinessHandler) ListProjectFacts(c *gin.Context) {
 		badRequest(c, "invalid_asset", "资产不存在或不属于当前项目")
 		return
 	}
-	items, total, err := h.db.ListProjectFactsPageByAsset(
+	items, total, err := h.db.ListProjectFactsPageFiltered(
 		c.Request.Context(),
-		c.Param("id"),
-		assetID,
-		limit,
-		offset,
+		database.ProjectFactFilter{
+			ProjectID: c.Param("id"),
+			AssetID:   assetID,
+			FactType:  factType,
+			Status:    status,
+			Query:     query,
+			Limit:     limit,
+			Offset:    offset,
+		},
 	)
 	if err != nil {
 		internalError(c, "list_facts_failed", "读取项目事实失败")
@@ -909,14 +931,6 @@ func (h *BusinessHandler) CreateVulnerability(c *gin.Context) {
 		badRequest(c, "invalid_vulnerability", err.Error())
 		return
 	}
-	if err := vulnerabilityfmt.ValidateEvidenceContent(
-		request.Evidence,
-		request.EvidenceRefs,
-		request.ReproductionSteps,
-	); err != nil {
-		badRequest(c, "invalid_vulnerability_evidence", err.Error())
-		return
-	}
 	if err := h.validateProjectReference(c.Request.Context(), user.ID, request.ProjectID); err != nil {
 		badRequest(c, "invalid_vulnerability", err.Error())
 		return
@@ -1050,6 +1064,65 @@ func (h *BusinessHandler) ListVulnerabilities(c *gin.Context) {
 	})
 }
 
+func (h *BusinessHandler) RetryVulnerabilityReview(c *gin.Context) {
+	user := middleware.UserFromContext(c)
+	if user == nil {
+		unauthorized(c)
+		return
+	}
+	projectID := strings.TrimSpace(c.Param("id"))
+	vulnerabilityID := strings.TrimSpace(c.Param("vulnId"))
+	if projectID == "" || vulnerabilityID == "" {
+		badRequest(c, "invalid_vulnerability_review", "项目和漏洞 id 不能为空")
+		return
+	}
+	if _, err := h.db.GetProject(c.Request.Context(), projectID, user.ID); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"code": "project_not_found", "message": "项目不存在"})
+		return
+	}
+	item, err := h.db.GetVulnerability(c.Request.Context(), vulnerabilityID, user.ID)
+	if err != nil || item.ProjectID != projectID {
+		c.JSON(http.StatusNotFound, gin.H{"code": "vulnerability_not_found", "message": "漏洞不存在"})
+		return
+	}
+	if item.Status != "pending_review" {
+		c.JSON(http.StatusConflict, gin.H{"code": "review_not_pending", "message": "只允许重试待审核漏洞"})
+		return
+	}
+	if h.vulnerabilityReviewer == nil {
+		respondVulnerabilityReviewFailure(c, &agentpkg.VulnerabilityReviewUnavailableError{Reason: "审核器未配置"})
+		return
+	}
+	reviewErr := h.vulnerabilityReviewer.ReviewVulnerability(c.Request.Context(), *item)
+	if reviewErr != nil {
+		var rejected *agentpkg.VulnerabilityReviewError
+		if !errors.As(reviewErr, &rejected) {
+			respondVulnerabilityReviewFailure(c, reviewErr)
+			return
+		}
+		item.Status = "ignored"
+		item.RetestNotes = strings.TrimSpace(item.RetestNotes + "\n审核重试拒绝：" + rejected.Error())
+		item.UpdatedAt = time.Now().UTC()
+		if err := h.db.UpdateVulnerability(c.Request.Context(), *item); err != nil {
+			internalError(c, "retry_vulnerability_review_failed", "更新漏洞审核状态失败")
+			return
+		}
+		c.JSON(http.StatusOK, item)
+		return
+	}
+	item.Status = "confirmed"
+	item.VerificationState = "verified"
+	if item.Confidence < 80 {
+		item.Confidence = 80
+	}
+	item.UpdatedAt = time.Now().UTC()
+	if err := h.db.UpdateVulnerability(c.Request.Context(), *item); err != nil {
+		internalError(c, "retry_vulnerability_review_failed", "更新漏洞审核状态失败")
+		return
+	}
+	c.JSON(http.StatusOK, item)
+}
+
 func (h *BusinessHandler) VulnerabilityStats(c *gin.Context) {
 	user := middleware.UserFromContext(c)
 	if user == nil {
@@ -1104,8 +1177,8 @@ func (h *BusinessHandler) UpdateVulnerability(c *gin.Context) {
 		RetestNotes       string   `json:"retestNotes"`
 		VerificationState string   `json:"verificationState"`
 		Confidence        *int     `json:"confidence"`
-		Exploitability    string   `json:"exploitability"`
-		TestTechnique     string   `json:"testTechnique"`
+		Exploitability    *string  `json:"exploitability"`
+		TestTechnique     *string  `json:"testTechnique"`
 	}
 	if err := c.ShouldBindJSON(&request); err != nil {
 		badRequest(c, "invalid_vulnerability", "漏洞请求格式错误")
@@ -1164,8 +1237,11 @@ func (h *BusinessHandler) UpdateVulnerability(c *gin.Context) {
 		strings.TrimSpace(request.Impact) != existing.Impact ||
 		strings.TrimSpace(request.Recommendation) != existing.Recommendation ||
 		strings.TrimSpace(request.RetestNotes) != existing.RetestNotes ||
-		strings.TrimSpace(request.Exploitability) != existing.Exploitability ||
-		strings.TrimSpace(request.TestTechnique) != existing.TestTechnique
+		(request.EvidenceRefs != nil && !equalStringSlices(request.EvidenceRefs, existing.EvidenceRefs)) ||
+		(request.Exploitability != nil &&
+			strings.TrimSpace(*request.Exploitability) != existing.Exploitability) ||
+		(request.TestTechnique != nil &&
+			strings.TrimSpace(*request.TestTechnique) != existing.TestTechnique)
 	vulnerabilityType, validType := vulnerabilityfmt.NormalizeType(request.VulnerabilityType)
 	if contentChanged {
 		if !validType {
@@ -1186,14 +1262,6 @@ func (h *BusinessHandler) UpdateVulnerability(c *gin.Context) {
 			request.HTTPMethod,
 		); err != nil {
 			badRequest(c, "invalid_vulnerability", err.Error())
-			return
-		}
-		if err := vulnerabilityfmt.ValidateEvidenceContent(
-			request.Evidence,
-			request.EvidenceRefs,
-			request.ReproductionSteps,
-		); err != nil {
-			badRequest(c, "invalid_vulnerability_evidence", err.Error())
 			return
 		}
 	} else if !validType {
@@ -1232,14 +1300,25 @@ func (h *BusinessHandler) UpdateVulnerability(c *gin.Context) {
 	if request.Confidence != nil {
 		item.Confidence = *request.Confidence
 	}
-	item.Exploitability = strings.TrimSpace(request.Exploitability)
-	item.TestTechnique = strings.TrimSpace(request.TestTechnique)
+	if request.Exploitability != nil {
+		item.Exploitability = strings.TrimSpace(*request.Exploitability)
+	}
+	if request.TestTechnique != nil {
+		item.TestTechnique = strings.TrimSpace(*request.TestTechnique)
+	}
 	item.UpdatedAt = time.Now().UTC()
 	item = database.NormalizeVulnerabilityEvidence(item)
 	statusEnteringConfirmed := item.Status == "confirmed" && existing.Status != "confirmed"
 	stateRequiresEvidence := item.VerificationState == "verified" ||
 		item.VerificationState == "exploitable"
-	if statusEnteringConfirmed || stateRequiresEvidence {
+	requestedVerificationState := strings.ToLower(strings.TrimSpace(request.VerificationState))
+	verificationStateChanged := requestedVerificationState != "" &&
+		requestedVerificationState != strings.ToLower(strings.TrimSpace(existing.VerificationState))
+	statusOnlyUpdate := !contentChanged &&
+		strings.TrimSpace(request.Status) != "" &&
+		severity == existing.Severity &&
+		!verificationStateChanged
+	if !statusOnlyUpdate && (statusEnteringConfirmed || stateRequiresEvidence) {
 		if !hasStructuredEvidenceRefs(item.EvidenceRefs) {
 			badRequest(c, "invalid_vulnerability_evidence", "已验证漏洞必须提供结构化证据引用")
 			return
@@ -1257,6 +1336,18 @@ func (h *BusinessHandler) UpdateVulnerability(c *gin.Context) {
 			return
 		}
 	}
+	if contentChanged {
+		if h.vulnerabilityReviewer == nil {
+			respondVulnerabilityReviewFailure(c, &agentpkg.VulnerabilityReviewUnavailableError{
+				Reason: "审核器未配置",
+			})
+			return
+		}
+		if err := h.vulnerabilityReviewer.ReviewVulnerability(c.Request.Context(), item); err != nil {
+			respondVulnerabilityReviewFailure(c, err)
+			return
+		}
+	}
 	if err := h.db.UpdateVulnerability(c.Request.Context(), item); err != nil {
 		respondMutationError(c, err, "vulnerability_not_found", "漏洞不存在", "update_vulnerability_failed", "更新漏洞失败")
 		return
@@ -1271,6 +1362,18 @@ func (h *BusinessHandler) UpdateVulnerability(c *gin.Context) {
 		log.Printf("清理未引用复现截图失败: vulnerability=%s err=%v", item.ID, err)
 	}
 	c.Status(http.StatusNoContent)
+}
+
+func equalStringSlices(left []string, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if strings.TrimSpace(left[index]) != strings.TrimSpace(right[index]) {
+			return false
+		}
+	}
+	return true
 }
 
 func hasStructuredEvidenceRefs(refs []string) bool {

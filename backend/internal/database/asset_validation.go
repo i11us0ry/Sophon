@@ -39,9 +39,12 @@ var supportedAssetKinds = map[string]bool{
 	"ip":     true,
 	"domain": true,
 	"url":    true,
-	"port":   true,
-	"host":   true,
 	"source": true,
+}
+
+var legacyAssetKinds = map[string]bool{
+	"host": true,
+	"port": true,
 }
 
 const (
@@ -71,6 +74,13 @@ var assetSources = map[string]bool{
 const (
 	assetNameMaxRunes  = 120
 	assetValueMaxRunes = 4096
+
+	AssetQualityValid              = "valid"
+	AssetQualitySuspicious         = "suspicious"
+	AssetQualityDuplicate          = "duplicate"
+	AssetQualityCrossTypeDuplicate = "cross_type_duplicate"
+	AssetQualityInvalid            = "invalid"
+	AssetQualityLegacyUnsupported  = "legacy_unsupported"
 )
 
 func NormalizeAssetSource(source string) string {
@@ -100,6 +110,10 @@ func IsSupportedAssetKind(kind string) bool {
 	return supportedAssetKinds[strings.ToLower(strings.TrimSpace(kind))]
 }
 
+func IsLegacyAssetKind(kind string) bool {
+	return legacyAssetKinds[strings.ToLower(strings.TrimSpace(kind))]
+}
+
 func NormalizeAssetValue(kind string, value string) (string, error) {
 	kind = strings.ToLower(strings.TrimSpace(kind))
 	value = strings.TrimSpace(value)
@@ -107,26 +121,33 @@ func NormalizeAssetValue(kind string, value string) (string, error) {
 	case "domain":
 		return normalizeDomainAssetValue(value)
 	case "ip":
-		ip := net.ParseIP(strings.Trim(value, "[]"))
-		if ip == nil {
-			return "", fmt.Errorf("IP 资产值不是有效 IP 地址")
-		}
-		return ip.String(), nil
+		return normalizeIPAssetValue(value)
 	case "url":
 		return normalizeURLAssetValue(value)
-	case "port":
-		port, err := strconv.Atoi(value)
-		if err != nil || port < 1 || port > 65535 {
-			return "", fmt.Errorf("端口资产值必须在 1-65535 之间")
-		}
-		return strconv.Itoa(port), nil
 	case "host":
+		// 历史资产仍需要读取和归一化，但新输入不再允许创建 host。
 		return normalizeHostAssetValue(value)
 	case "source":
 		return normalizeSourceAssetValue(value)
 	default:
-		return "", fmt.Errorf("资产类型只能是 ip、domain、url、port、host 或 source")
+		return "", fmt.Errorf("资产类型只能是 ip、domain、url 或 source")
 	}
+}
+
+func normalizeIPAssetValue(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if strings.Contains(value, "/") {
+		_, network, err := net.ParseCIDR(value)
+		if err != nil {
+			return "", fmt.Errorf("IP 网段格式不合法")
+		}
+		return network.String(), nil
+	}
+	ip := net.ParseIP(strings.Trim(value, "[]"))
+	if ip == nil {
+		return "", fmt.Errorf("IP 资产值不是有效 IP 地址")
+	}
+	return ip.String(), nil
 }
 
 func normalizeDomainAssetValue(value string) (string, error) {
@@ -144,8 +165,8 @@ func normalizeDomainAssetValue(value string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if wildcard && port != "" {
-		return "", fmt.Errorf("通配域名不能包含端口")
+	if port != "" {
+		return "", fmt.Errorf("端口不能作为 domain 顶层资产，请记录为 endpoint/service 事实")
 	}
 	host = strings.TrimSuffix(strings.ToLower(host), ".")
 	if net.ParseIP(strings.Trim(host, "[]")) != nil {
@@ -160,19 +181,48 @@ func normalizeDomainAssetValue(value string) (string, error) {
 		return "", fmt.Errorf("域名资产值不能是公共后缀本身")
 	}
 	if !icann && !strings.Contains(suffix, ".") {
-		return "", fmt.Errorf("域名资产值没有可注册后缀")
+		// 内部 DNS 名称没有公共后缀，但仍应作为 domain 资产进入授权和
+		// 工作队列，不能重新引入 host 顶层类型。
 	}
 	if _, err := publicsuffix.EffectiveTLDPlusOne(asciiHost); err != nil {
-		return "", fmt.Errorf("域名资产值没有有效注册域")
+		if !validInternalDomainName(asciiHost) {
+			return "", fmt.Errorf("域名资产值没有有效注册域")
+		}
+	}
+	if invalidDomainFileSuffix(asciiHost) {
+		return "", fmt.Errorf("域名资产值不能是文件名")
 	}
 	normalized := asciiHost
 	if wildcard {
 		normalized = "*." + normalized
 	}
-	if port != "" {
-		normalized = net.JoinHostPort(normalized, port)
-	}
 	return strings.ToLower(normalized), nil
+}
+
+func validInternalDomainName(host string) bool {
+	host = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
+	if !strings.Contains(host, ".") || !validHostLabels(host, true) {
+		return false
+	}
+	suffix := host[strings.LastIndex(host, ".")+1:]
+	switch suffix {
+	case "internal", "lan", "intranet", "corp", "home", "test":
+		return true
+	default:
+		return false
+	}
+}
+
+func invalidDomainFileSuffix(host string) bool {
+	suffix := host[strings.LastIndex(host, ".")+1:]
+	switch suffix {
+	case "local", "dll", "exe", "jar", "class", "zip", "rar", "war", "js",
+		"py", "go", "php", "asp", "aspx", "jsp", "svc", "xml", "json",
+		"txt", "bin", "dylib", "so", "doc", "pdf":
+		return true
+	default:
+		return false
+	}
 }
 
 func normalizeURLAssetValue(value string) (string, error) {
@@ -197,6 +247,12 @@ func normalizeURLAssetValue(value string) (string, error) {
 	}
 	parsed.Scheme = strings.ToLower(parsed.Scheme)
 	parsed.Host = strings.ToLower(parsed.Host)
+	parsed.Fragment = ""
+	parsed.RawFragment = ""
+	if (parsed.Scheme == "http" && parsed.Port() == "80") ||
+		(parsed.Scheme == "https" && parsed.Port() == "443") {
+		parsed.Host = parsed.Hostname()
+	}
 	return parsed.String(), nil
 }
 
@@ -299,6 +355,9 @@ func normalizeAssetRecord(item *Asset) error {
 	item.Value = strings.TrimSpace(item.Value)
 	item.Status = strings.ToLower(strings.TrimSpace(item.Status))
 	item.Criticality = strings.ToLower(strings.TrimSpace(item.Criticality))
+	if strings.TrimSpace(item.Source) == "" {
+		item.Source = AssetSourceManual
+	}
 	item.Source = NormalizeAssetSource(item.Source)
 
 	if item.ID == "" || item.OwnerUserID == "" {
@@ -308,7 +367,7 @@ func normalizeAssetRecord(item *Asset) error {
 		return fmt.Errorf("%w: 资产名称不能为空且不能超过 %d 个字符", ErrInvalidAsset, assetNameMaxRunes)
 	}
 	if !IsSupportedAssetKind(item.Kind) {
-		return fmt.Errorf("%w: 资产类型只能是 ip、domain、url、port、host 或 source", ErrInvalidAsset)
+		return fmt.Errorf("%w: 资产类型只能是 ip、domain、url 或 source", ErrInvalidAsset)
 	}
 	if item.Value == "" || len([]rune(item.Value)) > assetValueMaxRunes {
 		return fmt.Errorf("%w: 资产值不能为空且不能超过 %d 个字符", ErrInvalidAsset, assetValueMaxRunes)
@@ -318,6 +377,11 @@ func normalizeAssetRecord(item *Asset) error {
 		return fmt.Errorf("%w: %s", ErrInvalidAsset, err.Error())
 	}
 	item.Value = normalizedValue
+	item.NormalizedValue = normalizedValue
+	item.QualityStatus = AssetQualityValid
+	if suspiciousRepeatedWWW(item.Value) {
+		item.QualityStatus = AssetQualitySuspicious
+	}
 	if item.Status == "" {
 		item.Status = "unknown"
 	}
@@ -339,17 +403,37 @@ func normalizeAssetRecord(item *Asset) error {
 	return nil
 }
 
+func normalizeNewAssetRecord(item *Asset) error {
+	item.Kind = strings.ToLower(strings.TrimSpace(item.Kind))
+	if !IsSupportedAssetKind(item.Kind) {
+		return fmt.Errorf("%w: 新资产类型只能是 ip、domain、url 或 source", ErrInvalidAsset)
+	}
+	return normalizeAssetRecord(item)
+}
+
+func suspiciousRepeatedWWW(value string) bool {
+	value = strings.ToLower(strings.TrimSpace(value))
+	return strings.Contains(value, "www.www.") || strings.HasPrefix(value, "www.www")
+}
+
 func assetDuplicateExists(
 	ctx context.Context,
 	tx *sql.Tx,
 	item Asset,
 	excludeID string,
 ) (bool, error) {
+	normalized := strings.TrimSpace(item.NormalizedValue)
+	if normalized == "" {
+		normalized = strings.TrimSpace(item.Value)
+	}
 	query := `SELECT COUNT(*) FROM assets
 		WHERE owner_user_id = ? AND project_id = ?
 		  AND LOWER(TRIM(kind)) = LOWER(TRIM(?))
-		  AND LOWER(TRIM(value)) = LOWER(TRIM(?))`
-	args := []interface{}{item.OwnerUserID, item.ProjectID, item.Kind, item.Value}
+		  AND (
+			LOWER(TRIM(normalized_value)) = LOWER(TRIM(?))
+			OR (TRIM(normalized_value) = '' AND LOWER(TRIM(value)) = LOWER(TRIM(?)))
+		  )`
+	args := []interface{}{item.OwnerUserID, item.ProjectID, item.Kind, normalized, normalized}
 	if excludeID != "" {
 		query += ` AND id <> ?`
 		args = append(args, excludeID)

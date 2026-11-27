@@ -9,24 +9,29 @@ import (
 
 // CoverageTarget 表示未覆盖队列中的一项（资产 / 意图 / 证据缺口）。
 type CoverageTarget struct {
-	Kind   string `json:"kind"`
-	RefID  string `json:"refId"`
-	Label  string `json:"label"`
-	Reason string `json:"reason"`
-	Score  int    `json:"score"`
+	Kind    string `json:"kind"`
+	RefID   string `json:"refId"`
+	AssetID string `json:"assetId,omitempty"`
+	Label   string `json:"label"`
+	Reason  string `json:"reason"`
+	Score   int    `json:"score"`
 }
 
 // AssetCoverageState 描述单个资产基于当前测试计划得到的完整覆盖状态。
 type AssetCoverageState struct {
-	AssetID            string `json:"assetId"`
-	Label              string `json:"label"`
-	Status             string `json:"status"`
-	TestsTotal         int    `json:"testsTotal"`
-	TestsCovered       int    `json:"testsCovered"`
-	RequiredOpen       int    `json:"requiredOpen"`
-	RequiredBlocked    int    `json:"requiredBlocked"`
-	RequiredSuspicious int    `json:"requiredSuspicious"`
-	Findings           int    `json:"findings"`
+	AssetID                 string `json:"assetId"`
+	Label                   string `json:"label"`
+	Status                  string `json:"status"`
+	TestsTotal              int    `json:"testsTotal"`
+	TestsCovered            int    `json:"testsCovered"`
+	TestsOpen               int    `json:"testsOpen"`
+	TestsBlocked            int    `json:"testsBlocked"`
+	TestsSuspicious         int    `json:"testsSuspicious"`
+	RequiredOpen            int    `json:"requiredOpen"`
+	RequiredBlocked         int    `json:"requiredBlocked"`
+	RequiredSuspicious      int    `json:"requiredSuspicious"`
+	Findings                int    `json:"findings"`
+	FindingsWithoutEvidence int    `json:"findingsWithoutEvidence"`
 }
 
 // ProjectCoverage 汇总项目覆盖率与未覆盖队列，用于看板展示与 Agent 下一步决策。
@@ -61,6 +66,7 @@ type ProjectCoverage struct {
 	NextTargets             []CoverageTarget     `json:"nextTargets"`
 	PendingIntentTargets    []CoverageTarget     `json:"pendingIntentTargets"`
 	EvidenceGapTargets      []CoverageTarget     `json:"evidenceGapTargets"`
+	AllTargets              []CoverageTarget     `json:"-"`
 }
 
 const (
@@ -81,13 +87,20 @@ func (db *DB) ProjectCoverage(
 		return nil, fmt.Errorf("项目或用户不能为空")
 	}
 	// 先校验归属，避免任何跨租户读取。
-	if _, err := db.GetProject(ctx, projectID, ownerUserID); err != nil {
+	project, err := db.GetProject(ctx, projectID, ownerUserID)
+	if err != nil {
 		return nil, err
 	}
 
 	assets, err := db.ListProjectAssets(ctx, projectID, ownerUserID)
 	if err != nil {
 		return nil, err
+	}
+	eligibleAssets := make(map[string]bool, len(assets))
+	for _, asset := range assets {
+		if assetTestingEligible(project.Scope, asset) {
+			eligibleAssets[asset.ID] = true
+		}
 	}
 	findingCoverage, err := db.AggregateProjectVulnerabilityCoverage(
 		ctx,
@@ -120,17 +133,16 @@ func (db *DB) ProjectCoverage(
 	}
 
 	coverage := &ProjectCoverage{
-		FindingsTotal:           findingCoverage.FindingsTotal,
-		FindingsConfirmed:       findingCoverage.FindingsConfirmed,
-		FindingsWithoutEvidence: findingCoverage.FindingsWithoutEvidence,
-		FactsTotal:              len(facts),
-		AssetCoverage:           make([]AssetCoverageState, 0, len(assets)),
-		UntestedAssets:          make([]Asset, 0),
-		NextTargets:             make([]CoverageTarget, 0),
-		PendingIntentTargets:    make([]CoverageTarget, 0),
-		EvidenceGapTargets:      make([]CoverageTarget, 0),
+		AssetCoverage:        make([]AssetCoverageState, 0, len(assets)),
+		UntestedAssets:       make([]Asset, 0),
+		NextTargets:          make([]CoverageTarget, 0),
+		PendingIntentTargets: make([]CoverageTarget, 0),
+		EvidenceGapTargets:   make([]CoverageTarget, 0),
 	}
-	for _, item := range testCoverage {
+	for assetID, item := range testCoverage {
+		if !eligibleAssets[assetID] {
+			continue
+		}
 		coverage.TestsTotal += item.TestsTotal
 		coverage.TestsCovered += item.TestsCovered
 		coverage.TestsConfirmed += item.TestsConfirmed
@@ -140,39 +152,59 @@ func (db *DB) ProjectCoverage(
 		coverage.TestsBlocked += item.TestsBlocked
 		coverage.TestsSuspicious += item.TestsSuspicious
 	}
+	for assetID, item := range findingCoverage.ByAsset {
+		if !eligibleAssets[assetID] {
+			continue
+		}
+		coverage.FindingsTotal += item.FindingsTotal
+		coverage.FindingsConfirmed += item.Confirmed
+		coverage.FindingsWithoutEvidence += item.WithoutEvidence
+	}
+	for _, fact := range facts {
+		factAssetID := coverageFactAssetID(fact)
+		if factAssetID == "" || eligibleAssets[factAssetID] {
+			coverage.FactsTotal++
+		}
+	}
 	targets := make([]CoverageTarget, 0, 32)
 	observedAssets := map[string]bool{}
 	targetedAssets := map[string]bool{}
 
 	for _, test := range testResults {
+		if test.AssetID != "" && !eligibleAssets[test.AssetID] {
+			continue
+		}
 		status := strings.ToLower(strings.TrimSpace(test.Status))
 		switch status {
 		case "suspicious":
 			targetedAssets[test.AssetID] = true
 			targets = append(targets, CoverageTarget{
-				Kind:   "test",
-				RefID:  test.ID,
-				Label:  coverageTestLabel(test),
-				Reason: coverageTestReason(test, "可疑结果待验证"),
-				Score:  coverageTestScore(test, 90),
+				Kind:    "test",
+				RefID:   test.ID,
+				AssetID: test.AssetID,
+				Label:   coverageTestLabel(test),
+				Reason:  coverageTestReason(test, "可疑结果待验证"),
+				Score:   coverageTestScore(test, 90),
 			})
 		case "running", "untested":
 			targetedAssets[test.AssetID] = true
 			targets = append(targets, CoverageTarget{
-				Kind:   "test",
-				RefID:  test.ID,
-				Label:  coverageTestLabel(test),
-				Reason: coverageTestReason(test, "测试未完成"),
-				Score:  coverageTestScore(test, 75),
+				Kind:    "test",
+				RefID:   test.ID,
+				AssetID: test.AssetID,
+				Label:   coverageTestLabel(test),
+				Reason:  coverageTestReason(test, "测试未完成"),
+				Score:   coverageTestScore(test, 75),
 			})
 		case "blocked":
 			targetedAssets[test.AssetID] = true
 			targets = append(targets, CoverageTarget{
-				Kind:   "test",
-				RefID:  test.ID,
-				Label:  coverageTestLabel(test),
-				Reason: coverageTestReason(test, "测试被阻断"),
-				Score:  coverageTestScore(test, 55),
+				Kind:    "test",
+				RefID:   test.ID,
+				AssetID: test.AssetID,
+				Label:   coverageTestLabel(test),
+				Reason:  coverageTestReason(test, "测试被阻断"),
+				Score:   coverageTestScore(test, 55),
 			})
 		}
 	}
@@ -188,26 +220,31 @@ func (db *DB) ProjectCoverage(
 		if node.Kind != "intent" {
 			continue
 		}
+		if node.AssetID != "" && !eligibleAssets[node.AssetID] {
+			continue
+		}
 		switch strings.ToLower(strings.TrimSpace(node.Status)) {
 		case "running":
 			coverage.IntentsRunning++
 			target := CoverageTarget{
-				Kind:   "intent",
-				RefID:  node.ID,
-				Label:  node.Title,
-				Reason: "进行中意图",
-				Score:  80,
+				Kind:    "intent",
+				RefID:   node.ID,
+				AssetID: node.AssetID,
+				Label:   node.Title,
+				Reason:  "进行中意图",
+				Score:   80,
 			}
 			targets = append(targets, target)
 			coverage.PendingIntentTargets = append(coverage.PendingIntentTargets, target)
 		case "open":
 			coverage.IntentsOpen++
 			target := CoverageTarget{
-				Kind:   "intent",
-				RefID:  node.ID,
-				Label:  node.Title,
-				Reason: "待办意图",
-				Score:  70,
+				Kind:    "intent",
+				RefID:   node.ID,
+				AssetID: node.AssetID,
+				Label:   node.Title,
+				Reason:  "待办意图",
+				Score:   70,
 			}
 			targets = append(targets, target)
 			coverage.PendingIntentTargets = append(coverage.PendingIntentTargets, target)
@@ -217,12 +254,16 @@ func (db *DB) ProjectCoverage(
 	for _, item := range findingSamples {
 		hasEvidence := strings.TrimSpace(item.Evidence) != "" || len(item.EvidenceRefs) > 0
 		if !hasEvidence {
+			if item.AssetID != "" && !eligibleAssets[item.AssetID] {
+				continue
+			}
 			target := CoverageTarget{
-				Kind:   "evidence",
-				RefID:  item.ID,
-				Label:  item.Title,
-				Reason: "漏洞缺证据",
-				Score:  60 + coverageSeverityWeight(item.Severity),
+				Kind:    "evidence",
+				RefID:   item.ID,
+				AssetID: item.AssetID,
+				Label:   item.Title,
+				Reason:  "漏洞缺证据",
+				Score:   60 + coverageSeverityWeight(item.Severity),
 			}
 			targets = append(targets, target)
 			coverage.EvidenceGapTargets = append(coverage.EvidenceGapTargets, target)
@@ -233,15 +274,20 @@ func (db *DB) ProjectCoverage(
 		if fact.SubjectType == "audit_scope" || fact.SubjectType == "audit_checkpoint" {
 			continue
 		}
+		factAssetID := coverageFactAssetID(fact)
+		if factAssetID != "" && !eligibleAssets[factAssetID] {
+			continue
+		}
 		if fact.SubjectType == "audit_cell" && fact.Predicate == "coverage" {
 			switch strings.ToLower(strings.TrimSpace(fact.ObjectKey)) {
 			case "not_audited":
 				targets = append(targets, CoverageTarget{
-					Kind:   "audit_cell",
-					RefID:  fact.ID,
-					Label:  fact.SubjectKey,
-					Reason: "审计覆盖矩阵仍有 not_audited 单元格",
-					Score:  88,
+					Kind:    "audit_cell",
+					RefID:   fact.ID,
+					AssetID: factAssetID,
+					Label:   fact.SubjectKey,
+					Reason:  "审计覆盖矩阵仍有 not_audited 单元格",
+					Score:   88,
 				})
 			case "tested":
 				if assetID := coverageFactAssetID(fact); assetID != "" {
@@ -266,17 +312,21 @@ func (db *DB) ProjectCoverage(
 			score = 40 + fact.Importance/2
 		}
 		target := CoverageTarget{
-			Kind:   "evidence",
-			RefID:  fact.ID,
-			Label:  fact.Key,
-			Reason: reason,
-			Score:  score,
+			Kind:    "evidence",
+			RefID:   fact.ID,
+			AssetID: factAssetID,
+			Label:   fact.Key,
+			Reason:  reason,
+			Score:   score,
 		}
 		targets = append(targets, target)
 		coverage.EvidenceGapTargets = append(coverage.EvidenceGapTargets, target)
 	}
 
 	for _, asset := range assets {
+		if !eligibleAssets[asset.ID] {
+			continue
+		}
 		coverage.AssetsTotal++
 		testState := testCoverage[asset.ID]
 		findingState := findingCoverage.ByAsset[asset.ID]
@@ -314,24 +364,29 @@ func (db *DB) ProjectCoverage(
 				coverage.UntestedAssets = append(coverage.UntestedAssets, asset)
 			}
 			targets = append(targets, CoverageTarget{
-				Kind:   "asset",
-				RefID:  asset.ID,
-				Label:  coverageAssetLabel(asset),
-				Reason: "未测试",
-				Score:  coverageCriticalityWeight(asset.Criticality) + asset.RiskScore,
+				Kind:    "asset",
+				RefID:   asset.ID,
+				AssetID: asset.ID,
+				Label:   coverageAssetLabel(asset),
+				Reason:  "未测试",
+				Score:   coverageCriticalityWeight(asset.Criticality) + asset.RiskScore,
 			})
 		}
 
 		coverage.AssetCoverage = append(coverage.AssetCoverage, AssetCoverageState{
-			AssetID:            asset.ID,
-			Label:              coverageAssetLabel(asset),
-			Status:             status,
-			TestsTotal:         testState.TestsTotal,
-			TestsCovered:       testState.TestsCovered,
-			RequiredOpen:       testState.RequiredOpen,
-			RequiredBlocked:    testState.RequiredBlocked,
-			RequiredSuspicious: testState.RequiredSuspicious,
-			Findings:           findingState.FindingsTotal,
+			AssetID:                 asset.ID,
+			Label:                   coverageAssetLabel(asset),
+			Status:                  status,
+			TestsTotal:              testState.TestsTotal,
+			TestsCovered:            testState.TestsCovered,
+			TestsOpen:               testState.TestsOpen,
+			TestsBlocked:            testState.TestsBlocked,
+			TestsSuspicious:         testState.TestsSuspicious,
+			RequiredOpen:            testState.RequiredOpen,
+			RequiredBlocked:         testState.RequiredBlocked,
+			RequiredSuspicious:      testState.RequiredSuspicious,
+			Findings:                findingState.FindingsTotal,
+			FindingsWithoutEvidence: findingState.WithoutEvidence,
 		})
 		if observed && status != "covered" && !targetedAssets[asset.ID] {
 			reason := "已有观察但测试计划不完整"
@@ -342,10 +397,11 @@ func (db *DB) ProjectCoverage(
 				reason = fmt.Sprintf("必选测试结果可疑 %d 项", testState.RequiredSuspicious)
 			}
 			targets = append(targets, CoverageTarget{
-				Kind:   "asset",
-				RefID:  asset.ID,
-				Label:  coverageAssetLabel(asset),
-				Reason: reason,
+				Kind:    "asset",
+				RefID:   asset.ID,
+				AssetID: asset.ID,
+				Label:   coverageAssetLabel(asset),
+				Reason:  reason,
 				Score: coverageCriticalityWeight(asset.Criticality) +
 					asset.RiskScore + 15,
 			})
@@ -357,13 +413,37 @@ func (db *DB) ProjectCoverage(
 		coverage.FullCoverageRatio = float64(coverage.AssetsCovered) / float64(coverage.AssetsTotal)
 	}
 
-	coverage.NextTargets = sortAndTrimCoverageTargets(targets)
+	coverage.AllTargets = sortCoverageTargets(targets)
+	coverage.NextTargets = trimCoverageTargets(coverage.AllTargets)
 	coverage.PendingIntentTargets = sortAndTrimCoverageTargets(coverage.PendingIntentTargets)
 	coverage.EvidenceGapTargets = sortAndTrimCoverageTargets(coverage.EvidenceGapTargets)
 	return coverage, nil
 }
 
+func coverageAssetEligible(asset Asset) bool {
+	if !isActionableAssetKind(asset.Kind) {
+		return false
+	}
+	if asset.Status != "" && !strings.EqualFold(strings.TrimSpace(asset.Status), "active") {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(asset.QualityStatus)) {
+	case AssetQualityDuplicate,
+		AssetQualityCrossTypeDuplicate,
+		AssetQualityInvalid,
+		AssetQualityLegacyUnsupported,
+		AssetQualitySuspicious:
+		return false
+	default:
+		return true
+	}
+}
+
 func sortAndTrimCoverageTargets(targets []CoverageTarget) []CoverageTarget {
+	return trimCoverageTargets(sortCoverageTargets(targets))
+}
+
+func sortCoverageTargets(targets []CoverageTarget) []CoverageTarget {
 	sort.SliceStable(targets, func(i, j int) bool {
 		if targets[i].Score != targets[j].Score {
 			return targets[i].Score > targets[j].Score
@@ -373,6 +453,10 @@ func sortAndTrimCoverageTargets(targets []CoverageTarget) []CoverageTarget {
 		}
 		return targets[i].Label < targets[j].Label
 	})
+	return targets
+}
+
+func trimCoverageTargets(targets []CoverageTarget) []CoverageTarget {
 	if len(targets) > coverageNextTargetLimit {
 		return targets[:coverageNextTargetLimit]
 	}

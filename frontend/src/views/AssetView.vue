@@ -17,6 +17,8 @@ interface Asset {
   name: string
   kind: string
   value: string
+  normalizedValue?: string
+  qualityStatus?: string
   status: string
   source: string
   criticality: string
@@ -59,7 +61,7 @@ const CRITICALITY_OPTIONS = [
   { value: 'info', label: t('assetCriticality.info') },
 ]
 
-const KNOWN_KINDS = ['domain', 'ip', 'url', 'port', 'host', 'source']
+const KNOWN_KINDS = ['domain', 'ip', 'url', 'source']
 
 const assets = ref<Asset[]>([])
 const projects = ref<Project[]>([])
@@ -130,6 +132,15 @@ function sourceLabel(value: string) {
   return label === key ? t('asset.sourceUnknown') : label
 }
 
+function qualityLabel(value?: string) {
+  if (!value || value === 'valid') {
+    return ''
+  }
+  const key = `asset.quality.${value}`
+  const label = t(key)
+  return label === key ? value : label
+}
+
 function projectName(projectId: string) {
   if (!projectId) {
     return t('asset.unlinked')
@@ -145,8 +156,6 @@ function kindTone(kind: string) {
       return 'violet'
     case 'url':
       return 'mint'
-    case 'port':
-      return 'coral'
     case 'host':
       return 'blue'
     case 'source':
@@ -575,7 +584,6 @@ onUnmounted(() => {
             <svg v-if="kind === 'domain'" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><path d="M3 12h18M12 3a15 15 0 0 1 0 18M12 3a15 15 0 0 0 0 18" /></svg>
             <svg v-else-if="kind === 'ip'" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2" /><path d="M7 9h.01M7 15h.01M11 9h6M11 12h6M11 15h4" /></svg>
             <svg v-else-if="kind === 'url'" viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.5.5l2-2a5 5 0 0 0-7-7l-1.2 1.2M14 11a5 5 0 0 0-7.5-.5l-2 2a5 5 0 0 0 7 7l1.2-1.2" /></svg>
-            <svg v-else-if="kind === 'port'" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8" /><path d="M12 4v8l5 3" /></svg>
             <svg v-else-if="kind === 'host'" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2" /><path d="M8 8h8M8 12h8M8 16h5" /></svg>
             <svg v-else-if="kind === 'source'" viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6zM14 3v5h5M9 12h6M9 16h6" /></svg>
             <svg v-else viewBox="0 0 24 24"><circle cx="12" cy="12" r="8" /><path d="M9 12h6" /></svg>
@@ -618,6 +626,13 @@ onUnmounted(() => {
               <td>
                 <div class="asset-value-cell">
                   <code :title="asset.value">{{ asset.value }}</code>
+                  <small
+                    v-if="qualityLabel(asset.qualityStatus)"
+                    class="asset-quality-badge"
+                    :class="`quality-${asset.qualityStatus}`"
+                  >
+                    {{ qualityLabel(asset.qualityStatus) }}
+                  </small>
                   <button type="button" :title="t('asset.copyValue')" @click="copyAssetValue(asset)">
                     <svg v-if="copiedId !== asset.id" viewBox="0 0 24 24"><rect x="8" y="8" width="11" height="11" rx="2" /><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3" /></svg>
                     <svg v-else viewBox="0 0 24 24"><path d="m5 12 4 4L19 6" /></svg>
@@ -2334,6 +2349,15 @@ onUnmounted(() => {
   color: var(--text-secondary);
   background: var(--surface);
   font-family: var(--mono);
+}
+
+.asset-quality-badge {
+  padding: 1px 5px;
+  border: 1px solid #f59e0b;
+  border-radius: 3px;
+  color: #b45309;
+  font-size: 9px;
+  white-space: nowrap;
 }
 
 .asset-source-badge.source-fofa,

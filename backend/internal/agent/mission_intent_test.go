@@ -28,8 +28,8 @@ func missionTestProject() database.Project {
 
 func missionTestAssets() []database.Asset {
 	return []database.Asset{
-		{ID: "asset-falcon", Name: "falcon", Value: "https://falcon.example.com"},
-		{ID: "asset-api", Name: "api", Value: "https://api.example.org"},
+		{ID: "asset-falcon", Name: "falcon", Value: "https://falcon.example.com", Source: database.AssetSourceManual},
+		{ID: "asset-api", Name: "api", Value: "https://api.example.org", Source: database.AssetSourceManual},
 	}
 }
 
@@ -122,6 +122,19 @@ func TestAssetOpportunityReviewAlwaysUsesLLM(t *testing.T) {
 		if router.routerCalls != 0 || plan.Mode != missionModeAgent ||
 			plan.Source != "main_agent" || plan.Confidence != 100 {
 			t.Fatalf("%q 应直接交给主 Agent: calls=%d plan=%+v", message, router.routerCalls, plan)
+		}
+	}
+}
+
+func TestProjectListMissionPolicyAllowsAggregatedResources(t *testing.T) {
+	for _, resource := range []string{"intents", "evidence_gaps"} {
+		allowed, reason := projectReadResourceMissionDecision(
+			missionExecution{},
+			"project_list",
+			resource,
+		)
+		if !allowed {
+			t.Fatalf("project_list resource=%s 应被 Mission Policy 允许: %s", resource, reason)
 		}
 	}
 }

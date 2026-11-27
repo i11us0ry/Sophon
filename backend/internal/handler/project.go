@@ -1,12 +1,15 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 	"time"
 
+	agentpkg "sophon/internal/agent"
 	"sophon/internal/database"
 	"sophon/internal/middleware"
 	storagepkg "sophon/internal/storage"
@@ -31,10 +34,20 @@ var attackStepSeverities = map[string]bool{
 }
 
 type ProjectHandler struct {
-	db      *database.DB
-	manager *task.Manager
-	storage *storagepkg.Service
-	jobs    conversationJobCanceller
+	db           *database.DB
+	manager      *task.Manager
+	storage      *storagepkg.Service
+	jobs         conversationJobCanceller
+	draftManager VulnerabilityDraftManager
+}
+
+type VulnerabilityDraftManager interface {
+	ConfirmVulnerabilityDraft(
+		ctx context.Context,
+		projectID string,
+		userID string,
+		draftID string,
+	) (*database.Vulnerability, error)
 }
 
 func NewProjectHandler(
@@ -42,8 +55,15 @@ func NewProjectHandler(
 	manager *task.Manager,
 	storageService *storagepkg.Service,
 	jobs conversationJobCanceller,
+	draftManager VulnerabilityDraftManager,
 ) *ProjectHandler {
-	return &ProjectHandler{db: db, manager: manager, storage: storageService, jobs: jobs}
+	return &ProjectHandler{
+		db:           db,
+		manager:      manager,
+		storage:      storageService,
+		jobs:         jobs,
+		draftManager: draftManager,
+	}
 }
 
 func (h *ProjectHandler) Summary(c *gin.Context) {
@@ -193,6 +213,47 @@ func (h *ProjectHandler) ListVulnerabilityDrafts(c *gin.Context) {
 	})
 }
 
+func (h *ProjectHandler) ListIntents(c *gin.Context) {
+	project, ok := h.projectForRequest(c)
+	if !ok {
+		return
+	}
+	query := strings.TrimSpace(c.Query("query"))
+	if len([]rune(query)) > 200 {
+		badRequest(c, "invalid_intent_query", "意图搜索内容过长")
+		return
+	}
+	status := strings.ToLower(strings.TrimSpace(c.Query("status")))
+	if status != "" && !graphNodeStatuses["intent"][status] && status != "running" && status != "stopped" {
+		badRequest(c, "invalid_intent_status", "意图状态不合法")
+		return
+	}
+	assetID := strings.TrimSpace(c.Query("assetId"))
+	if assetID != "" && !h.graphAssetAllowed(c, project.ID, assetID) {
+		return
+	}
+	limit := clampQueryInt(c.Query("limit"), 50, 1, 100)
+	offset := clampQueryInt(c.Query("offset"), 0, 0, 1000000)
+	items, total, err := h.db.ListProjectIntentsPage(c.Request.Context(), database.ProjectIntentFilter{
+		ProjectID: project.ID,
+		Status:    status,
+		Query:     query,
+		AssetID:   assetID,
+		Limit:     limit,
+		Offset:    offset,
+	})
+	if err != nil {
+		internalError(c, "list_project_intents_failed", "读取待办意图失败")
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"items":      items,
+		"total":      total,
+		"hasMore":    offset+len(items) < total,
+		"nextOffset": offset + len(items),
+	})
+}
+
 func (h *ProjectHandler) RetryVulnerabilityDraft(c *gin.Context) {
 	project, ok := h.projectForRequest(c)
 	if !ok {
@@ -219,6 +280,107 @@ func (h *ProjectHandler) RetryVulnerabilityDraft(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusAccepted, gin.H{"status": "pending"})
+}
+
+func (h *ProjectHandler) ConfirmVulnerabilityDraft(c *gin.Context) {
+	project, ok := h.projectForRequest(c)
+	if !ok {
+		return
+	}
+	user := middleware.UserFromContext(c)
+	if user == nil {
+		unauthorized(c)
+		return
+	}
+	if h.draftManager == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"code":    "vulnerability_draft_manager_unavailable",
+			"message": "漏洞草稿处理服务不可用",
+		})
+		return
+	}
+	draftID := strings.TrimSpace(c.Param("draftId"))
+	if draftID == "" {
+		badRequest(c, "invalid_draft_id", "漏洞草稿 id 不能为空")
+		return
+	}
+	item, err := h.draftManager.ConfirmVulnerabilityDraft(
+		c.Request.Context(),
+		project.ID,
+		user.ID,
+		draftID,
+	)
+	if err != nil {
+		switch {
+		case errors.Is(err, agentpkg.ErrVulnerabilityDraftNotFound):
+			c.JSON(http.StatusNotFound, gin.H{
+				"code":    "vulnerability_draft_not_found",
+				"message": "漏洞草稿不存在",
+			})
+		case errors.Is(err, agentpkg.ErrVulnerabilityDraftBusy):
+			c.JSON(http.StatusConflict, gin.H{
+				"code":    "vulnerability_draft_busy",
+				"message": "漏洞草稿正在后台处理，请稍后再确认",
+			})
+		default:
+			c.JSON(http.StatusUnprocessableEntity, gin.H{
+				"code":    "vulnerability_draft_confirm_failed",
+				"message": "确认漏洞草稿失败",
+				"detail":  err.Error(),
+			})
+		}
+		return
+	}
+	h.auditProjectAction(
+		c,
+		"vulnerability_draft.confirm",
+		"vulnerability_report_draft",
+		draftID,
+		"用户手动确认漏洞草稿",
+	)
+	c.JSON(http.StatusOK, item)
+}
+
+func (h *ProjectHandler) DeleteVulnerabilityDraft(c *gin.Context) {
+	project, ok := h.projectForRequest(c)
+	if !ok {
+		return
+	}
+	user := middleware.UserFromContext(c)
+	if user == nil {
+		unauthorized(c)
+		return
+	}
+	draftID := strings.TrimSpace(c.Param("draftId"))
+	if draftID == "" {
+		badRequest(c, "invalid_draft_id", "漏洞草稿 id 不能为空")
+		return
+	}
+	deleted, err := h.db.DeleteVulnerabilityReportDraft(
+		c.Request.Context(),
+		project.ID,
+		user.ID,
+		draftID,
+	)
+	if err != nil {
+		internalError(c, "delete_vulnerability_draft_failed", "删除漏洞草稿失败")
+		return
+	}
+	if !deleted {
+		c.JSON(http.StatusConflict, gin.H{
+			"code":    "vulnerability_draft_delete_blocked",
+			"message": "漏洞草稿不存在或正在后台处理",
+		})
+		return
+	}
+	h.auditProjectAction(
+		c,
+		"vulnerability_draft.delete",
+		"vulnerability_report_draft",
+		draftID,
+		"用户删除漏洞草稿",
+	)
+	c.AbortWithStatus(http.StatusNoContent)
 }
 
 func (h *ProjectHandler) ListAttackSteps(c *gin.Context) {
@@ -420,7 +582,7 @@ var graphNodeKinds = map[string]bool{
 var graphNodeStatuses = map[string]map[string]bool{
 	"begin":   {"open": true},
 	"goal":    {"open": true, "met": true, "abandoned": true},
-	"intent":  {"open": true, "running": true, "done": true, "blocked": true, "exhausted": true, "capacity_blocked": true},
+	"intent":  {"open": true, "running": true, "done": true, "blocked": true, "exhausted": true, "capacity_blocked": true, "stopped": true},
 	"fact":    {"confirmed": true, "dismissed": true},
 	"finding": {"confirmed": true, "dismissed": true},
 	"hint":    {"active": true, "consumed": true},
@@ -911,6 +1073,30 @@ func (h *ProjectHandler) projectForRequest(c *gin.Context) (*database.Project, b
 		return nil, false
 	}
 	return project, true
+}
+
+func (h *ProjectHandler) auditProjectAction(
+	c *gin.Context,
+	action string,
+	resourceType string,
+	resourceID string,
+	detail string,
+) {
+	if h == nil || h.db == nil || c == nil {
+		return
+	}
+	user := middleware.UserFromContext(c)
+	if user == nil {
+		return
+	}
+	_ = h.db.AddAuditLog(c.Request.Context(), database.AuditLog{
+		UserID:       user.ID,
+		Username:     user.Username,
+		Action:       action,
+		ResourceType: resourceType,
+		ResourceID:   resourceID,
+		Detail:       detail,
+	})
 }
 
 func normalizeAttackStepStatus(value string) string {

@@ -23,6 +23,7 @@ func TestProjectSessionCampaignScopeUsesProjectAssets(t *testing.T) {
 		ID:          projectID,
 		OwnerUserID: "user-1",
 		Name:        "项目会话授权",
+		Scope:       "fengwogy.cn",
 		Status:      "active",
 		CreatedAt:   now,
 		UpdatedAt:   now,
@@ -33,17 +34,22 @@ func TestProjectSessionCampaignScopeUsesProjectAssets(t *testing.T) {
 		{
 			ID: "session-asset-http", ProjectID: projectID, OwnerUserID: "user-1",
 			Name: "HTTP", Kind: "url", Value: "http://fengwogy.cn",
-			Status: "active", Criticality: "medium", CreatedAt: now, UpdatedAt: now,
+			Status: "active", Source: database.AssetSourceManual, Criticality: "medium", CreatedAt: now, UpdatedAt: now,
 		},
 		{
 			ID: "session-asset-domain", ProjectID: projectID, OwnerUserID: "user-1",
 			Name: "域名", Kind: "domain", Value: "fengwogy.cn",
-			Status: "active", Criticality: "medium", CreatedAt: now, UpdatedAt: now,
+			Status: "active", Source: database.AssetSourceManual, Criticality: "medium", CreatedAt: now, UpdatedAt: now,
 		},
 		{
 			ID: "session-asset-https", ProjectID: projectID, OwnerUserID: "user-1",
 			Name: "HTTPS", Kind: "url", Value: "https://fengwogy.cn",
-			Status: "active", Criticality: "medium", CreatedAt: now, UpdatedAt: now,
+			Status: "active", Source: database.AssetSourceManual, Criticality: "medium", CreatedAt: now, UpdatedAt: now,
+		},
+		{
+			ID: "session-asset-outside", ProjectID: projectID, OwnerUserID: "user-1",
+			Name: "范围外", Kind: "domain", Value: "outside.example.net",
+			Status: "active", Source: database.AssetSourceFOFA, Criticality: "medium", CreatedAt: now, UpdatedAt: now,
 		},
 	} {
 		if err := db.CreateAsset(ctx, asset); err != nil {
@@ -71,6 +77,9 @@ func TestProjectSessionCampaignScopeUsesProjectAssets(t *testing.T) {
 	assets, err := db.ListCampaignAssets(ctx, campaignID, "user-1")
 	if err != nil {
 		t.Fatalf("读取 Campaign 授权资产失败: %v", err)
+	}
+	if len(assets) != 3 {
+		t.Fatalf("Campaign 不应纳入项目范围外资产: %+v", assets)
 	}
 	scope := newScope(assets)
 	for _, target := range []string{"fengwogy.cn", "api.fengwogy.cn"} {

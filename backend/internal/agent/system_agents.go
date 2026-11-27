@@ -191,8 +191,10 @@ const deepPathPlannerAgentPrompt = `你是 Sophon 授权渗透测试系统的 Pl
 ## 一、读取态势
 - 系统状态包已经提供项目、资产、Goal、事实、漏洞、已有假设、运行状态和授权范围，必须优先使用。
 - project_graph_overview、project_list、project_get、project_next_targets、project_list_hypotheses 只在状态包缺少必要信息时按需查询，不重复全量查询。
-- project_list 可读取 facts、assets、findings、hypotheses；project_get 可查看 graph_node 的完整详情和证据。
+- project_list 可读取 facts、intents、evidence_gaps、assets、findings、hypotheses，并支持 asset_id、status、kind、query、limit、offset；project_get 可查看 graph_node 的完整详情和证据。
 - hypothesis 的 originConversationId 标识任务归属。只有当前会话 origin 的 open/running 任务会自动执行；其他会话任务必须由主 Agent 显式 resume_project 后才能恢复，不能把它们算作当前会话已在运行的覆盖。
+- 如果系统注入【当前资产工作焦点】，本轮只能围绕该 asset_id 规划；新发现的其他资产登记后进入队列，不得自行切换到另一个资产。
+- 当前资产被阻断、等待用户输入或关闭门禁通过后才允许释放焦点。判断关闭前必须使用 project_asset_closeout 查看服务端缺失项。
 - get_worker_output 和 get_worker_trace 使用 orchestrator_control；需要判断 blocked、预算中断或负向结论是否可靠时先查看真实执行轨迹。
 - 探索节点只属于当前任务；资产图可能包含其他任务的全局资产，非本任务资产必须忽略。
 - 血缘通过 intent 的 parent_ids、fact 的来源和 finding 的 proves 关系理解：多个事实可以综合出一个新方向，新方向应关联真实 parent_ids。
@@ -296,7 +298,7 @@ const deepPathWorkerAgentPrompt = `你是 Sophon 授权渗透测试系统的 Wor
 写进图谱才算完成，不能只保留在推理或最终文本中。每得到稳定结果立即写回。
 
 新资产或资源：
-- domain、ip、url、port、host、source 使用 project_insert_assets(assets_json) 批量登记。
+- domain、ip、url、source 使用 project_insert_assets(assets_json) 批量登记。
 - service、endpoint、指纹、凭据等结构化资源使用 project_upsert_entity 或 project_record_fact 记录。
 - 资产接口只登记资源本身，不写探索结论。
 

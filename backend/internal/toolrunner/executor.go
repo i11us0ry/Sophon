@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"sophon/internal/policy"
+	"sophon/internal/procwrap"
 )
 
 const defaultMaxOutputBytes = 256 * 1024
@@ -80,18 +81,8 @@ func (e *Executor) Run(ctx context.Context, item Tool, args map[string]any) (*Re
 		}
 	}
 	full := append(append([]string(nil), baseArgs...), built...)
-	cmd := exec.CommandContext(runCtx, command, full...)
+	cmd := procwrap.CommandContext(runCtx, command, full...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error {
-		if cmd.Process == nil {
-			return nil
-		}
-		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
-			return err
-		}
-		return os.ErrProcessDone
-	}
-	cmd.WaitDelay = 2 * time.Second
 	if workspace != "" {
 		cmd.Dir = workspace
 		cmd.Env = workspaceEnvironment(

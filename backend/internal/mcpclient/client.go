@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 	"time"
 
@@ -15,6 +14,7 @@ import (
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"sophon/internal/execctx"
+	"sophon/internal/procwrap"
 	"sophon/internal/toolwire"
 )
 
@@ -106,7 +106,7 @@ func (c *Client) Connect(ctx context.Context) error {
 			Name:    "sophon-backend",
 			Version: "0.1.0",
 		}, nil)
-		command := exec.Command(c.command, c.args...)
+		command := procwrap.CommandContext(sessionCtx, c.command, c.args...)
 		if c.workDir != "" {
 			command.Dir = c.workDir
 		}

@@ -373,9 +373,17 @@ func TestEngineUsesConfiguredRulesForCommandSafety(t *testing.T) {
 	if err := db.CreateAsset(ctx, database.Asset{
 		ID: "asset-target", ProjectID: "project-policy", OwnerUserID: "user-1",
 		Name: "目标", Kind: "url", Value: "http://127.0.0.1:8080",
-		Status: "active", Criticality: "medium", CreatedAt: now, UpdatedAt: now,
+		Status: "active", Source: database.AssetSourceManual, Criticality: "medium", CreatedAt: now, UpdatedAt: now,
 	}); err != nil {
 		t.Fatalf("创建资产失败: %v", err)
+	}
+	if err := db.CreateAsset(ctx, database.Asset{
+		ID: "asset-discovered-policy", ProjectID: "project-policy", OwnerUserID: "user-1",
+		Name: "范围外发现资产", Kind: "url", Value: "http://198.51.100.20",
+		Status: "active", Source: database.AssetSourceFOFA, Criticality: "medium",
+		CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("创建范围外资产失败: %v", err)
 	}
 
 	engine := NewEngine(db)
@@ -429,6 +437,11 @@ func TestEngineUsesConfiguredRulesForCommandSafety(t *testing.T) {
 		"targets": []string{"198.51.100.10", "203.0.113.20"},
 	}); decision.Kind != DecisionDeny {
 		t.Fatalf("全部目标均未授权时应拒绝: %+v", decision)
+	}
+	if decision := decide("nmap", map[string]interface{}{
+		"target": "198.51.100.20",
+	}); decision.Kind != DecisionDeny {
+		t.Fatalf("资产库中的发现资产不能绕过项目授权: %+v", decision)
 	}
 	if decision := decide("exec", map[string]interface{}{
 		"command": "curl http://127.0.0.1:8080/health",
@@ -614,7 +627,7 @@ func TestEngineAppliesConfiguredInterceptRules(t *testing.T) {
 	if err := db.CreateAsset(ctx, database.Asset{
 		ID: "asset-intercept", ProjectID: "project-intercept", OwnerUserID: "user-1",
 		Name: "target", Kind: "domain", Value: "target.example.com",
-		Status: "active", Criticality: "medium", CreatedAt: now, UpdatedAt: now,
+		Status: "active", Source: database.AssetSourceManual, Criticality: "medium", CreatedAt: now, UpdatedAt: now,
 	}); err != nil {
 		t.Fatalf("创建资产失败: %v", err)
 	}
@@ -689,12 +702,14 @@ func TestEngineAppliesCampaignScopeUnlessAssetRestrictionDisabled(t *testing.T) 
 		ID: "asset-in-campaign", ProjectID: "project-campaign-policy",
 		OwnerUserID: "user-1", Name: "授权内", Kind: "url",
 		Value: "http://127.0.0.1:8080", Status: "active",
+		Source:    database.AssetSourceManual,
 		CreatedAt: now, UpdatedAt: now,
 	}
 	outAsset := database.Asset{
 		ID: "asset-out-campaign", ProjectID: "project-campaign-policy",
 		OwnerUserID: "user-1", Name: "授权外", Kind: "url",
 		Value: "http://198.51.100.10", Status: "active",
+		Source:    database.AssetSourceManual,
 		CreatedAt: now, UpdatedAt: now,
 	}
 	if err := db.CreateAsset(ctx, outAsset); err != nil {

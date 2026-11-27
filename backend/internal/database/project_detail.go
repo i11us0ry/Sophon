@@ -24,18 +24,25 @@ type AttackStep struct {
 }
 
 type ProjectCounts struct {
-	Facts               int  `json:"facts"`
-	PendingIntents      int  `json:"pendingIntents"`
-	EvidenceGaps        int  `json:"evidenceGaps"`
-	AttackSteps         int  `json:"attackSteps"`
-	Assets              int  `json:"assets"`
-	Conversations       int  `json:"conversations"`
-	Vulnerabilities     int  `json:"vulnerabilities"`
-	PromptTokens        int  `json:"promptTokens"`
-	CompletionTokens    int  `json:"completionTokens"`
-	TotalTokens         int  `json:"totalTokens"`
-	TokenUsageEstimated bool `json:"tokenUsageEstimated"`
+	Facts                  int   `json:"facts"`
+	PendingIntents         int   `json:"pendingIntents"`
+	TotalIntents           int   `json:"totalIntents"`
+	CapacityBlockedIntents int   `json:"capacityBlockedIntents"`
+	BlockedIntents         int   `json:"blockedIntents"`
+	IntentCapacity         int   `json:"intentCapacity"`
+	OldestIntentAt         int64 `json:"oldestIntentAt"`
+	EvidenceGaps           int   `json:"evidenceGaps"`
+	AttackSteps            int   `json:"attackSteps"`
+	Assets                 int   `json:"assets"`
+	Conversations          int   `json:"conversations"`
+	Vulnerabilities        int   `json:"vulnerabilities"`
+	PromptTokens           int   `json:"promptTokens"`
+	CompletionTokens       int   `json:"completionTokens"`
+	TotalTokens            int   `json:"totalTokens"`
+	TokenUsageEstimated    bool  `json:"tokenUsageEstimated"`
 }
+
+const ProjectIntentCapacityLimit = 100
 
 type ProjectWithCounts struct {
 	Project
@@ -74,7 +81,9 @@ func (db *DB) ProjectSummary(
 		{`SELECT COUNT(*) FROM project_graph_nodes
 		  WHERE project_id = ? AND kind = 'intent' AND status IN ('open', 'running')`, &counts.PendingIntents},
 		{`SELECT COUNT(*) FROM project_graph_nodes WHERE project_id = ?`, &counts.AttackSteps},
-		{`SELECT COUNT(*) FROM assets WHERE project_id = ?`, &counts.Assets},
+		{`SELECT COUNT(*) FROM assets
+		  WHERE project_id = ?
+		    AND LOWER(TRIM(kind)) IN ('domain', 'ip', 'url', 'source')`, &counts.Assets},
 		{`SELECT COUNT(*) FROM conversations WHERE project_id = ?`, &counts.Conversations},
 		{`SELECT COUNT(*) FROM vulnerabilities WHERE project_id = ?`, &counts.Vulnerabilities},
 	}
@@ -83,6 +92,25 @@ func (db *DB) ProjectSummary(
 			return nil, err
 		}
 	}
+	if err := db.QueryRowContext(
+		ctx,
+		`SELECT
+			COALESCE(SUM(CASE WHEN status = 'capacity_blocked' THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN status = 'blocked' THEN 1 ELSE 0 END), 0),
+			COALESCE(MIN(CASE WHEN status IN ('open', 'running') THEN created_at END), 0),
+			COUNT(*)
+		 FROM project_graph_nodes
+		 WHERE project_id = ? AND kind = 'intent'`,
+		projectID,
+	).Scan(
+		&counts.CapacityBlockedIntents,
+		&counts.BlockedIntents,
+		&counts.OldestIntentAt,
+		&counts.TotalIntents,
+	); err != nil {
+		return nil, err
+	}
+	counts.IntentCapacity = ProjectIntentCapacityLimit
 	if err := db.QueryRowContext(
 		ctx,
 		`SELECT
@@ -188,7 +216,9 @@ func (db *DB) ListProjectsWithCountsPage(
 			   AND (TRIM(v.evidence_refs) = '' OR TRIM(v.evidence_refs) = '[]')),
 			(SELECT COUNT(*) FROM project_facts f WHERE f.project_id = p.id),
 			(SELECT COUNT(*) FROM project_graph_nodes g WHERE g.project_id = p.id),
-			(SELECT COUNT(*) FROM assets a WHERE a.project_id = p.id),
+			(SELECT COUNT(*) FROM assets a
+			 WHERE a.project_id = p.id
+			   AND LOWER(TRIM(a.kind)) IN ('domain', 'ip', 'url', 'source')),
 			(SELECT COUNT(*) FROM conversations c WHERE c.project_id = p.id),
 			(SELECT COUNT(*) FROM vulnerabilities v WHERE v.project_id = p.id),
 			COALESCE(SUM(t.prompt_tokens), 0),
@@ -329,7 +359,9 @@ func (db *DB) ListProjectsWithCountsOffset(
 			   AND (TRIM(v.evidence_refs) = '' OR TRIM(v.evidence_refs) = '[]')),
 			(SELECT COUNT(*) FROM project_facts f WHERE f.project_id = p.id),
 			(SELECT COUNT(*) FROM project_graph_nodes g WHERE g.project_id = p.id),
-			(SELECT COUNT(*) FROM assets a WHERE a.project_id = p.id),
+			(SELECT COUNT(*) FROM assets a
+			 WHERE a.project_id = p.id
+			   AND LOWER(TRIM(a.kind)) IN ('domain', 'ip', 'url', 'source')),
 			(SELECT COUNT(*) FROM conversations c WHERE c.project_id = p.id),
 			(SELECT COUNT(*) FROM vulnerabilities v WHERE v.project_id = p.id),
 			COALESCE(SUM(t.prompt_tokens), 0),
@@ -455,10 +487,11 @@ func (db *DB) ListProjectAssets(
 ) ([]Asset, error) {
 	rows, err := db.QueryContext(
 		ctx,
-		`SELECT id, project_id, owner_user_id, name, kind, value, status, source,
+		`SELECT id, project_id, owner_user_id, name, kind, value, normalized_value, quality_status, status, source,
 			criticality, risk_score, created_at, updated_at
 		 FROM assets
 		 WHERE project_id = ? AND owner_user_id = ?
+		   AND LOWER(TRIM(kind)) IN ('domain', 'ip', 'url', 'host', 'source')
 		 ORDER BY updated_at DESC`,
 		projectID,
 		ownerUserID,
@@ -480,6 +513,8 @@ func (db *DB) ListProjectAssets(
 			&item.Name,
 			&item.Kind,
 			&item.Value,
+			&item.NormalizedValue,
+			&item.QualityStatus,
 			&item.Status,
 			&item.Source,
 			&item.Criticality,
@@ -507,7 +542,9 @@ func (db *DB) ListProjectAssetsPage(
 	var total int
 	if err := db.QueryRowContext(
 		ctx,
-		`SELECT COUNT(*) FROM assets WHERE project_id = ? AND owner_user_id = ?`,
+		`SELECT COUNT(*) FROM assets
+		 WHERE project_id = ? AND owner_user_id = ?
+		   AND LOWER(TRIM(kind)) IN ('domain', 'ip', 'url', 'host', 'source')`,
 		projectID,
 		ownerUserID,
 	).Scan(&total); err != nil {
@@ -516,10 +553,11 @@ func (db *DB) ListProjectAssetsPage(
 
 	rows, err := db.QueryContext(
 		ctx,
-		`SELECT id, project_id, owner_user_id, name, kind, value, status, source,
+		`SELECT id, project_id, owner_user_id, name, kind, value, normalized_value, quality_status, status, source,
 			criticality, risk_score, created_at, updated_at
 		 FROM assets
 		 WHERE project_id = ? AND owner_user_id = ?
+		   AND LOWER(TRIM(kind)) IN ('domain', 'ip', 'url', 'host', 'source')
 		 ORDER BY updated_at DESC, rowid DESC
 		 LIMIT ? OFFSET ?`,
 		projectID,
@@ -544,6 +582,8 @@ func (db *DB) ListProjectAssetsPage(
 			&item.Name,
 			&item.Kind,
 			&item.Value,
+			&item.NormalizedValue,
+			&item.QualityStatus,
 			&item.Status,
 			&item.Source,
 			&item.Criticality,

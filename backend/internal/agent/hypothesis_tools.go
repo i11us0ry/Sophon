@@ -119,6 +119,12 @@ func (s *Service) planHypothesesTool() tool.BaseTool {
 				}
 			}
 			for _, input := range inputs {
+				scopeAssetID := currentAssetID(ctx)
+				if scopeAssetID != "" &&
+					strings.TrimSpace(input.AssetID) != "" &&
+					!strings.EqualFold(strings.TrimSpace(input.AssetID), scopeAssetID) {
+					return "", fmt.Errorf("当前资产焦点只允许规划资产 %s 的假设", scopeAssetID)
+				}
 				assetID := firstNonEmpty(input.AssetID, currentAssetID(ctx))
 				if assetID != "" {
 					assetID, err = s.validateProjectAsset(ctx, projectID, userID, assetID)
@@ -182,7 +188,7 @@ func (s *Service) planHypothesesTool() tool.BaseTool {
 				if technique != "" {
 					intentTitle += " · " + technique
 				}
-				intentNode, err := s.db.UpsertProjectGraphNode(ctx, database.GraphNode{
+				intentNode := database.GraphNode{
 					ID:         randomID(),
 					ProjectID:  projectID,
 					Kind:       "intent",
@@ -194,25 +200,29 @@ func (s *Service) planHypothesesTool() tool.BaseTool {
 					Source:     "planner",
 					CreatedAt:  now,
 					UpdatedAt:  now,
-				})
-				if err != nil {
-					return "", fmt.Errorf("写入 Planner Intent 节点失败: %w", err)
 				}
+				edges := make([]database.GraphEdge, 0, len(parentNodes)+1)
 				if rootID := s.latestIntentSourceRootID(ctx, projectID, assetID); rootID != "" {
-					_ = s.linkGraphEdge(ctx, projectID, rootID, intentNode.ID, "spawns")
+					edges = append(edges, database.GraphEdge{
+						ID:        randomID(),
+						ProjectID: projectID,
+						SrcID:     rootID,
+						DstID:     intentNode.ID,
+						Rel:       "spawns",
+						CreatedAt: now,
+					})
 				}
 				for _, parent := range parentNodes {
-					if err := s.linkGraphEdge(
-						ctx,
-						projectID,
-						parent.ID,
-						intentNode.ID,
-						"derived_from",
-					); err != nil {
-						return "", fmt.Errorf("关联假设父节点失败: %w", err)
-					}
+					edges = append(edges, database.GraphEdge{
+						ID:        randomID(),
+						ProjectID: projectID,
+						SrcID:     parent.ID,
+						DstID:     intentNode.ID,
+						Rel:       "derived_from",
+						CreatedAt: now,
+					})
 				}
-				if _, err := s.db.UpsertProjectTestResult(ctx, database.ProjectTestResult{
+				_, err = s.db.CreateProjectIntentWithHypothesis(ctx, intentNode, edges, database.ProjectTestResult{
 					ProjectID:            projectID,
 					AssetID:              assetID,
 					Dimension:            dimension,
@@ -225,8 +235,9 @@ func (s *Service) planHypothesesTool() tool.BaseTool {
 					Expected:             truncateProjectText(input.ExpectedEvidence, projectToolLongText),
 					Priority:             priority,
 					Required:             required,
-					CreatedAt:            time.Now().UTC(),
-				}); err != nil {
+					CreatedAt:            now,
+				})
+				if err != nil {
 					return "", fmt.Errorf("写入测试假设失败: %w", err)
 				}
 				plannedDimensions = append(plannedDimensions, hypothesisDimensionRef{
@@ -432,6 +443,13 @@ func (s *Service) startHypothesisTool() tool.BaseTool {
 			if err != nil {
 				return "", err
 			}
+			current, err := s.db.GetProjectTestResultByID(ctx, projectID, request.HypothesisID)
+			if err != nil {
+				return "", fmt.Errorf("开始测试假设失败: %w", err)
+			}
+			if err := validateWorkerHypothesisAccess(ctx, current); err != nil {
+				return "", err
+			}
 			item, err := s.db.StartProjectHypothesis(ctx, projectID, request.HypothesisID)
 			if err != nil {
 				return "", fmt.Errorf("开始测试假设失败: %w", err)
@@ -482,6 +500,9 @@ func (s *Service) completeHypothesisTool() tool.BaseTool {
 			item, err := s.db.GetProjectTestResultByID(ctx, projectID, request.HypothesisID)
 			if err != nil {
 				return "", fmt.Errorf("测试假设不存在: %w", err)
+			}
+			if err := validateWorkerHypothesisAccess(ctx, item); err != nil {
+				return "", err
 			}
 			status, ok := database.NormalizeProjectTestResultStatus(request.Status)
 			if !ok || !database.IsProjectTestResultTerminal(status) {
@@ -555,6 +576,38 @@ func (s *Service) completeHypothesisTool() tool.BaseTool {
 			), nil
 		},
 	}
+}
+
+func validateWorkerHypothesisAccess(ctx context.Context, item *database.ProjectTestResult) error {
+	if item == nil {
+		return fmt.Errorf("测试假设不存在")
+	}
+	info, ok := execctx.Subagent(ctx)
+	if !ok {
+		return nil
+	}
+	kind := strings.ToLower(strings.TrimSpace(info.Kind))
+	if kind != "worker" && kind != "subagent" {
+		return nil
+	}
+	hypothesisID := strings.TrimSpace(info.HypothesisID)
+	if kind == "worker" && hypothesisID == "" {
+		return fmt.Errorf("当前 Worker 缺少测试假设上下文")
+	}
+	if hypothesisID != "" && hypothesisID != strings.TrimSpace(item.ID) {
+		return fmt.Errorf("当前 Worker 不能操作其他测试假设")
+	}
+	if intentID := strings.TrimSpace(info.IntentID); intentID != "" &&
+		strings.TrimSpace(item.IntentID) != "" &&
+		intentID != strings.TrimSpace(item.IntentID) {
+		return fmt.Errorf("当前 Worker 不能操作其他意图下的测试假设")
+	}
+	conversationID := strings.TrimSpace(execctx.ConversationID(ctx))
+	if conversationID != "" && strings.TrimSpace(item.OriginConversationID) != "" &&
+		conversationID != strings.TrimSpace(item.OriginConversationID) {
+		return fmt.Errorf("测试假设属于其他会话")
+	}
+	return nil
 }
 
 func isUploadAuditHypothesis(item database.ProjectTestResult) bool {

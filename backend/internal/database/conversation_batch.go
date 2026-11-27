@@ -458,18 +458,33 @@ func insertAssetTx(ctx context.Context, tx *sql.Tx, asset Asset) error {
 	} else {
 		asset.Source = NormalizeAssetSource(asset.Source)
 	}
-	_, err := tx.ExecContext(
+	if err := normalizeAssetRecord(&asset); err != nil {
+		return err
+	}
+	duplicate, err := assetDuplicateExists(ctx, tx, asset, "")
+	if err != nil {
+		return err
+	}
+	if duplicate {
+		return ErrAssetDuplicate
+	}
+	if err := markCrossTypeAssetQuality(ctx, tx, &asset); err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(
 		ctx,
 		`INSERT INTO assets (
-			id, project_id, owner_user_id, name, kind, value, status, source,
+			id, project_id, owner_user_id, name, kind, value, normalized_value, quality_status, status, source,
 			criticality, risk_score, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		asset.ID,
 		asset.ProjectID,
 		asset.OwnerUserID,
 		asset.Name,
 		asset.Kind,
 		asset.Value,
+		asset.NormalizedValue,
+		asset.QualityStatus,
 		asset.Status,
 		asset.Source,
 		asset.Criticality,

@@ -69,11 +69,6 @@ func ParseProjectScopeAssets(scope string) []ProjectScopeAsset {
 				})
 			}
 			added++
-			if parsed, err := url.Parse(match); err == nil {
-				if host := normalizeScopeAssetValue(parsed.Hostname()); host != "" {
-					add(host, line)
-				}
-			}
 		}
 		if added > 0 {
 			continue
@@ -159,21 +154,54 @@ func (db *DB) SyncProjectScopeAssets(
 			result.Skipped++
 			continue
 		}
+		asset := Asset{
+			ID:          newID(),
+			ProjectID:   projectID,
+			OwnerUserID: ownerUserID,
+			Name:        name,
+			Kind:        kind,
+			Value:       item.Value,
+			Status:      "active",
+			Source:      AssetSourceScope,
+			Criticality: "medium",
+			CreatedAt:   now,
+			UpdatedAt:   now,
+		}
+		if err := normalizeAssetRecord(&asset); err != nil {
+			result.Skipped++
+			continue
+		}
+		duplicate, err := assetDuplicateExists(ctx, tx, asset, "")
+		if err != nil {
+			return result, err
+		}
+		if duplicate {
+			result.Skipped++
+			continue
+		}
+		if err := markCrossTypeAssetQuality(ctx, tx, &asset); err != nil {
+			return result, err
+		}
 		if _, err := tx.ExecContext(
 			ctx,
 			`INSERT INTO assets (
-				id, project_id, owner_user_id, name, kind, value, status, source,
+				id, project_id, owner_user_id, name, kind, value, normalized_value, quality_status, status, source,
 				criticality, risk_score, created_at, updated_at
-			) VALUES (?, ?, ?, ?, ?, ?, 'active', ?, 'medium', 0, ?, ?)`,
-			newID(),
-			projectID,
-			ownerUserID,
-			name,
-			kind,
-			item.Value,
-			AssetSourceScope,
-			now.Unix(),
-			now.Unix(),
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			asset.ID,
+			asset.ProjectID,
+			asset.OwnerUserID,
+			asset.Name,
+			asset.Kind,
+			asset.Value,
+			asset.NormalizedValue,
+			asset.QualityStatus,
+			asset.Status,
+			asset.Source,
+			asset.Criticality,
+			asset.RiskScore,
+			asset.CreatedAt.Unix(),
+			asset.UpdatedAt.Unix(),
 		); err != nil {
 			return result, fmt.Errorf("同步授权资产失败: %w", err)
 		}
@@ -219,6 +247,94 @@ func (db *DB) backfillProjectScopeAssets(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// markProjectScopeDerivedAssets 标记旧版范围同步产生的 Host 重复资产。
+// 这些记录可能已被事实、漏洞或攻击路径引用，因此只降级质量状态，不删除数据。
+func (db *DB) markProjectScopeDerivedAssets(ctx context.Context) error {
+	rows, err := db.QueryContext(
+		ctx,
+		`SELECT project_id, owner_user_id, normalized_value
+		 FROM assets
+		 WHERE LOWER(TRIM(source)) = ?
+		   AND LOWER(TRIM(kind)) = 'url'
+		   AND TRIM(normalized_value) <> ''`,
+		AssetSourceScope,
+	)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	urlHosts := make(map[string]bool)
+	for rows.Next() {
+		var projectID, ownerUserID, value string
+		if err := rows.Scan(&projectID, &ownerUserID, &value); err != nil {
+			return err
+		}
+		parsed, err := url.Parse(value)
+		if err != nil {
+			continue
+		}
+		host := normalizeScopeAssetValue(parsed.Hostname())
+		if host == "" {
+			continue
+		}
+		urlHosts[scopeAssetKey(projectID, ownerUserID, host)] = true
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if len(urlHosts) == 0 {
+		return nil
+	}
+
+	hostRows, err := db.QueryContext(
+		ctx,
+		`SELECT id, project_id, owner_user_id, normalized_value
+		 FROM assets
+		 WHERE LOWER(TRIM(source)) = ?
+		   AND LOWER(TRIM(kind)) IN ('ip', 'domain')
+		   AND TRIM(normalized_value) <> ''`,
+		AssetSourceScope,
+	)
+	if err != nil {
+		return err
+	}
+	defer hostRows.Close()
+
+	for hostRows.Next() {
+		var id, projectID, ownerUserID, value string
+		if err := hostRows.Scan(&id, &projectID, &ownerUserID, &value); err != nil {
+			return err
+		}
+		if !urlHosts[scopeAssetKey(projectID, ownerUserID, value)] {
+			continue
+		}
+		if _, err := db.ExecContext(
+			ctx,
+			`UPDATE assets
+			 SET quality_status = ?
+			 WHERE id = ? AND quality_status <> ?`,
+			AssetQualityCrossTypeDuplicate,
+			id,
+			AssetQualityCrossTypeDuplicate,
+		); err != nil {
+			return err
+		}
+	}
+	return hostRows.Err()
+}
+
+func scopeAssetKey(projectID, ownerUserID, value string) string {
+	return strings.Join([]string{
+		strings.TrimSpace(projectID),
+		strings.TrimSpace(ownerUserID),
+		strings.ToLower(strings.TrimSpace(value)),
+	}, "\x00")
 }
 
 func normalizeScopeAssetValue(value string) string {

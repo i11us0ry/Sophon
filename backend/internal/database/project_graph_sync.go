@@ -15,7 +15,6 @@ type GraphSyncResult struct {
 }
 
 const (
-	maxProjectGoalNodes            = 5
 	maxGraphNodeTitleRun           = 200
 	maxMaterializedFactsPerAsset   = 3
 	maxMaterializedFactsPerProject = 200
@@ -49,6 +48,9 @@ func (db *DB) SyncProjectGraph(ctx context.Context, project Project) (GraphSyncR
 		edgeSet[graphEdgeKey(edge.SrcID, edge.DstID, edge.Rel)] = true
 	}
 	now := time.Now().UTC()
+	if _, err := db.expireDerivedProjectIntents(ctx, project.ID, now); err != nil {
+		return result, err
+	}
 
 	ensureNode := func(
 		kind string,
@@ -187,7 +189,8 @@ func (db *DB) SyncProjectGraph(ctx context.Context, project Project) (GraphSyncR
 	if err != nil {
 		return result, err
 	}
-	for _, title := range splitProjectGoals(project.Goals) {
+	brief := ParseProjectBrief(project.Goals)
+	for _, title := range brief.Goals {
 		goal, err := ensureNode("goal", title, "", "open", "", "", 80, "")
 		if err != nil {
 			return result, err
@@ -195,6 +198,44 @@ func (db *DB) SyncProjectGraph(ctx context.Context, project Project) (GraphSyncR
 		if err := ensureEdge(begin, goal, "aims"); err != nil {
 			return result, err
 		}
+	}
+	constraintRefs := make(map[string]bool, len(brief.Constraints))
+	for _, constraint := range brief.Constraints {
+		sourceRefID := ProjectConstraintRef(constraint)
+		constraintRefs[sourceRefID] = true
+		constraintNode, err := db.UpsertProjectGraphNode(ctx, GraphNode{
+			ID:          newID(),
+			ProjectID:   project.ID,
+			Kind:        "fact",
+			Title:       "安全约束",
+			Detail:      constraint,
+			Status:      "confirmed",
+			Confidence:  100,
+			Source:      "project-constraint",
+			SourceRefID: sourceRefID,
+			CreatedAt:   now,
+			UpdatedAt:   now,
+		})
+		if err != nil {
+			return result, err
+		}
+		if !containsGraphNode(allNodes, constraintNode.ID) {
+			allNodes = append(allNodes, constraintNode)
+		}
+		if err := ensureEdge(begin, constraintNode, "blocks"); err != nil {
+			return result, err
+		}
+	}
+	for _, node := range existingNodes {
+		if node.Source != "project-constraint" || constraintRefs[node.SourceRefID] || node.Status == "dismissed" {
+			continue
+		}
+		node.Status = "dismissed"
+		node.UpdatedAt = now
+		if err := db.UpdateProjectGraphNode(ctx, node); err != nil {
+			return result, err
+		}
+		result.UpdatedNodes++
 	}
 
 	facts, err := db.ListProjectFacts(ctx, project.ID)
@@ -254,7 +295,8 @@ func (db *DB) SyncProjectGraph(ctx context.Context, project Project) (GraphSyncR
 		case "intent":
 			rel, anchor = "plans", latestOfKind(node.AssetID, "goal")
 		case "fact":
-			if hasIncomingGraphEdge(edgeSet, node.ID, "yields") {
+			if hasIncomingGraphEdge(edgeSet, node.ID, "yields") ||
+				hasIncomingGraphEdge(edgeSet, node.ID, "blocks") {
 				continue
 			}
 			rel, anchor = "yields", latestOfKind(node.AssetID, "intent", "goal")
@@ -387,19 +429,24 @@ func graphNodeKey(kind, title, sourceRefID, assetID string) string {
 	identity := "title:" + strings.TrimSpace(title)
 	if sourceRefID = strings.TrimSpace(sourceRefID); sourceRefID != "" {
 		identity = "ref:" + sourceRefID
+		return strings.ToLower(strings.TrimSpace(kind)) + "\x00" + identity
 	}
 	return strings.ToLower(strings.TrimSpace(kind)) + "\x00" + identity + "\x00asset:" + strings.TrimSpace(assetID)
 }
 
-// graphFindingStatus 把漏洞状态映射为攻击路径 finding 节点状态（前端仅支持 confirmed/dismissed）。
+// graphFindingStatus 把漏洞状态映射为攻击路径 finding 节点状态；未知状态按未确认处理。
 func graphFindingStatus(status string) string {
 	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "open":
+		return "open"
 	case "pending_review":
 		return "open"
+	case "confirmed":
+		return "confirmed"
 	case "fixed", "ignored", "false_positive":
 		return "dismissed"
 	default:
-		return "confirmed"
+		return "open"
 	}
 }
 
@@ -417,33 +464,11 @@ func hasIncomingGraphEdge(edgeSet map[string]bool, dstID string, rel string) boo
 	return false
 }
 
-// splitProjectGoals 把项目目标文本拆成最多 maxProjectGoalNodes 个目标标题。
-func splitProjectGoals(raw string) []string {
-	fields := strings.FieldsFunc(raw, func(r rune) bool {
-		switch r {
-		case '\n', '\r', ';', '；':
+func containsGraphNode(nodes []*GraphNode, id string) bool {
+	for _, node := range nodes {
+		if node != nil && node.ID == id {
 			return true
 		}
-		return false
-	})
-	goals := make([]string, 0, len(fields))
-	seen := make(map[string]bool, len(fields))
-	for _, field := range fields {
-		title := strings.TrimSpace(field)
-		if runes := []rune(title); len(runes) > maxGraphNodeTitleRun {
-			title = string(runes[:maxGraphNodeTitleRun]) + "…"
-		}
-		if title == "" || seen[title] {
-			continue
-		}
-		seen[title] = true
-		goals = append(goals, title)
-		if len(goals) >= maxProjectGoalNodes {
-			break
-		}
 	}
-	if len(goals) == 0 {
-		return []string{"完成项目目标"}
-	}
-	return goals
+	return false
 }

@@ -345,22 +345,53 @@ func ensureProjectAsset(
 	if kind == "" {
 		return "", nil
 	}
+	asset := Asset{
+		ID:          assetID,
+		ProjectID:   projectID,
+		OwnerUserID: ownerUserID,
+		Name:        value,
+		Kind:        kind,
+		Value:       value,
+		Status:      "active",
+		Source:      AssetSourceAgent,
+		Criticality: "medium",
+		RiskScore:   riskScore,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	if err := normalizeAssetRecord(&asset); err != nil {
+		return "", nil
+	}
+	duplicate, err := assetDuplicateExists(ctx, tx, asset, "")
+	if err != nil {
+		return "", err
+	}
+	if duplicate {
+		return "", nil
+	}
+	if err := markCrossTypeAssetQuality(ctx, tx, &asset); err != nil {
+		return "", err
+	}
 	if _, err := tx.ExecContext(
 		ctx,
 		`INSERT INTO assets (
-			id, project_id, owner_user_id, name, kind, value, status, source,
+			id, project_id, owner_user_id, name, kind, value, normalized_value, quality_status, status, source,
 			criticality, risk_score, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, 'active', ?, 'medium', ?, ?, ?)`,
-		assetID,
-		projectID,
-		ownerUserID,
-		value,
-		kind,
-		value,
-		AssetSourceAgent,
-		riskScore,
-		now.Unix(),
-		now.Unix(),
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		asset.ID,
+		asset.ProjectID,
+		asset.OwnerUserID,
+		asset.Name,
+		asset.Kind,
+		asset.Value,
+		asset.NormalizedValue,
+		asset.QualityStatus,
+		asset.Status,
+		asset.Source,
+		asset.Criticality,
+		asset.RiskScore,
+		asset.CreatedAt.Unix(),
+		asset.UpdatedAt.Unix(),
 	); err != nil {
 		return "", err
 	}
@@ -378,15 +409,13 @@ func inferAssetKind(value string) string {
 	if _, err := NormalizeAssetValue("domain", value); err == nil {
 		return "domain"
 	}
-	if _, err := NormalizeAssetValue("port", value); err == nil {
-		return "port"
-	}
-	if _, _, err := net.ParseCIDR(value); err == nil {
-		return "host"
-	}
-	if host, err := NormalizeAssetValue("host", value); err == nil &&
-		(strings.Contains(host, ".") || strings.Contains(host, ":")) {
-		return "host"
+	if host, _, err := net.SplitHostPort(value); err == nil {
+		if _, err := NormalizeAssetValue("ip", host); err == nil {
+			return "ip"
+		}
+		if _, err := NormalizeAssetValue("domain", host); err == nil {
+			return "domain"
+		}
 	}
 	return ""
 }

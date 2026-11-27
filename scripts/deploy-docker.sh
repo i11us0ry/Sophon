@@ -15,6 +15,8 @@ STAMP="$(date +%Y%m%d-%H%M%S)"
 
 BACKEND_TAR="/tmp/sophon-backend-${STAMP}.tgz"
 BACKEND_BIN="/tmp/sophon-server-${STAMP}"
+SUPERVISOR_BIN="/tmp/sophon-process-supervisor-${STAMP}"
+TOOL_RUNNER_BIN="/tmp/sophon-tool-runner-${STAMP}"
 FRONTEND_DIST="/tmp/sophon-frontend-dist-${STAMP}"
 TOOLS_TAR="/tmp/sophon-tools-${STAMP}.tgz"
 
@@ -76,6 +78,8 @@ build_backend() {
     BUILD_DIR="/tmp/sophon-build-${STAMP}" \
     TAR_PATH="/tmp/$(basename "$BACKEND_TAR")" \
     BIN_PATH="$BACKEND_BIN" \
+    SUPERVISOR_BIN="$SUPERVISOR_BIN" \
+    TOOL_RUNNER_BIN="$TOOL_RUNNER_BIN" \
     GO_CACHE="$GO_CACHE" \
     sh -lc '
       set -eu
@@ -84,9 +88,15 @@ build_backend() {
       cd "$BUILD_DIR/backend"
       CGO_ENABLED=1 GOCACHE="$GO_CACHE" \
         go build -trimpath -o "$BIN_PATH" ./cmd/server
+      CGO_ENABLED=1 GOCACHE="$GO_CACHE" \
+        go build -trimpath -o "$SUPERVISOR_BIN" ./cmd/process-supervisor
+      CGO_ENABLED=1 GOCACHE="$GO_CACHE" \
+        go build -trimpath -o "$TOOL_RUNNER_BIN" ./cmd/tool-runner
       test -x "$BIN_PATH"
+      test -x "$SUPERVISOR_BIN"
+      test -x "$TOOL_RUNNER_BIN"
     '
-  ok "后端构建完成: ${BACKEND_BIN}"
+  ok "后端构建完成: ${BACKEND_BIN}, ${SUPERVISOR_BIN}, ${TOOL_RUNNER_BIN}"
 }
 
 build_frontend() {
@@ -131,16 +141,30 @@ deploy_backend() {
   docker exec "$CONTAINER" env \
     APP_ROOT="$APP_ROOT" \
     BIN_PATH="$BACKEND_BIN" \
+    SUPERVISOR_BIN="$SUPERVISOR_BIN" \
+    TOOL_RUNNER_BIN="$TOOL_RUNNER_BIN" \
     STAMP="$STAMP" \
     sh -lc '
       set -eu
       test -x "$BIN_PATH"
+      test -x "$SUPERVISOR_BIN"
+      test -x "$TOOL_RUNNER_BIN"
       cd "$APP_ROOT/backend"
       BACKUP="sophon-server.bak.${STAMP}"
+      SUPERVISOR_BACKUP="sophon-process-supervisor.bak.${STAMP}"
+      TOOL_RUNNER_BACKUP="sophon-tool-runner.bak.${STAMP}"
       cp -p sophon-server "$BACKUP"
+      if [ -f sophon-process-supervisor ]; then
+        cp -p sophon-process-supervisor "$SUPERVISOR_BACKUP"
+      fi
+      cp -p sophon-tool-runner "$TOOL_RUNNER_BACKUP"
       install -m 0755 "$BIN_PATH" sophon-server.new
+      install -m 0755 "$SUPERVISOR_BIN" sophon-process-supervisor.new
+      install -m 0755 "$TOOL_RUNNER_BIN" sophon-tool-runner.new
       mv sophon-server.new sophon-server
-      printf "后端备份: %s\n" "$BACKUP"
+      mv sophon-process-supervisor.new sophon-process-supervisor
+      mv sophon-tool-runner.new sophon-tool-runner
+      printf "后端备份: %s, %s, %s\n" "$BACKUP" "$SUPERVISOR_BACKUP" "$TOOL_RUNNER_BACKUP"
     '
 }
 

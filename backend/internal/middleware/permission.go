@@ -124,6 +124,30 @@ func RoutePermission(method, path string) string {
 		strings.Contains(path, "/graph"):
 		return crudPermission(method, "vulnerability")
 	case strings.HasPrefix(path, "/api/projects/") &&
+		strings.Contains(path, "/vulnerability-drafts"):
+		if method == http.MethodGet || method == http.MethodHead {
+			return "vulnerability:read"
+		}
+		if method == http.MethodDelete {
+			return "vulnerability:delete"
+		}
+		return "vulnerability:write"
+	case strings.HasPrefix(path, "/api/projects/") &&
+		(strings.Contains(path, "/asset-overview") ||
+			strings.Contains(path, "/asset-work") ||
+			strings.Contains(path, "/assets/") && strings.HasSuffix(path, "/closeout")):
+		if method == http.MethodGet || method == http.MethodHead {
+			return "asset:read"
+		}
+		return "asset:write"
+	case strings.HasPrefix(path, "/api/projects/") &&
+		strings.Contains(path, "/assets/") &&
+		strings.HasSuffix(path, "/reopen"):
+		return "asset:write"
+	case strings.HasPrefix(path, "/api/projects/") &&
+		(strings.HasSuffix(path, "/evidence-gaps") || strings.HasSuffix(path, "/intents")):
+		return "vulnerability:read"
+	case strings.HasPrefix(path, "/api/projects/") &&
 		strings.HasSuffix(path, "/agent-conversations"):
 		return crudPermission(method, "chat")
 	case strings.HasPrefix(path, "/api/projects"):

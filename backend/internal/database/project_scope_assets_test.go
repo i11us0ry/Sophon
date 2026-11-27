@@ -24,7 +24,6 @@ https://n9e.oa.example.com/login
 		"*.example.com",
 		"*.example.net",
 		"https://n9e.oa.example.com/login",
-		"n9e.oa.example.com",
 		"10.0.0.0/24",
 		"203.0.113.10",
 	} {
@@ -34,6 +33,101 @@ https://n9e.oa.example.com/login
 	}
 	if got["授权资产"] {
 		t.Fatalf("标题行不应被当成资产: %#v", items)
+	}
+	if got["n9e.oa.example.com"] {
+		t.Fatalf("URL 不应自动派生 Host 顶层资产: %#v", items)
+	}
+}
+
+func TestMarkProjectScopeDerivedAssetsAndHideFromOverview(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "project-scope-derived.db"))
+	if err != nil {
+		t.Fatalf("打开数据库失败: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	ctx := context.Background()
+	now := time.Now().UTC()
+	project := Project{
+		ID:          "scope-derived-project",
+		OwnerUserID: "user-1",
+		Name:        "派生资产",
+		Status:      "active",
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	if err := db.CreateProject(ctx, project); err != nil {
+		t.Fatalf("创建项目失败: %v", err)
+	}
+	for _, item := range []Asset{
+		{
+			ID: "scope-url", ProjectID: project.ID, OwnerUserID: project.OwnerUserID,
+			Name: "https://portal.example.com", Kind: "url", Value: "https://portal.example.com",
+			Status: "active", Source: AssetSourceScope, Criticality: "medium",
+			CreatedAt: now, UpdatedAt: now,
+		},
+		{
+			ID: "scope-domain", ProjectID: project.ID, OwnerUserID: project.OwnerUserID,
+			Name: "https://portal.example.com", Kind: "domain", Value: "portal.example.com",
+			Status: "active", Source: AssetSourceScope, Criticality: "medium",
+			CreatedAt: now, UpdatedAt: now,
+		},
+		{
+			ID: "scope-ip", ProjectID: project.ID, OwnerUserID: project.OwnerUserID,
+			Name: "https://198.51.100.10:8443", Kind: "ip", Value: "198.51.100.10",
+			Status: "active", Source: AssetSourceScope, Criticality: "medium",
+			CreatedAt: now, UpdatedAt: now,
+		},
+		{
+			ID: "scope-ip-url", ProjectID: project.ID, OwnerUserID: project.OwnerUserID,
+			Name: "https://198.51.100.10:8443", Kind: "url", Value: "https://198.51.100.10:8443",
+			Status: "active", Source: AssetSourceScope, Criticality: "medium",
+			CreatedAt: now, UpdatedAt: now,
+		},
+	} {
+		if err := db.CreateAsset(ctx, item); err != nil {
+			t.Fatalf("创建资产 %s 失败: %v", item.ID, err)
+		}
+	}
+	if err := db.markProjectScopeDerivedAssets(ctx); err != nil {
+		t.Fatalf("标记派生资产失败: %v", err)
+	}
+	for _, id := range []string{"scope-domain", "scope-ip"} {
+		asset, err := db.GetAsset(ctx, id, project.OwnerUserID)
+		if err != nil {
+			t.Fatalf("读取派生资产 %s 失败: %v", id, err)
+		}
+		if asset.QualityStatus != AssetQualityCrossTypeDuplicate {
+			t.Fatalf("派生资产 %s 质量状态错误: %s", id, asset.QualityStatus)
+		}
+	}
+	items, total, err := db.ListProjectAssetOverview(
+		ctx,
+		project.ID,
+		project.OwnerUserID,
+		AssetOverviewFilter{State: "all", Limit: 20},
+	)
+	if err != nil {
+		t.Fatalf("读取资产总览失败: %v", err)
+	}
+	if total != 2 || len(items) != 2 {
+		t.Fatalf("默认总览应只显示两个 URL 资产，实际 total=%d items=%+v", total, items)
+	}
+	derived, derivedTotal, err := db.ListProjectAssetOverview(
+		ctx,
+		project.ID,
+		project.OwnerUserID,
+		AssetOverviewFilter{
+			State:         "all",
+			QualityStatus: AssetQualityCrossTypeDuplicate,
+			Limit:         20,
+		},
+	)
+	if err != nil {
+		t.Fatalf("读取派生产物筛选失败: %v", err)
+	}
+	if derivedTotal != 2 || len(derived) != 2 {
+		t.Fatalf("显式筛选应保留派生资产，实际 total=%d items=%+v", derivedTotal, derived)
 	}
 }
 
@@ -87,7 +181,7 @@ func TestSyncProjectScopeAssetsIsIdempotent(t *testing.T) {
 	if kinds["*.example.com"] != "domain" {
 		t.Fatalf("通配域名类型错误: %#v", kinds)
 	}
-	if kinds["10.0.0.0/24"] != "host" {
+	if kinds["10.0.0.0/24"] != "ip" {
 		t.Fatalf("CIDR 类型错误: %#v", kinds)
 	}
 	if kinds["203.0.113.10"] != "ip" {
@@ -107,8 +201,11 @@ func TestInferAssetKindSkipsAmbiguousBareArtifactName(t *testing.T) {
 	if kind := inferAssetKind("internal-host"); kind != "" {
 		t.Fatalf("无点号且无端口的主机名应要求显式指定类型: %s", kind)
 	}
-	if kind := inferAssetKind("app.internal"); kind != "host" {
-		t.Fatalf("带点号的内部主机名应推断为 host: %s", kind)
+	if kind := inferAssetKind("443"); kind != "" {
+		t.Fatalf("纯端口值不应再被推断为资产: %s", kind)
+	}
+	if kind := inferAssetKind("app.internal"); kind != "domain" {
+		t.Fatalf("带点号的内部主机名应推断为 domain: %s", kind)
 	}
 }
 

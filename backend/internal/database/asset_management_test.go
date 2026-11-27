@@ -294,11 +294,9 @@ func TestAssetValidationEnforcesSupportedKindsOnCreateAndUpdate(t *testing.T) {
 		"ip":     "10.0.0.1",
 		"domain": "example.com",
 		"url":    "https://example.com/path",
-		"port":   "443",
-		"host":   "internal-host",
 		"source": "seeyon20250422",
 	}
-	for _, kind := range []string{"ip", "domain", "url", "port", "host", "source"} {
+	for _, kind := range []string{"ip", "domain", "url", "source"} {
 		item := base
 		item.ID = "asset-kind-" + kind
 		item.Name = "合法类型 " + kind
@@ -309,7 +307,7 @@ func TestAssetValidationEnforcesSupportedKindsOnCreateAndUpdate(t *testing.T) {
 		}
 	}
 
-	for _, kind := range []string{"", "endpoint", "other", "service"} {
+	for _, kind := range []string{"", "endpoint", "host", "other", "service", "port"} {
 		item := base
 		item.ID = "asset-kind-" + kind
 		item.Name = "非法类型 " + kind
@@ -322,14 +320,14 @@ func TestAssetValidationEnforcesSupportedKindsOnCreateAndUpdate(t *testing.T) {
 	base.Kind = "port"
 	base.Value = "8443"
 	base.UpdatedAt = now.Add(time.Minute)
-	if err := db.UpdateAsset(context.Background(), base); err != nil {
-		t.Fatalf("编辑为 port 失败: %v", err)
+	if err := db.UpdateAsset(context.Background(), base); !errors.Is(err, ErrInvalidAsset) {
+		t.Fatalf("编辑为 port 应被拒绝，实际 %v", err)
 	}
 	base.Kind = "host"
 	base.Value = "internal-host-updated"
 	base.UpdatedAt = now.Add(2 * time.Minute)
-	if err := db.UpdateAsset(context.Background(), base); err != nil {
-		t.Fatalf("编辑为 host 失败: %v", err)
+	if err := db.UpdateAsset(context.Background(), base); !errors.Is(err, ErrInvalidAsset) {
+		t.Fatalf("编辑为 host 应被拒绝，实际 %v", err)
 	}
 	base.Kind = "other"
 	base.UpdatedAt = now.Add(3 * time.Minute)
@@ -341,7 +339,6 @@ func TestAssetValidationEnforcesSupportedKindsOnCreateAndUpdate(t *testing.T) {
 func TestNormalizeAssetValueRejectsFalseDomainCandidates(t *testing.T) {
 	validDomains := []string{
 		"example.com",
-		"api.example.com:8443",
 		"*.example.com",
 		"foo.co.uk",
 		"foo.github.io",
@@ -385,6 +382,7 @@ func TestAssetListsHideUnsupportedAndInvalidLegacyRecords(t *testing.T) {
 	}{
 		{id: "asset-valid", kind: "domain", value: "example.com"},
 		{id: "asset-other", kind: "other", value: "src/WebSite/kdagent.aspx"},
+		{id: "asset-port", kind: "port", value: "8080"},
 		{
 			id:    "asset-false-domain",
 			kind:  "domain",
@@ -416,6 +414,56 @@ func TestAssetListsHideUnsupportedAndInvalidLegacyRecords(t *testing.T) {
 	}
 	if total != 1 || len(items) != 1 || items[0].ID != "asset-valid" {
 		t.Fatalf("资产列表应隐藏非法历史记录: total=%d items=%+v", total, items)
+	}
+}
+
+func TestProjectAssetsExcludeLegacyPortKind(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "asset-port-hidden.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	now := time.Now().UTC()
+	project := Project{
+		ID: "project-port-hidden", OwnerUserID: "user-1", Name: "port hidden",
+		Status: "active", CreatedAt: now, UpdatedAt: now,
+	}
+	if err := db.CreateProject(ctx, project); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateAsset(ctx, Asset{
+		ID: "asset-domain-visible", ProjectID: project.ID, OwnerUserID: "user-1",
+		Name: "domain", Kind: "domain", Value: "example.com", Status: "active",
+		Source: AssetSourceManual, Criticality: "medium", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(
+		ctx,
+		`INSERT INTO assets (
+			id, project_id, owner_user_id, name, kind, value, normalized_value,
+			quality_status, status, source, criticality, risk_score, created_at, updated_at
+		) VALUES (?, ?, ?, ?, 'port', '8080', '8080', 'valid', 'active', 'manual', 'medium', 0, ?, ?)`,
+		"asset-port-hidden",
+		project.ID,
+		"user-1",
+		"port",
+		now.Unix(),
+		now.Unix(),
+	); err != nil {
+		t.Fatal(err)
+	}
+	counts, err := db.ProjectSummary(ctx, project.ID, "user-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assets, err := db.ListProjectAssets(ctx, project.ID, "user-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts.Assets != 1 || len(assets) != 1 || assets[0].ID != "asset-domain-visible" {
+		t.Fatalf("端口资产不应进入资产管理和统计: counts=%d assets=%+v", counts.Assets, assets)
 	}
 }
 

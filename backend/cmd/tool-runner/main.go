@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"sophon/internal/procwrap"
 	"sophon/internal/toolerror"
 	"sophon/internal/toolrunner"
 
@@ -19,6 +20,9 @@ import (
 )
 
 func main() {
+	if err := procwrap.Require(); err != nil {
+		log.Fatalf("进程回收器不可用: %v", err)
+	}
 	defaultDir := strings.TrimSpace(os.Getenv("SOPHON_TOOLS_DIR"))
 	if defaultDir == "" {
 		defaultDir = "/opt/sophon/tools"

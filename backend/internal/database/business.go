@@ -18,6 +18,7 @@ type Project struct {
 	Name        string    `json:"name"`
 	Description string    `json:"description"`
 	Goals       string    `json:"goals"`
+	Constraints string    `json:"constraints,omitempty"`
 	Scope       string    `json:"scope"`
 	Status      string    `json:"status"`
 	CreatedAt   time.Time `json:"createdAt"`
@@ -65,18 +66,20 @@ type ProjectFact struct {
 }
 
 type Asset struct {
-	ID          string    `json:"id"`
-	ProjectID   string    `json:"projectId"`
-	OwnerUserID string    `json:"ownerUserId"`
-	Name        string    `json:"name"`
-	Kind        string    `json:"kind"`
-	Value       string    `json:"value"`
-	Status      string    `json:"status"`
-	Source      string    `json:"source"`
-	Criticality string    `json:"criticality"`
-	RiskScore   int       `json:"riskScore"`
-	CreatedAt   time.Time `json:"createdAt"`
-	UpdatedAt   time.Time `json:"updatedAt"`
+	ID              string    `json:"id"`
+	ProjectID       string    `json:"projectId"`
+	OwnerUserID     string    `json:"ownerUserId"`
+	Name            string    `json:"name"`
+	Kind            string    `json:"kind"`
+	Value           string    `json:"value"`
+	NormalizedValue string    `json:"normalizedValue,omitempty"`
+	QualityStatus   string    `json:"qualityStatus,omitempty"`
+	Status          string    `json:"status"`
+	Source          string    `json:"source"`
+	Criticality     string    `json:"criticality"`
+	RiskScore       int       `json:"riskScore"`
+	CreatedAt       time.Time `json:"createdAt"`
+	UpdatedAt       time.Time `json:"updatedAt"`
 }
 
 type Vulnerability struct {
@@ -184,6 +187,7 @@ func (db *DB) ListProjects(ctx context.Context, ownerUserID string) ([]Project, 
 		}
 		item.CreatedAt = time.Unix(createdAt, 0)
 		item.UpdatedAt = time.Unix(updatedAt, 0)
+		item.Constraints = ProjectConstraintsText(item.Goals)
 		items = append(items, item)
 	}
 	return items, rows.Err()
@@ -216,6 +220,7 @@ func (db *DB) GetProject(ctx context.Context, id, ownerUserID string) (*Project,
 	}
 	item.CreatedAt = time.Unix(createdAt, 0)
 	item.UpdatedAt = time.Unix(updatedAt, 0)
+	item.Constraints = ProjectConstraintsText(item.Goals)
 	return &item, nil
 }
 
@@ -332,6 +337,7 @@ func (db *DB) DeleteProject(ctx context.Context, id, ownerUserID string) error {
 		`DELETE FROM conversation_batches WHERE project_id = ?`,
 		`DELETE FROM conversations WHERE project_id = ?`,
 		`DELETE FROM vulnerabilities WHERE project_id = ?`,
+		`DELETE FROM project_asset_work WHERE project_id = ?`,
 		`DELETE FROM assets WHERE project_id = ?`,
 		`DELETE FROM webshell_connections WHERE project_id = ?`,
 		`DELETE FROM project_facts WHERE project_id = ?`,
@@ -1001,7 +1007,7 @@ func (db *DB) DeleteProjectFact(ctx context.Context, id, projectID string) error
 }
 
 func (db *DB) CreateAsset(ctx context.Context, item Asset) error {
-	if err := normalizeAssetRecord(&item); err != nil {
+	if err := normalizeNewAssetRecord(&item); err != nil {
 		return err
 	}
 	tx, err := db.BeginTx(ctx, nil)
@@ -1017,18 +1023,23 @@ func (db *DB) CreateAsset(ctx context.Context, item Asset) error {
 	if duplicate {
 		return ErrAssetDuplicate
 	}
+	if err := markCrossTypeAssetQuality(ctx, tx, &item); err != nil {
+		return err
+	}
 	_, err = tx.ExecContext(
 		ctx,
 		`INSERT INTO assets (
-			id, project_id, owner_user_id, name, kind, value, status, source,
+			id, project_id, owner_user_id, name, kind, value, normalized_value, quality_status, status, source,
 			criticality, risk_score, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		item.ID,
 		item.ProjectID,
 		item.OwnerUserID,
 		item.Name,
 		item.Kind,
 		item.Value,
+		item.NormalizedValue,
+		item.QualityStatus,
 		item.Status,
 		item.Source,
 		item.Criticality,
@@ -1045,10 +1056,11 @@ func (db *DB) CreateAsset(ctx context.Context, item Asset) error {
 func (db *DB) ListAssets(ctx context.Context, ownerUserID string) ([]Asset, error) {
 	rows, err := db.QueryContext(
 		ctx,
-		`SELECT id, project_id, owner_user_id, name, kind, value, status, source,
+		`SELECT id, project_id, owner_user_id, name, kind, value, normalized_value, quality_status, status, source,
 			criticality, risk_score, created_at, updated_at
 		 FROM assets
 		 WHERE owner_user_id = ?
+		   AND LOWER(TRIM(kind)) IN ('domain', 'ip', 'url', 'host', 'source')
 		 ORDER BY updated_at DESC`,
 		ownerUserID,
 	)
@@ -1068,6 +1080,8 @@ func (db *DB) ListAssets(ctx context.Context, ownerUserID string) ([]Asset, erro
 			&item.Name,
 			&item.Kind,
 			&item.Value,
+			&item.NormalizedValue,
+			&item.QualityStatus,
 			&item.Status,
 			&item.Source,
 			&item.Criticality,
@@ -1097,17 +1111,20 @@ func (db *DB) ListAssetsPage(
 	var total int
 	if err := db.QueryRowContext(
 		ctx,
-		`SELECT COUNT(*) FROM assets WHERE owner_user_id = ?`,
+		`SELECT COUNT(*) FROM assets
+		 WHERE owner_user_id = ?
+		   AND LOWER(TRIM(kind)) IN ('domain', 'ip', 'url', 'host', 'source')`,
 		ownerUserID,
 	).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 	rows, err := db.QueryContext(
 		ctx,
-		`SELECT id, project_id, owner_user_id, name, kind, value, status, source,
+		`SELECT id, project_id, owner_user_id, name, kind, value, normalized_value, quality_status, status, source,
 			criticality, risk_score, created_at, updated_at
 		 FROM assets
 		 WHERE owner_user_id = ?
+		   AND LOWER(TRIM(kind)) IN ('domain', 'ip', 'url', 'host', 'source')
 		 ORDER BY updated_at DESC, rowid DESC
 		 LIMIT ? OFFSET ?`,
 		ownerUserID,
@@ -1130,6 +1147,8 @@ func (db *DB) ListAssetsPage(
 			&item.Name,
 			&item.Kind,
 			&item.Value,
+			&item.NormalizedValue,
+			&item.QualityStatus,
 			&item.Status,
 			&item.Source,
 			&item.Criticality,
@@ -1166,7 +1185,7 @@ func (db *DB) ListAssetsFiltered(
 ) ([]Asset, int, error) {
 	clauses := []string{
 		"owner_user_id = ?",
-		"LOWER(TRIM(kind)) IN ('domain', 'ip', 'url', 'port', 'host', 'source')",
+		"LOWER(TRIM(kind)) IN ('domain', 'ip', 'url', 'host', 'source')",
 	}
 	args := []interface{}{filter.OwnerUserID}
 	if value := strings.TrimSpace(filter.ProjectID); value != "" {
@@ -1192,7 +1211,7 @@ func (db *DB) ListAssetsFiltered(
 	where := " WHERE " + strings.Join(clauses, " AND ")
 	rows, err := db.QueryContext(
 		ctx,
-		`SELECT id, project_id, owner_user_id, name, kind, value, status, source,
+		`SELECT id, project_id, owner_user_id, name, kind, value, normalized_value, quality_status, status, source,
 			criticality, risk_score, created_at, updated_at
 		 FROM assets`+where+`
 		 ORDER BY updated_at DESC, rowid DESC`,
@@ -1214,6 +1233,8 @@ func (db *DB) ListAssetsFiltered(
 			&item.Name,
 			&item.Kind,
 			&item.Value,
+			&item.NormalizedValue,
+			&item.QualityStatus,
 			&item.Status,
 			&item.Source,
 			&item.Criticality,
@@ -1309,7 +1330,7 @@ func (db *DB) GetAsset(ctx context.Context, id, ownerUserID string) (*Asset, err
 	var updatedAt int64
 	err := db.QueryRowContext(
 		ctx,
-		`SELECT id, project_id, owner_user_id, name, kind, value, status, source,
+		`SELECT id, project_id, owner_user_id, name, kind, value, normalized_value, quality_status, status, source,
 			criticality, risk_score, created_at, updated_at
 		 FROM assets
 		 WHERE id = ? AND owner_user_id = ?`,
@@ -1322,6 +1343,8 @@ func (db *DB) GetAsset(ctx context.Context, id, ownerUserID string) (*Asset, err
 		&item.Name,
 		&item.Kind,
 		&item.Value,
+		&item.NormalizedValue,
+		&item.QualityStatus,
 		&item.Status,
 		&item.Source,
 		&item.Criticality,
@@ -1393,11 +1416,19 @@ func (db *DB) DeleteAsset(ctx context.Context, id, ownerUserID string) error {
 	); err != nil {
 		return err
 	}
+	if _, err := tx.ExecContext(
+		ctx,
+		`DELETE FROM project_asset_work WHERE project_id = ? AND asset_id = ?`,
+		projectID,
+		id,
+	); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 
 func (db *DB) UpdateAsset(ctx context.Context, item Asset) error {
-	if err := normalizeAssetRecord(&item); err != nil {
+	if err := normalizeNewAssetRecord(&item); err != nil {
 		return err
 	}
 	tx, err := db.BeginTx(ctx, nil)
@@ -1424,6 +1455,9 @@ func (db *DB) UpdateAsset(ctx context.Context, item Asset) error {
 	if duplicate {
 		return ErrAssetDuplicate
 	}
+	if err := markCrossTypeAssetQuality(ctx, tx, &item); err != nil {
+		return err
+	}
 	if oldProjectID != item.ProjectID {
 		inUse, err := assetHasReferences(ctx, tx, item, oldProjectID, oldName, oldValue)
 		if err != nil {
@@ -1436,13 +1470,15 @@ func (db *DB) UpdateAsset(ctx context.Context, item Asset) error {
 	result, err := tx.ExecContext(
 		ctx,
 		`UPDATE assets
-		 SET project_id = ?, name = ?, kind = ?, value = ?, status = ?,
+			 SET project_id = ?, name = ?, kind = ?, value = ?, normalized_value = ?, quality_status = ?, status = ?,
 			criticality = ?, risk_score = ?, updated_at = ?
 		 WHERE id = ? AND owner_user_id = ?`,
 		item.ProjectID,
 		item.Name,
 		item.Kind,
 		item.Value,
+		item.NormalizedValue,
+		item.QualityStatus,
 		item.Status,
 		item.Criticality,
 		item.RiskScore,
@@ -1461,6 +1497,16 @@ func (db *DB) UpdateAsset(ctx context.Context, item Asset) error {
 			item.ID,
 			oldName,
 			oldValue,
+		); err != nil {
+			return err
+		}
+	}
+	if oldProjectID != "" && oldProjectID != item.ProjectID {
+		if _, err := tx.ExecContext(
+			ctx,
+			`DELETE FROM project_asset_work WHERE project_id = ? AND asset_id = ?`,
+			oldProjectID,
+			item.ID,
 		); err != nil {
 			return err
 		}

@@ -128,6 +128,8 @@ func newProjectTools(service *Service) []tool.BaseTool {
 		service.insertAssetsTool(),
 		service.reportFindingTool(),
 		service.nextTargetsTool(),
+		service.nextAssetsTool(),
+		service.assetCloseoutTool(),
 		service.planHypothesesTool(),
 		service.startHypothesisTool(),
 		service.completeHypothesisTool(),
@@ -673,9 +675,17 @@ func (s *Service) nextTargetsTool() tool.BaseTool {
 			builder.WriteString("未覆盖队列（优先级从高到低）：\n")
 			assetID := currentAssetID(ctx)
 			probeHosts := s.recentProbeHosts(ctx, currentConversationID(ctx))
-			for index, target := range coverage.NextTargets {
-				if index >= limit {
+			targets := coverage.AllTargets
+			if len(targets) == 0 {
+				targets = coverage.NextTargets
+			}
+			printed := 0
+			for _, target := range targets {
+				if printed >= limit {
 					break
+				}
+				if assetID != "" && target.AssetID != "" && target.AssetID != assetID {
+					continue
 				}
 				if assetID != "" && target.Kind == "asset" && target.RefID != assetID {
 					continue
@@ -692,6 +702,7 @@ func (s *Service) nextTargetsTool() tool.BaseTool {
 					target.RefID,
 					target.Score,
 				))
+				printed++
 			}
 			return strings.TrimSpace(builder.String()), nil
 		},
@@ -816,6 +827,9 @@ func (s *Service) recordTestResultTool() tool.BaseTool {
 				)
 				if currentErr != nil || current == nil {
 					return "", fmt.Errorf("当前 Worker 假设不存在，不能写回测试结果")
+				}
+				if err := validateWorkerHypothesisAccess(ctx, current); err != nil {
+					return "", err
 				}
 				if assetID != "" && strings.TrimSpace(current.AssetID) != assetID {
 					return "", fmt.Errorf("当前 Worker 假设不属于指定资产")
@@ -1023,11 +1037,11 @@ func (s *Service) inferredSupersedesKey(
 func (s *Service) projectListTool() tool.BaseTool {
 	return &jsonTool{
 		name: "project_list",
-		desc: `统一查询当前项目的列表数据。resource 可选 facts、assets、findings、hypotheses、entities、chains；query 用于匹配名称、标题、键值或摘要；summary 默认 10 条并限制 3000 字符，detail 默认 20 条并放宽到 6000 字符。`,
+		desc: `统一查询当前项目的列表数据。resource 可选 facts、intents、evidence_gaps、assets、findings、hypotheses、entities、chains；query 用于匹配名称、标题、键值或摘要；支持 asset_id、status、kind、limit、offset；summary 默认 10 条并限制 3000 字符，detail 默认 20 条并放宽到 6000 字符。`,
 		params: map[string]*schema.ParameterInfo{
 			"resource": stringEnumParam(
 				"要查询的数据类型",
-				[]string{"facts", "assets", "findings", "hypotheses", "entities", "chains"},
+				[]string{"facts", "intents", "evidence_gaps", "assets", "findings", "hypotheses", "entities", "chains"},
 				true,
 			),
 			"query":       stringParam("按名称、标题、键值、目标或摘要搜索"),
@@ -1037,6 +1051,7 @@ func (s *Service) projectListTool() tool.BaseTool {
 			"kind":        stringParam("类型过滤，适用于 facts/assets/entities/chains"),
 			"campaign_id": stringParam("批量任务 id，仅适用于 chains；可留空使用当前批量任务"),
 			"limit":       integerParam("返回条数；summary 默认 10，detail 默认 20；facts/assets/findings 最大 50，hypotheses/chains 最大 100，entities 最大 200"),
+			"offset":      integerParam("分页偏移，默认 0"),
 			"view": stringEnumParam(
 				"输出详细程度",
 				[]string{"summary", "detail"},
@@ -1053,6 +1068,7 @@ func (s *Service) projectListTool() tool.BaseTool {
 				Kind       string  `json:"kind"`
 				CampaignID string  `json:"campaign_id"`
 				Limit      flexInt `json:"limit"`
+				Offset     flexInt `json:"offset"`
 				Size       flexInt `json:"size"`
 				View       string  `json:"view"`
 			}
@@ -1091,15 +1107,30 @@ func (s *Service) projectListTool() tool.BaseTool {
 			case "facts":
 				payload["asset_id"] = strings.TrimSpace(request.AssetID)
 				payload["kind"] = strings.TrimSpace(request.Kind)
+				payload["status"] = strings.TrimSpace(request.Status)
+				payload["offset"] = max(0, int(request.Offset))
 				legacy = s.listFactsTool()
+			case "intents":
+				payload["asset_id"] = strings.TrimSpace(request.AssetID)
+				payload["status"] = strings.TrimSpace(request.Status)
+				payload["offset"] = max(0, int(request.Offset))
+				legacy = s.listIntentsTool()
+			case "evidence_gaps":
+				payload["asset_id"] = strings.TrimSpace(request.AssetID)
+				payload["kind"] = strings.TrimSpace(request.Kind)
+				payload["status"] = strings.TrimSpace(request.Status)
+				payload["offset"] = max(0, int(request.Offset))
+				legacy = s.listEvidenceGapsTool()
 			case "assets":
 				payload["kind"] = strings.TrimSpace(request.Kind)
 				payload["status"] = strings.TrimSpace(request.Status)
+				payload["offset"] = max(0, int(request.Offset))
 				legacy = s.listAssetsTool()
 			case "findings":
 				payload["asset_id"] = strings.TrimSpace(request.AssetID)
 				payload["status"] = strings.TrimSpace(request.Status)
 				payload["severity"] = strings.TrimSpace(request.Severity)
+				payload["offset"] = max(0, int(request.Offset))
 				legacy = s.listFindingsTool()
 			case "hypotheses":
 				payload["status"] = strings.TrimSpace(request.Status)
@@ -1270,14 +1301,21 @@ func validateProjectListParams(
 	}
 	switch resource {
 	case "facts":
-		if status != "" {
-			return invalid("status")
-		}
 		if severity != "" {
 			return invalid("severity")
 		}
 		if campaignID != "" {
 			return invalid("campaign_id")
+		}
+	case "intents", "evidence_gaps":
+		if severity != "" {
+			return invalid("severity")
+		}
+		if campaignID != "" {
+			return invalid("campaign_id")
+		}
+		if resource == "intents" && kind != "" {
+			return invalid("kind")
 		}
 	case "assets":
 		if assetID != "" {
@@ -1330,7 +1368,7 @@ func validateProjectListParams(
 			return invalid("severity")
 		}
 	default:
-		return fmt.Errorf("resource 必须是 facts、assets、findings、hypotheses、entities 或 chains")
+		return fmt.Errorf("resource 必须是 facts、intents、evidence_gaps、assets、findings、hypotheses、entities 或 chains")
 	}
 	return nil
 }
@@ -1447,14 +1485,18 @@ func (s *Service) listFactsTool() tool.BaseTool {
 			"asset_id": stringParam("资产 id；留空时使用当前对话绑定资产"),
 			"query":    stringParam("按键、类型、摘要或值搜索"),
 			"kind":     stringParam("按事实类型过滤"),
+			"status":   stringParam("状态过滤：with_evidence/missing_evidence/tainted/conflict/pinned"),
 			"limit":    integerParam("返回条数，默认 20，最大 50"),
+			"offset":   integerParam("分页偏移，默认 0"),
 		},
 		run: func(ctx context.Context, raw string) (string, error) {
 			var request struct {
 				AssetID string  `json:"asset_id"`
 				Query   string  `json:"query"`
 				Kind    string  `json:"kind"`
+				Status  string  `json:"status"`
 				Limit   flexInt `json:"limit"`
+				Offset  flexInt `json:"offset"`
 			}
 			if err := decodeToolArgs(raw, &request); err != nil {
 				return "", err
@@ -1473,26 +1515,22 @@ func (s *Service) listFactsTool() tool.BaseTool {
 					return "", err
 				}
 			}
-			items, err := s.db.ListProjectFactsByAsset(ctx, projectID, assetID)
+			limit := clampProjectLimit(int(request.Limit), 20)
+			items, total, err := s.db.ListProjectFactsPageFiltered(ctx, database.ProjectFactFilter{
+				ProjectID: projectID,
+				AssetID:   assetID,
+				FactType:  request.Kind,
+				Status:    request.Status,
+				Query:     request.Query,
+				Limit:     limit,
+				Offset:    max(0, int(request.Offset)),
+			})
 			if err != nil {
 				return "", fmt.Errorf("读取项目事实失败: %w", err)
 			}
-			limit := clampProjectLimit(int(request.Limit), 20)
-			query := strings.ToLower(strings.TrimSpace(request.Query))
-			kind := strings.ToLower(strings.TrimSpace(request.Kind))
 			var builder strings.Builder
-			matched := 0
+			builder.WriteString(fmt.Sprintf("事实结果：total=%d offset=%d\n", total, max(0, int(request.Offset))))
 			for _, item := range items {
-				if kind != "" && strings.ToLower(item.FactType) != kind {
-					continue
-				}
-				if query != "" && !projectTextMatches(query, item.Key, item.FactType, item.Value, projectFactSummary(item), item.ID, item.AssetID) {
-					continue
-				}
-				if matched >= limit {
-					break
-				}
-				matched++
 				extra := ""
 				if relation := strings.TrimSpace(item.Relation); relation != "" {
 					extra += fmt.Sprintf("，relation=%s", relation)
@@ -1521,8 +1559,181 @@ func (s *Service) listFactsTool() tool.BaseTool {
 					extra,
 				))
 			}
-			if builder.Len() == 0 {
+			if len(items) == 0 {
 				return "当前项目还没有记录任何事实。", nil
+			}
+			return capProjectOutput(&builder), nil
+		},
+	}
+}
+
+func (s *Service) listIntentsTool() tool.BaseTool {
+	return &jsonTool{
+		name: "project_list_intents",
+		desc: "按状态、资产和关键字分页查询项目待办意图。",
+		params: map[string]*schema.ParameterInfo{
+			"asset_id": stringParam("资产 id，可选"),
+			"status":   stringParam("意图状态，如 open/running/blocked/capacity_blocked"),
+			"query":    stringParam("按标题、详情、来源或资产搜索"),
+			"limit":    integerParam("返回条数，默认 20，最大 100"),
+			"offset":   integerParam("分页偏移，默认 0"),
+		},
+		run: func(ctx context.Context, raw string) (string, error) {
+			var request struct {
+				AssetID string  `json:"asset_id"`
+				Status  string  `json:"status"`
+				Query   string  `json:"query"`
+				Limit   flexInt `json:"limit"`
+				Offset  flexInt `json:"offset"`
+			}
+			if err := decodeToolArgs(raw, &request); err != nil {
+				return "", err
+			}
+			_, userID, projectID, err := s.currentProject(ctx)
+			if err != nil {
+				return "", err
+			}
+			assetID := strings.TrimSpace(request.AssetID)
+			if assetID == "" {
+				assetID = currentAssetID(ctx)
+			}
+			if assetID != "" {
+				assetID, err = s.validateProjectAsset(ctx, projectID, userID, assetID)
+				if err != nil {
+					return "", err
+				}
+			}
+			status := strings.ToLower(strings.TrimSpace(request.Status))
+			limit := clampProjectLimit(int(request.Limit), 20)
+			if limit > 100 {
+				limit = 100
+			}
+			items, total, err := s.db.ListProjectIntentsPage(ctx, database.ProjectIntentFilter{
+				ProjectID: projectID,
+				AssetID:   assetID,
+				Status:    status,
+				Query:     request.Query,
+				Limit:     limit,
+				Offset:    max(0, int(request.Offset)),
+			})
+			if err != nil {
+				return "", fmt.Errorf("读取待办意图失败: %w", err)
+			}
+			var builder strings.Builder
+			builder.WriteString(fmt.Sprintf("待办意图：total=%d offset=%d\n", total, max(0, int(request.Offset))))
+			for _, item := range items {
+				builder.WriteString(fmt.Sprintf(
+					"- [%s] %s asset=%s confidence=%d id=%s\n",
+					item.Status,
+					item.Title,
+					orDefaultProjectToolValue(item.AssetID, "project"),
+					item.Confidence,
+					item.ID,
+				))
+				if strings.TrimSpace(item.Result) != "" {
+					builder.WriteString("  完成结论: " + truncateProjectText(item.Result, projectToolLongText) + "\n")
+				}
+				if strings.TrimSpace(item.StateReason) != "" {
+					builder.WriteString("  状态原因: " + truncateProjectText(item.StateReason, projectToolLongText) + "\n")
+				}
+				if strings.TrimSpace(item.Evidence) != "" {
+					builder.WriteString("  证据: " + truncateProjectText(item.Evidence, projectToolLongText) + "\n")
+				}
+				if len(item.EvidenceRefs) > 0 {
+					builder.WriteString("  证据引用: " + strings.Join(item.EvidenceRefs, ", ") + "\n")
+				}
+				if strings.TrimSpace(item.FindingID) != "" {
+					builder.WriteString("  关联漏洞: " + item.FindingID + "\n")
+				}
+				if item.Attempts > 0 {
+					builder.WriteString(fmt.Sprintf("  尝试次数: %d\n", item.Attempts))
+				}
+			}
+			if len(items) == 0 {
+				builder.WriteString("- 无匹配意图\n")
+			}
+			return capProjectOutput(&builder), nil
+		},
+	}
+}
+
+func (s *Service) listEvidenceGapsTool() tool.BaseTool {
+	return &jsonTool{
+		name: "project_list_evidence_gaps",
+		desc: "按类型、资产和关键字分页查询事实或漏洞的证据缺口。",
+		params: map[string]*schema.ParameterInfo{
+			"asset_id": stringParam("资产 id，可选"),
+			"kind":     stringParam("缺口类型：fact 或 finding"),
+			"status":   stringParam("缺口状态：missing_evidence"),
+			"query":    stringParam("按标题、摘要、类型或资产搜索"),
+			"limit":    integerParam("返回条数，默认 20，最大 100"),
+			"offset":   integerParam("分页偏移，默认 0"),
+		},
+		run: func(ctx context.Context, raw string) (string, error) {
+			var request struct {
+				AssetID string  `json:"asset_id"`
+				Kind    string  `json:"kind"`
+				Status  string  `json:"status"`
+				Query   string  `json:"query"`
+				Limit   flexInt `json:"limit"`
+				Offset  flexInt `json:"offset"`
+			}
+			if err := decodeToolArgs(raw, &request); err != nil {
+				return "", err
+			}
+			_, userID, projectID, err := s.currentProject(ctx)
+			if err != nil {
+				return "", err
+			}
+			assetID := strings.TrimSpace(request.AssetID)
+			if assetID == "" {
+				assetID = currentAssetID(ctx)
+			}
+			if assetID != "" {
+				assetID, err = s.validateProjectAsset(ctx, projectID, userID, assetID)
+				if err != nil {
+					return "", err
+				}
+			}
+			kind := strings.ToLower(strings.TrimSpace(request.Kind))
+			if kind != "" && kind != "fact" && kind != "finding" {
+				return "", fmt.Errorf("证据缺口类型只能是 fact 或 finding")
+			}
+			status := strings.ToLower(strings.TrimSpace(request.Status))
+			if status != "" && status != "all" && status != "missing_evidence" {
+				return "", fmt.Errorf("证据缺口状态不合法")
+			}
+			limit := clampProjectLimit(int(request.Limit), 20)
+			if limit > 100 {
+				limit = 100
+			}
+			items, total, err := s.db.ListEvidenceGaps(ctx, database.EvidenceGapFilter{
+				ProjectID: projectID,
+				AssetID:   assetID,
+				Kind:      kind,
+				Status:    status,
+				Query:     request.Query,
+				Limit:     limit,
+				Offset:    max(0, int(request.Offset)),
+			})
+			if err != nil {
+				return "", fmt.Errorf("读取证据缺口失败: %w", err)
+			}
+			var builder strings.Builder
+			builder.WriteString(fmt.Sprintf("证据缺口：total=%d offset=%d\n", total, max(0, int(request.Offset))))
+			for _, item := range items {
+				builder.WriteString(fmt.Sprintf(
+					"- [%s/%s] %s asset=%s summary=%s id=%s\n",
+					item.Kind,
+					item.Status,
+					item.Title,
+					orDefaultProjectToolValue(item.AssetID, "project"),
+					item.Summary,
+					item.ID,
+				))
+			}
+			if len(items) == 0 {
+				builder.WriteString("- 无匹配证据缺口\n")
 			}
 			return capProjectOutput(&builder), nil
 		},
@@ -1808,12 +2019,13 @@ func (s *Service) recordFactTool() tool.BaseTool {
 func (s *Service) listAssetsTool() tool.BaseTool {
 	return &jsonTool{
 		name: "project_list_assets",
-		desc: "列出当前项目的资产（域名/IP/URL/端口等）。",
+		desc: "列出当前项目的资产（域名/IP/URL/源码制品）。",
 		params: map[string]*schema.ParameterInfo{
-			"kind":   stringParam("按资产类型过滤，例如 domain/ip/url/port/host/source"),
+			"kind":   stringParam("按资产类型过滤，例如 domain/ip/url/source"),
 			"status": stringParam("按资产状态过滤"),
 			"query":  stringParam("按名称、值或类型搜索"),
 			"limit":  integerParam("返回条数，默认 30，最大 50"),
+			"offset": integerParam("分页偏移，默认 0"),
 		},
 		run: func(ctx context.Context, raw string) (string, error) {
 			var request struct {
@@ -1821,6 +2033,7 @@ func (s *Service) listAssetsTool() tool.BaseTool {
 				Status string  `json:"status"`
 				Query  string  `json:"query"`
 				Limit  flexInt `json:"limit"`
+				Offset flexInt `json:"offset"`
 			}
 			if err := decodeToolArgs(raw, &request); err != nil {
 				return "", err
@@ -1837,8 +2050,10 @@ func (s *Service) listAssetsTool() tool.BaseTool {
 			status := strings.ToLower(strings.TrimSpace(request.Status))
 			query := strings.ToLower(strings.TrimSpace(request.Query))
 			limit := clampProjectLimit(int(request.Limit), 30)
+			offset := max(0, int(request.Offset))
 			var builder strings.Builder
 			matched := 0
+			shown := 0
 			for _, item := range items {
 				if kind != "" && strings.ToLower(item.Kind) != kind {
 					continue
@@ -1849,10 +2064,15 @@ func (s *Service) listAssetsTool() tool.BaseTool {
 				if query != "" && !projectTextMatches(query, item.Name, item.Kind, item.Value, item.Status, item.Criticality, item.ID) {
 					continue
 				}
-				if matched >= limit {
+				if matched < offset {
+					matched++
+					continue
+				}
+				if shown >= limit {
 					break
 				}
 				matched++
+				shown++
 				builder.WriteString(fmt.Sprintf(
 					"- %s（%s）value=%s status=%s criticality=%s risk=%d id=%s\n",
 					item.Name,
@@ -1875,7 +2095,7 @@ func (s *Service) listAssetsTool() tool.BaseTool {
 func (s *Service) insertAssetsTool() tool.BaseTool {
 	return &jsonTool{
 		name: "project_insert_assets",
-		desc: "批量写入当前项目资产。JSON 数组，每项包含 name/kind/value，kind 只能是 domain/ip/url/port/host/source，可选 criticality/risk_score/status。",
+		desc: "批量写入当前项目资产。JSON 数组，每项包含 name/kind/value，kind 只能是 domain/ip/url/source，可选 criticality/risk_score/status。端口、service、endpoint 应记录为事实而不是顶层资产。",
 		params: map[string]*schema.ParameterInfo{
 			"assets_json": stringParam(
 				`JSON 数组，例如 [{"name":"主站","kind":"url","value":"https://a.com"}]`,
@@ -1921,7 +2141,7 @@ func (s *Service) insertAssetsTool() tool.BaseTool {
 					if label == "" {
 						label = "未命名"
 					}
-					return "", fmt.Errorf("资产 %s 类型 %q 不受支持，只能是 domain/ip/url/port/host/source", label, input.Kind)
+					return "", fmt.Errorf("资产 %s 类型 %q 不受支持，只能是 domain/ip/url/source", label, input.Kind)
 				}
 			}
 
@@ -1978,7 +2198,7 @@ func (s *Service) insertAssetsTool() tool.BaseTool {
 					Kind:        kind,
 					Value:       value,
 					Status:      status,
-					Source:      database.AssetSourceAgent,
+					Source:      database.AssetSourceBatch,
 					Criticality: criticality,
 					RiskScore:   riskScore,
 					CreatedAt:   now,
@@ -1991,6 +2211,9 @@ func (s *Service) insertAssetsTool() tool.BaseTool {
 				builder.WriteString(fmt.Sprintf("- 已写入 %s（%s，id %s）\n", value, kind, item.ID))
 			}
 			builder.WriteString(fmt.Sprintf("共写入 %d 个资产，跳过 %d 个（重复或空值）。", created, skipped))
+			if err := s.db.SyncProjectAssetWork(ctx, projectID, userID); err != nil {
+				return "", fmt.Errorf("同步资产工作队列失败: %w", err)
+			}
 			s.syncProjectGraph(ctx, projectID, userID)
 			return capProjectOutput(&builder), nil
 		},
@@ -2149,7 +2372,7 @@ func (s *Service) reportFindingTool() tool.BaseTool {
 			}
 			verificationState := strings.ToLower(strings.TrimSpace(request.VerificationState))
 			if verificationState == "" {
-				verificationState = "verified"
+				verificationState = "observed"
 			}
 			normalizedVerificationState, validState := database.NormalizeVulnerabilityVerificationState(verificationState)
 			if !validState {
@@ -2376,6 +2599,7 @@ func (s *Service) listFindingsTool() tool.BaseTool {
 			"severity": stringParam("按严重度过滤：critical/high/medium/low/info"),
 			"query":    stringParam("按标题、目标、类型或资产搜索"),
 			"limit":    integerParam("返回条数，默认 20，最大 50"),
+			"offset":   integerParam("分页偏移，默认 0"),
 		},
 		run: func(ctx context.Context, raw string) (string, error) {
 			var request struct {
@@ -2383,6 +2607,7 @@ func (s *Service) listFindingsTool() tool.BaseTool {
 				Severity string  `json:"severity"`
 				Query    string  `json:"query"`
 				Limit    flexInt `json:"limit"`
+				Offset   flexInt `json:"offset"`
 			}
 			if err := decodeToolArgs(raw, &request); err != nil {
 				return "", err
@@ -2400,6 +2625,7 @@ func (s *Service) listFindingsTool() tool.BaseTool {
 				Severity:    strings.TrimSpace(request.Severity),
 				Search:      strings.TrimSpace(request.Query),
 				Limit:       limit,
+				Offset:      max(0, int(request.Offset)),
 			})
 			if err != nil {
 				return "", fmt.Errorf("读取项目漏洞失败: %w", err)
@@ -2795,7 +3021,7 @@ func (s *Service) addIntentTool() tool.BaseTool {
 				detail = strings.TrimSpace(fmt.Sprintf("%s\n\n优先级：%d", detail, request.Priority))
 			}
 			now := time.Now().UTC()
-			saved, err := s.db.UpsertProjectGraphNode(ctx, database.GraphNode{
+			intentNode := database.GraphNode{
 				ID:         randomID(),
 				ProjectID:  projectID,
 				Kind:       "intent",
@@ -2807,11 +3033,8 @@ func (s *Service) addIntentTool() tool.BaseTool {
 				Source:     "agent",
 				CreatedAt:  now,
 				UpdatedAt:  now,
-			})
-			if err != nil {
-				return "", fmt.Errorf("写入攻击路径 intent 失败: %w", err)
 			}
-			links := 0
+			edges := make([]database.GraphEdge, 0, 4)
 			for _, item := range []struct {
 				sourceID string
 				rel      string
@@ -2824,23 +3047,27 @@ func (s *Service) addIntentTool() tool.BaseTool {
 				if item.sourceID == "" {
 					continue
 				}
-				if err := s.linkGraphEdge(ctx, projectID, item.sourceID, saved.ID, item.rel); err != nil {
-					return "", err
-				}
-				links++
+				edges = append(edges, database.GraphEdge{
+					ID:        randomID(),
+					ProjectID: projectID,
+					SrcID:     item.sourceID,
+					DstID:     intentNode.ID,
+					Rel:       item.rel,
+					CreatedAt: now,
+				})
 			}
-			s.syncProjectGraph(ctx, projectID, userID)
+			links := len(edges)
 			priority := int(request.Priority)
 			if priority <= 0 {
 				priority = 70
 			}
-			if _, err := s.db.UpsertProjectTestResult(ctx, database.ProjectTestResult{
+			saved, err := s.db.CreateProjectIntentWithHypothesis(ctx, intentNode, edges, database.ProjectTestResult{
 				ProjectID:            projectID,
 				AssetID:              assetID,
 				Dimension:            truncateProjectText(title, projectToolShortText),
-				Technique:            "direct_intent_" + saved.ID,
+				Technique:            "direct_intent_" + intentNode.ID,
 				Status:               "untested",
-				IntentID:             saved.ID,
+				IntentID:             intentNode.ID,
 				OriginConversationID: execctx.ConversationID(ctx),
 				OriginRunID:          execctx.RunID(ctx),
 				Rationale:            truncateProjectText(detail, projectToolLongText),
@@ -2848,9 +3075,11 @@ func (s *Service) addIntentTool() tool.BaseTool {
 				Priority:             priority,
 				Required:             true,
 				CreatedAt:            now,
-			}); err != nil {
+			})
+			if err != nil {
 				return "", fmt.Errorf("将 intent 加入 Worker 队列失败: %w", err)
 			}
+			s.syncProjectGraph(ctx, projectID, userID)
 			if handle := s.orchestrationFor(execctx.ConversationID(ctx)); handle != nil {
 				handle.signalWorkers()
 			}
@@ -2859,9 +3088,9 @@ func (s *Service) addIntentTool() tool.BaseTool {
 			}
 			return fmt.Sprintf(
 				"已写入 intent：%s（status %s，id %s，来源边 %d）",
-				saved.Title,
-				saved.Status,
-				saved.ID,
+				intentNode.Title,
+				intentNode.Status,
+				saved.IntentID,
 				links,
 			), nil
 		},
@@ -3201,15 +3430,13 @@ func inferFindingAssetKind(value string) string {
 	if _, err := database.NormalizeAssetValue("domain", value); err == nil {
 		return "domain"
 	}
-	if _, err := database.NormalizeAssetValue("port", value); err == nil {
-		return "port"
-	}
-	if _, _, err := net.ParseCIDR(value); err == nil {
-		return "host"
-	}
-	if host, err := database.NormalizeAssetValue("host", value); err == nil &&
-		(strings.Contains(host, ".") || strings.Contains(host, ":")) {
-		return "host"
+	if host, _, err := net.SplitHostPort(value); err == nil {
+		if _, err := database.NormalizeAssetValue("ip", host); err == nil {
+			return "ip"
+		}
+		if _, err := database.NormalizeAssetValue("domain", host); err == nil {
+			return "domain"
+		}
 	}
 	return ""
 }

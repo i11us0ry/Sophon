@@ -8,11 +8,15 @@ import (
 
 	"sophon/internal/app"
 	"sophon/internal/config"
+	"sophon/internal/procwrap"
 )
 
 func main() {
 	// 尽早收紧 umask：数据库、配置备份、会话产物等新建文件默认仅属主可读写。
 	app.RestrictProcessUmask()
+	if err := procwrap.Require(); err != nil {
+		log.Fatalf("进程回收器不可用: %v", err)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

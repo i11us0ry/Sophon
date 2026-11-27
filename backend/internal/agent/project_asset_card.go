@@ -62,6 +62,7 @@ func (s *Service) renderProjectAssetCard(
 	if asset.ProjectID != projectID {
 		return "", fmt.Errorf("资产不属于当前项目")
 	}
+	_ = s.db.SyncProjectAssetWork(ctx, projectID, userID)
 
 	testCoverage, err := s.db.AggregateProjectTestCoverage(ctx, projectID)
 	if err != nil {
@@ -150,6 +151,15 @@ func (s *Service) renderProjectAssetCard(
 		state.RequiredBlocked,
 		state.RequiredSuspicious,
 	))
+	if work, workErr := s.db.GetProjectAssetWork(ctx, projectID, userID, asset.ID); workErr == nil && work != nil {
+		builder.WriteString(fmt.Sprintf(
+			"- 工作队列：authorization=%s，work=%s，priority=%d，reason=%s\n",
+			work.AuthorizationState,
+			work.WorkState,
+			work.Priority,
+			orDefaultProjectToolValue(work.StateReason, "-"),
+		))
+	}
 
 	rankedFacts := s.rankProjectFacts(ctx, "", evidenceFacts)
 	builder.WriteString("资产画像事实：\n")

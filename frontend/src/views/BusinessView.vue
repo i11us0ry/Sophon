@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onMounted, reactive, ref } from 'vue'
 
-import { apiDelete, apiGet, apiPost, apiPut } from '../api/client'
+import { apiDelete, apiGet, apiPost } from '../api/client'
 import { useI18n } from '../i18n'
 
 const { t } = useI18n()
@@ -32,7 +32,7 @@ const error = ref('')
 
 const projectForm = reactive({ name: '', description: '' })
 const assetForm = reactive({ projectId: '', name: '', kind: 'domain', value: '', criticality: 'medium' })
-const assetKinds = ['domain', 'ip', 'url', 'port', 'host']
+const assetKinds = ['domain', 'ip', 'url', 'source']
 const vulnerabilityTypes = [
   '跨站脚本（XSS）',
   'SQL 注入',
@@ -167,15 +167,7 @@ function removeItem(label: string, path: string) {
 
 function updateVulnerabilityStatus(item: Item, status: string) {
   void withReload(() =>
-    apiPut(`/vulnerabilities/${item.id}`, {
-      projectId: item.projectId ?? '',
-      assetId: item.assetId ?? '',
-      title: item.title ?? '',
-      severity: item.severity ?? 'medium',
-      status,
-      description: item.description ?? '',
-      evidence: item.evidence ?? '',
-    }),
+    apiPost('/vulnerabilities/batch-status', { ids: [item.id], status }),
   )
 }
 
@@ -318,6 +310,7 @@ onMounted(load)
           :aria-label="t('vulnerability.evidence')"
           :placeholder="t('vulnerability.evidencePlaceholder')"
         ></textarea>
+        <small class="field-hint">{{ t('vulnerability.evidenceHint') }}</small>
         <textarea
           v-model="vulnerabilityForm.impact"
           rows="2"
@@ -490,5 +483,11 @@ onMounted(load)
   width: auto;
   padding: 6px 8px;
   border-radius: var(--radius);
+}
+
+.field-hint {
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
 }
 </style>

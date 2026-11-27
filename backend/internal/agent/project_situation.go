@@ -99,6 +99,15 @@ func (s *Service) projectSituationForContext(
 		} else {
 			builder.WriteString("当前资产卡片：读取失败，请调用 project_get（resource=asset）重试\n")
 		}
+		if work, err := s.db.GetProjectAssetWork(ctx, projectID, userID, assetID); err == nil && work != nil {
+			builder.WriteString(fmt.Sprintf(
+				"当前资产工作状态：authorization=%s，work=%s，priority=%d，reason=%s\n",
+				work.AuthorizationState,
+				work.WorkState,
+				work.Priority,
+				orDefaultProjectToolValue(work.StateReason, "-"),
+			))
+		}
 	}
 
 	var nodes []database.GraphNode
@@ -380,6 +389,32 @@ func (s *Service) projectSituationForContext(
 					target.Score,
 				))
 			}
+		}
+		if works, workErr := s.db.ListProjectAssetWork(ctx, projectID, userID); workErr == nil {
+			queued, testing, blocked, complete, discovered := 0, 0, 0, 0, 0
+			for _, item := range works {
+				switch item.WorkState {
+				case "queued", "reopened", "needs_followup":
+					queued++
+				case "active", "testing":
+					testing++
+				case "blocked", "awaiting_user":
+					blocked++
+				case "complete":
+					complete++
+				}
+				if item.AuthorizationState != "authorized" {
+					discovered++
+				}
+			}
+			builder.WriteString(fmt.Sprintf(
+				"资产工作队列：queued=%d，testing=%d，blocked=%d，complete=%d，未授权/待确认=%d\n",
+				queued,
+				testing,
+				blocked,
+				complete,
+				discovered,
+			))
 		}
 	} else {
 		builder.WriteString("覆盖率：统计暂不可用\n")

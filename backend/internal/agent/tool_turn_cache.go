@@ -309,7 +309,7 @@ func turnToolCacheKind(toolName, raw string) string {
 	case readSkillToolName:
 		return "skill:" + hashedToolArguments(raw)
 	case "project_list", "project_get", "project_list_assets", "project_list_facts", "project_list_findings", "project_get_finding",
-		"project_list_hypotheses", "project_next_targets", "project_graph_overview",
+		"project_list_hypotheses", "project_next_targets", "project_next_assets", "project_asset_closeout", "project_graph_overview",
 		"project_graph_node", "project_query_memory", "project_memory_graph":
 		return "args:" + hashedToolArguments(raw)
 	}

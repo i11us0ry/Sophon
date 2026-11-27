@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch, type Ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { RouterLink, useRoute } from 'vue-router'
 
 import { apiDelete, apiGet, apiPost, apiPut } from '../api/client'
 import AttackGraphCanvas from '../components/graph/AttackGraphCanvas.vue'
+import DataPagination from '../components/DataPagination.vue'
 import PageTitleRobot from '../components/PageTitleRobot.vue'
 import { useI18n } from '../i18n'
 import { useAuthStore } from '../stores/auth'
@@ -16,6 +17,7 @@ interface Project {
   name: string
   description: string
   goals: string
+  constraints?: string
   scope: string
   status?: string
   createdAt: string
@@ -24,6 +26,12 @@ interface Project {
 
 interface ProjectCounts {
   facts: number
+  pendingIntents: number
+  totalIntents: number
+  capacityBlockedIntents: number
+  blockedIntents: number
+  intentCapacity: number
+  oldestIntentAt: number
   attackSteps: number
   assets: number
   conversations: number
@@ -88,6 +96,17 @@ interface GraphNode {
   posY: number
   createdAt: string
   updatedAt: string
+  executionState?: string
+  outcomeState?: string
+  stateReason?: string
+  result?: string
+  evidence?: string
+  evidenceRefs?: string[]
+  findingId?: string
+  attempts?: number
+  testConfidence?: number
+  lastFinishedAt?: string
+  lastWorkerSessionId?: string
 }
 
 interface GraphEdge {
@@ -105,8 +124,23 @@ interface Asset {
   kind: string
   value: string
   status: string
+  source?: string
+  qualityStatus?: string
   criticality: string
   riskScore: number
+  updatedAt?: string
+}
+
+interface AssetOverview extends Asset {
+  authorizationState: string
+  workState: string
+  priority: number
+  stateReason: string
+  coverageStatus: string
+  testsTotal: number
+  testsCovered: number
+  findings: number
+  updatedAt: string
 }
 
 interface Conversation {
@@ -161,6 +195,19 @@ interface VulnerabilityReportDraft {
   updatedAt: string
 }
 
+interface EvidenceGap {
+  id: string
+  kind: 'fact' | 'finding'
+  assetId: string
+  title: string
+  summary: string
+  factType: string
+  severity: string
+  status: string
+  verificationState: string
+  updatedAt: string
+}
+
 interface PageResponse<T> {
   items: T[]
   total: number
@@ -208,7 +255,7 @@ const GRAPH_CREATE_KINDS = ['begin', 'goal', 'intent', 'fact', 'finding', 'hint'
 const GRAPH_STATUS_OPTIONS: Record<string, string[]> = {
   begin: ['open'],
   goal: ['open', 'met', 'abandoned'],
-  intent: ['open', 'running', 'done', 'blocked', 'exhausted', 'capacity_blocked'],
+  intent: ['open', 'running', 'done', 'blocked', 'exhausted', 'capacity_blocked', 'stopped'],
   fact: ['confirmed', 'dismissed'],
   finding: ['open', 'confirmed', 'dismissed'],
   hint: ['active', 'consumed'],
@@ -280,6 +327,14 @@ const evidenceGapTargets = computed(() =>
 const pendingIntentTotal = computed(
   () => (coverage.value?.intentsOpen ?? 0) + (coverage.value?.intentsRunning ?? 0),
 )
+const intentCapacity = computed(() => counts.value?.intentCapacity || 100)
+const activeIntentTotal = computed(
+  () => counts.value?.pendingIntents ?? pendingIntentTotal.value,
+)
+const intentCapacityRatio = computed(() =>
+  intentCapacity.value > 0 ? activeIntentTotal.value / intentCapacity.value : 0,
+)
+const intentCapacityWarning = computed(() => intentCapacityRatio.value >= 0.8)
 const evidenceGapTotal = computed(
   () => (coverage.value?.factsWithoutEvidence ?? 0) + (coverage.value?.findingsWithoutEvidence ?? 0),
 )
@@ -291,30 +346,66 @@ const notice = ref('')
 const facts = ref<Fact[]>([])
 const factAssetFilter = ref('')
 const factSearchQuery = ref('')
-const factsHasMore = ref(false)
-const factsNextOffset = ref(0)
-const factsLoadingMore = ref(false)
+const factStatusFilter = ref('')
+const factTypeFilter = ref('')
+const factsTotal = ref(0)
+const factsPage = ref(1)
+const factsPageSize = ref(20)
+const evidenceGapItems = ref<EvidenceGap[]>([])
+const evidenceGapResultTotal = ref(0)
+const evidenceGapPage = ref(1)
+const evidenceGapPageSize = ref(20)
+const evidenceGapFilter = reactive({
+  assetId: '',
+  kind: '',
+  status: 'missing_evidence',
+  query: '',
+})
 const assets = ref<Asset[]>([])
-const assetsHasMore = ref(false)
-const assetsNextOffset = ref(0)
-const assetsLoadingMore = ref(false)
+const assetOverviewItems = ref<AssetOverview[]>([])
+const assetOverviewTotal = ref(0)
+const assetOverviewPage = ref(1)
+const assetOverviewPageSize = ref(20)
+const assetOverviewFilter = reactive({
+  state: 'all',
+  kind: '',
+  search: '',
+})
 const assetsFullyLoaded = ref(false)
 const conversations = ref<Conversation[]>([])
-const conversationsHasMore = ref(false)
-const conversationsNextOffset = ref(0)
-const conversationsLoadingMore = ref(false)
+const conversationsTotal = ref(0)
+const conversationsPage = ref(1)
+const conversationsPageSize = ref(20)
 const vulnerabilities = ref<Vulnerability[]>([])
-const vulnerabilitiesHasMore = ref(false)
-const vulnerabilitiesNextOffset = ref(0)
-const vulnerabilitiesLoadingMore = ref(false)
+const vulnerabilitiesTotal = ref(0)
+const vulnerabilitiesPage = ref(1)
+const vulnerabilitiesPageSize = ref(20)
 const vulnerabilityReportDrafts = ref<VulnerabilityReportDraft[]>([])
+const vulnerabilityDraftsTotal = ref(0)
+const vulnerabilityDraftsPage = ref(1)
+const vulnerabilityDraftsPageSize = ref(20)
+const vulnerabilityDraftsExpanded = ref(false)
+const vulnerabilityDraftAttentionCount = computed(
+  () =>
+    vulnerabilityReportDrafts.value.filter(
+      (item) => Boolean(item.lastError) || canRetryVulnerabilityDraft(item),
+    ).length,
+)
 const vulnerabilityEditOpen = ref(false)
 const vulnerabilityEditLoading = ref(false)
+const reviewRetryingId = ref('')
+const vulnerabilityDraftConfirmingId = ref('')
+const vulnerabilityDraftDeletingId = ref('')
 const vulnerabilityDraft = ref<VulnerabilityDetail | null>(null)
 const graphNodes = ref<GraphNode[]>([])
 const graphEdges = ref<GraphEdge[]>([])
+const intentNodes = ref<GraphNode[]>([])
+const intentTotal = ref(0)
+const intentPage = ref(1)
+const intentPageSize = ref(20)
 const intentSearchQuery = ref('')
 const intentStatusFilter = ref('')
+const intentAssetFilter = ref('')
 const pendingIntentCards = computed(() => {
   const graph = new Map(graphNodes.value.map((node) => [node.id, node]))
   return pendingIntentTargets.value
@@ -334,14 +425,11 @@ const intentCards = computed(() => {
   const targetByID = new Map(
     (coverage.value?.pendingIntentTargets ?? []).map((target) => [target.refId, target]),
   )
-  return graphNodes.value
-    .filter((node) => node.kind === 'intent')
+  return intentNodes.value
+    .slice()
     .sort((left, right) => {
       const statusDiff = (statusOrder[left.status] ?? 9) - (statusOrder[right.status] ?? 9)
-      if (statusDiff !== 0) {
-        return statusDiff
-      }
-      return new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime()
+      return statusDiff || new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime()
     })
     .map((node) => ({
       node,
@@ -349,32 +437,8 @@ const intentCards = computed(() => {
       reason: targetByID.get(node.id)?.reason ?? graphStatusLabel(node.status),
     }))
 })
-const filteredIntentCards = computed(() =>
-  intentCards.value.filter(
-    (item) =>
-      (!intentStatusFilter.value || item.node.status === intentStatusFilter.value) &&
-      matchesProjectSearch(intentSearchQuery.value, [
-        item.node.title,
-        item.node.detail,
-        item.reason,
-        item.node.assetId ? assetName(item.node.assetId) : '',
-      ]),
-  ),
-)
-const filteredFacts = computed(() =>
-  facts.value.filter((fact) =>
-    matchesProjectSearch(factSearchQuery.value, [
-      fact.key,
-      fact.summary,
-      fact.value,
-      fact.body,
-      fact.evidence,
-      fact.relation,
-      fact.factType,
-      fact.assetId ? assetName(fact.assetId) : '',
-    ]),
-  ),
-)
+const filteredIntentCards = computed(() => intentCards.value)
+const filteredFacts = computed(() => facts.value)
 const evidenceGapFacts = computed(() => {
   const byID = new Map(facts.value.map((fact) => [fact.id, fact]))
   return (coverage.value?.evidenceGapTargets ?? [])
@@ -410,6 +474,7 @@ let graphRequestId = 0
 const drawerOpen = ref(false)
 const drawerMode = ref<'create' | 'edit' | 'view'>('create')
 const pendingIntentEditOpen = ref(false)
+const intentResultNode = ref<GraphNode | null>(null)
 
 const factDraft = reactive({
   assetId: '',
@@ -521,16 +586,276 @@ async function loadGraphData(scope: 'chain' | 'full') {
 
 async function loadMissionBoards() {
   await loadCoverage()
-  await loadGraphData('full')
-  if (!coverage.value?.evidenceGapTargets?.length) {
+}
+
+async function loadAssetOverview() {
+  if (!projectId) {
     return
   }
-  const [factsResponse, findingsResponse] = await Promise.all([
-    apiGet<PageResponse<Fact>>(`/projects/${projectId}/facts?limit=500&offset=0`),
-    apiGet<PageResponse<Vulnerability>>(`/projects/${projectId}/vulnerabilities?limit=500&offset=0`),
+  try {
+    const offset = (assetOverviewPage.value - 1) * assetOverviewPageSize.value
+    const query = new URLSearchParams({
+      limit: String(assetOverviewPageSize.value),
+      offset: String(offset),
+    })
+    if (assetOverviewFilter.state && assetOverviewFilter.state !== 'all') {
+      query.set('state', assetOverviewFilter.state)
+    }
+    if (assetOverviewFilter.kind) {
+      query.set('kind', assetOverviewFilter.kind)
+    }
+    if (assetOverviewFilter.search.trim()) {
+      query.set('search', assetOverviewFilter.search.trim())
+    }
+    const response = await apiGet<PageResponse<AssetOverview>>(
+      `/projects/${projectId}/asset-overview?${query.toString()}`,
+    )
+    assetOverviewItems.value = response.items ?? []
+    assetOverviewTotal.value = response.total ?? 0
+  } catch {
+    assetOverviewItems.value = []
+    assetOverviewTotal.value = 0
+  }
+}
+
+function applyAssetOverviewFilters() {
+  assetOverviewPage.value = 1
+  void loadAssetOverview()
+}
+
+function changeAssetOverviewPage(page: number) {
+  assetOverviewPage.value = page
+  void loadAssetOverview()
+}
+
+function changeAssetOverviewPageSize(size: number) {
+  assetOverviewPageSize.value = size
+  assetOverviewPage.value = 1
+  void loadAssetOverview()
+}
+
+async function reopenAssetWork(item: AssetOverview) {
+  if (!window.confirm(t('project.assetWorkReopenConfirm', { name: item.name || item.value }))) {
+    return
+  }
+  await run(async () => {
+    await apiPost(`/projects/${projectId}/assets/${item.id}/reopen`, {})
+    await Promise.all([loadAssetOverview(), loadCoverage()])
+  }, t('project.assetWorkReopened'))
+}
+
+function assetPrimaryLabel(asset: AssetOverview) {
+  const name = asset.name?.trim() ?? ''
+  const value = asset.value?.trim() ?? ''
+  if (!name) {
+    return value || '-'
+  }
+  if (name === value) {
+    return value
+  }
+  if (
+    ['url', 'ip', 'domain'].includes(asset.kind) &&
+    /^https?:\/\//i.test(name)
+  ) {
+    return value || name
+  }
+  return name
+}
+
+function assetSecondaryLabel(asset: AssetOverview) {
+  const value = asset.value?.trim() ?? ''
+  const primary = assetPrimaryLabel(asset)
+  return value && value !== primary ? value : ''
+}
+
+async function loadIntentPage() {
+  if (!projectId) {
+    return
+  }
+  const offset = (intentPage.value - 1) * intentPageSize.value
+  const query = new URLSearchParams({
+    limit: String(intentPageSize.value),
+    offset: String(offset),
+  })
+  if (intentSearchQuery.value) {
+    query.set('query', intentSearchQuery.value)
+  }
+  if (intentStatusFilter.value) {
+    query.set('status', intentStatusFilter.value)
+  }
+  if (intentAssetFilter.value) {
+    query.set('assetId', intentAssetFilter.value)
+  }
+  const response = await apiGet<PageResponse<GraphNode>>(
+    `/projects/${projectId}/intents?${query.toString()}`,
+  )
+  intentNodes.value = response.items ?? []
+  intentTotal.value = response.total ?? 0
+}
+
+function applyIntentFilters() {
+  intentPage.value = 1
+  void loadIntentPage()
+}
+
+function changeIntentPage(page: number) {
+  intentPage.value = page
+  void loadIntentPage()
+}
+
+function changeIntentPageSize(size: number) {
+  intentPageSize.value = size
+  intentPage.value = 1
+  void loadIntentPage()
+}
+
+async function loadFacts() {
+  const offset = (factsPage.value - 1) * factsPageSize.value
+  const query = new URLSearchParams({
+    limit: String(factsPageSize.value),
+    offset: String(offset),
+  })
+  if (factAssetFilter.value) {
+    query.set('assetId', factAssetFilter.value)
+  }
+  if (factSearchQuery.value.trim()) {
+    query.set('query', factSearchQuery.value.trim())
+  }
+  if (factTypeFilter.value.trim()) {
+    query.set('factType', factTypeFilter.value.trim())
+  }
+  if (factStatusFilter.value) {
+    query.set('status', factStatusFilter.value)
+  }
+  const response = await apiGet<PageResponse<Fact>>(
+    `/projects/${projectId}/facts?${query.toString()}`,
+  )
+  facts.value = response.items ?? []
+  factsTotal.value = response.total ?? facts.value.length
+}
+
+function applyFactFilters() {
+  factsPage.value = 1
+  void loadFacts()
+}
+
+function changeFactsPage(page: number) {
+  factsPage.value = page
+  void loadFacts()
+}
+
+function changeFactsPageSize(size: number) {
+  factsPageSize.value = size
+  factsPage.value = 1
+  void loadFacts()
+}
+
+async function loadEvidenceGaps() {
+  const offset = (evidenceGapPage.value - 1) * evidenceGapPageSize.value
+  const query = new URLSearchParams({
+    limit: String(evidenceGapPageSize.value),
+    offset: String(offset),
+  })
+  if (evidenceGapFilter.assetId) {
+    query.set('assetId', evidenceGapFilter.assetId)
+  }
+  if (evidenceGapFilter.kind) {
+    query.set('kind', evidenceGapFilter.kind)
+  }
+  if (evidenceGapFilter.status) {
+    query.set('status', evidenceGapFilter.status)
+  }
+  if (evidenceGapFilter.query.trim()) {
+    query.set('query', evidenceGapFilter.query.trim())
+  }
+  const response = await apiGet<PageResponse<EvidenceGap>>(
+    `/projects/${projectId}/evidence-gaps?${query.toString()}`,
+  )
+  evidenceGapItems.value = response.items ?? []
+  evidenceGapResultTotal.value = response.total ?? 0
+}
+
+function applyEvidenceGapFilters() {
+  evidenceGapPage.value = 1
+  void loadEvidenceGaps()
+}
+
+function changeEvidenceGapPage(page: number) {
+  evidenceGapPage.value = page
+  void loadEvidenceGaps()
+}
+
+function changeEvidenceGapPageSize(size: number) {
+  evidenceGapPageSize.value = size
+  evidenceGapPage.value = 1
+  void loadEvidenceGaps()
+}
+
+async function loadConversations() {
+  const offset = (conversationsPage.value - 1) * conversationsPageSize.value
+  const response = await apiGet<PageResponse<Conversation>>(
+    `/projects/${projectId}/conversations?limit=${conversationsPageSize.value}&offset=${offset}`,
+  )
+  conversations.value = response.items ?? []
+  conversationsTotal.value = response.total ?? 0
+}
+
+function changeConversationsPage(page: number) {
+  conversationsPage.value = page
+  void loadConversations()
+}
+
+function changeConversationsPageSize(size: number) {
+  conversationsPageSize.value = size
+  conversationsPage.value = 1
+  void loadConversations()
+}
+
+async function loadVulnerabilities() {
+  const offset = (vulnerabilitiesPage.value - 1) * vulnerabilitiesPageSize.value
+  const draftsOffset = (vulnerabilityDraftsPage.value - 1) * vulnerabilityDraftsPageSize.value
+  const [response, draftsResponse] = await Promise.all([
+    apiGet<PageResponse<Vulnerability>>(
+      `/projects/${projectId}/vulnerabilities?limit=${vulnerabilitiesPageSize.value}&offset=${offset}`,
+    ),
+    apiGet<PageResponse<VulnerabilityReportDraft>>(
+      `/projects/${projectId}/vulnerability-drafts?limit=${vulnerabilityDraftsPageSize.value}&offset=${draftsOffset}`,
+    ),
   ])
-  facts.value = factsResponse.items ?? []
-  vulnerabilities.value = findingsResponse.items ?? []
+  vulnerabilities.value = response.items ?? []
+  vulnerabilitiesTotal.value = response.total ?? 0
+  vulnerabilityReportDrafts.value = draftsResponse.items ?? []
+  vulnerabilityDraftsTotal.value = draftsResponse.total ?? 0
+  const draftTotalPages = Math.max(
+    1,
+    Math.ceil(vulnerabilityDraftsTotal.value / vulnerabilityDraftsPageSize.value),
+  )
+  if (vulnerabilityDraftsPage.value > draftTotalPages) {
+    vulnerabilityDraftsPage.value = draftTotalPages
+    await loadVulnerabilities()
+  }
+}
+
+function changeVulnerabilitiesPage(page: number) {
+  vulnerabilitiesPage.value = page
+  void loadVulnerabilities()
+}
+
+function changeVulnerabilitiesPageSize(size: number) {
+  vulnerabilitiesPageSize.value = size
+  vulnerabilitiesPage.value = 1
+  void loadVulnerabilities()
+}
+
+function changeVulnerabilityDraftsPage(page: number) {
+  vulnerabilityDraftsPage.value = page
+  void loadVulnerabilities()
+}
+
+function changeVulnerabilityDraftsPageSize(size: number) {
+  vulnerabilityDraftsPageSize.value = size
+  vulnerabilityDraftsPage.value = 1
+  void loadVulnerabilities()
 }
 
 async function loadTab() {
@@ -539,61 +864,25 @@ async function loadTab() {
   }
   try {
     if (
-      ['facts', 'attack', 'pending-intents', 'evidence-gaps'].includes(activeTab.value) &&
+      ['facts', 'attack', 'evidence-gaps', 'pending-intents'].includes(activeTab.value) &&
       !assetsFullyLoaded.value
     ) {
       await loadAllProjectAssets()
     }
     if (activeTab.value === 'facts') {
-      const factQuery = factAssetFilter.value
-        ? `&assetId=${encodeURIComponent(factAssetFilter.value)}`
-        : ''
-      const response = await apiGet<PageResponse<Fact>>(
-        `/projects/${projectId}/facts?limit=200&offset=0${factQuery}`,
-      )
-      facts.value = response.items ?? []
-      factsHasMore.value = Boolean(response.hasMore)
-      factsNextOffset.value = response.nextOffset || 0
+      await loadFacts()
     } else if (activeTab.value === 'attack') {
       await loadGraphData(graphScope.value)
     } else if (activeTab.value === 'pending-intents') {
-      await loadGraphData('full')
+      await loadIntentPage()
     } else if (activeTab.value === 'evidence-gaps') {
-      await loadCoverage()
-      const [factsResponse, findingsResponse] = await Promise.all([
-        apiGet<PageResponse<Fact>>(`/projects/${projectId}/facts?limit=500&offset=0`),
-        apiGet<PageResponse<Vulnerability>>(`/projects/${projectId}/vulnerabilities?limit=500&offset=0`),
-      ])
-      facts.value = factsResponse.items ?? []
-      vulnerabilities.value = findingsResponse.items ?? []
+      await loadEvidenceGaps()
     } else if (activeTab.value === 'assets') {
-      const response = await apiGet<PageResponse<Asset>>(
-        `/projects/${projectId}/assets?limit=200&offset=0`,
-      )
-      assets.value = response.items ?? []
-      assetsHasMore.value = Boolean(response.hasMore)
-      assetsNextOffset.value = response.nextOffset || 0
-      assetsFullyLoaded.value = false
+      await loadAssetOverview()
     } else if (activeTab.value === 'conversations') {
-      const response = await apiGet<PageResponse<Conversation>>(
-        `/projects/${projectId}/conversations?limit=200&offset=0`,
-      )
-      conversations.value = response.items ?? []
-      conversationsHasMore.value = Boolean(response.hasMore)
-      conversationsNextOffset.value = response.nextOffset || 0
+      await loadConversations()
     } else if (activeTab.value === 'vulnerabilities') {
-      const [response, draftsResponse] = await Promise.all([
-        apiGet<PageResponse<Vulnerability>>(
-          `/projects/${projectId}/vulnerabilities?limit=200&offset=0`,
-        ),
-        apiGet<PageResponse<VulnerabilityReportDraft>>(
-          `/projects/${projectId}/vulnerability-drafts?limit=200&offset=0`,
-        ),
-      ])
-      vulnerabilities.value = response.items ?? []
-      vulnerabilitiesHasMore.value = Boolean(response.hasMore)
-      vulnerabilitiesNextOffset.value = response.nextOffset || 0
-      vulnerabilityReportDrafts.value = draftsResponse.items ?? []
+      await loadVulnerabilities()
     }
   } catch (err) {
     error.value = err instanceof Error ? err.message : t('message.readDataFailed')
@@ -614,72 +903,7 @@ async function loadAllProjectAssets() {
     }
   } while (true)
   assets.value = loaded
-  assetsHasMore.value = false
-  assetsNextOffset.value = loaded.length
   assetsFullyLoaded.value = true
-}
-
-async function loadMorePage<T extends { id: string }>(
-  items: Ref<T[]>,
-  hasMore: Ref<boolean>,
-  nextOffset: Ref<number>,
-  loadingMore: Ref<boolean>,
-  path: string,
-) {
-  if (!hasMore.value || loadingMore.value) {
-    return
-  }
-  loadingMore.value = true
-  try {
-    const response = await apiGet<PageResponse<T>>(
-      `${path}${path.includes('?') ? '&' : '?'}limit=200&offset=${nextOffset.value}`,
-    )
-    const existing = new Set(items.value.map((item) => item.id))
-    items.value.push(...response.items.filter((item) => !existing.has(item.id)))
-    hasMore.value = Boolean(response.hasMore)
-    nextOffset.value = response.nextOffset || items.value.length
-  } catch (err) {
-    error.value = err instanceof Error ? err.message : t('message.readDataFailed')
-  } finally {
-    loadingMore.value = false
-  }
-}
-
-function loadMoreFacts() {
-  const query = factAssetFilter.value
-    ? `?assetId=${encodeURIComponent(factAssetFilter.value)}`
-    : ''
-  return loadMorePage(
-    facts,
-    factsHasMore,
-    factsNextOffset,
-    factsLoadingMore,
-    `/projects/${projectId}/facts${query}`,
-  )
-}
-
-function loadMoreAssets() {
-  return loadMorePage(assets, assetsHasMore, assetsNextOffset, assetsLoadingMore, `/projects/${projectId}/assets`)
-}
-
-function loadMoreConversations() {
-  return loadMorePage(
-    conversations,
-    conversationsHasMore,
-    conversationsNextOffset,
-    conversationsLoadingMore,
-    `/projects/${projectId}/conversations`,
-  )
-}
-
-function loadMoreVulnerabilities() {
-  return loadMorePage(
-    vulnerabilities,
-    vulnerabilitiesHasMore,
-    vulnerabilitiesNextOffset,
-    vulnerabilitiesLoadingMore,
-    `/projects/${projectId}/vulnerabilities`,
-  )
 }
 
 function switchTab(key: string) {
@@ -690,10 +914,13 @@ function switchTab(key: string) {
 
 function countValue(tab: (typeof TABS)[number]) {
   if (tab.key === 'pending-intents') {
-    return intentCards.value.length
+    return intentTotal.value || counts.value?.totalIntents || 0
   }
   if (tab.key === 'evidence-gaps') {
-    return evidenceGapTotal.value
+    return evidenceGapResultTotal.value || evidenceGapTotal.value
+  }
+  if (tab.key === 'assets') {
+    return assetOverviewTotal.value || counts.value?.assets || 0
   }
   return counts.value?.[tab.countKey as keyof ProjectCounts] ?? 0
 }
@@ -866,6 +1093,48 @@ function retryVulnerabilityReportDraft(item: VulnerabilityReportDraft) {
   }, t('project.vulnerabilityDraftRetryQueued'))
 }
 
+function confirmVulnerabilityDraft(item: VulnerabilityReportDraft) {
+  if (!window.confirm(t('project.vulnerabilityDraftConfirmWarning', { name: item.title }))) {
+    return
+  }
+  vulnerabilityDraftConfirmingId.value = item.id
+  void run(async () => {
+    await apiPost(`/projects/${projectId}/vulnerability-drafts/${item.id}/confirm`)
+    vulnerabilitiesPage.value = 1
+    await Promise.all([loadVulnerabilities(), loadProject(), loadCoverage()])
+  }, t('project.vulnerabilityDraftConfirmed')).finally(() => {
+    vulnerabilityDraftConfirmingId.value = ''
+  })
+}
+
+function deleteVulnerabilityDraft(item: VulnerabilityReportDraft) {
+  if (!window.confirm(t('project.vulnerabilityDraftDeleteWarning', { name: item.title }))) {
+    return
+  }
+  vulnerabilityDraftDeletingId.value = item.id
+  void run(async () => {
+    await apiDelete(`/projects/${projectId}/vulnerability-drafts/${item.id}`)
+    await Promise.all([loadVulnerabilities(), loadProject(), loadCoverage()])
+  }, t('project.vulnerabilityDraftDeleted')).finally(() => {
+    vulnerabilityDraftDeletingId.value = ''
+  })
+}
+
+function retryVulnerabilityReview(item: Vulnerability) {
+  if (reviewRetryingId.value) {
+    return
+  }
+  reviewRetryingId.value = item.id
+  void run(async () => {
+    await apiPost(`/projects/${projectId}/vulnerabilities/${item.id}/review-retry`)
+    await loadCoverage()
+    await loadTab()
+    await loadProject()
+  }, t('project.vulnerabilityReviewRetried')).finally(() => {
+    reviewRetryingId.value = ''
+  })
+}
+
 function vulnerabilityDraftStatusLabel(status: string) {
   const key = `vulnDraftStatus.${status}`
   const translated = t(key)
@@ -898,11 +1167,39 @@ watch(
   },
 )
 
-watch(factAssetFilter, () => {
-  if (activeTab.value === 'facts') {
-    void loadTab()
+let factFilterTimer: number | undefined
+watch([factAssetFilter, factStatusFilter, factTypeFilter, factSearchQuery], () => {
+  if (activeTab.value !== 'facts') {
+    return
   }
+  if (factFilterTimer) {
+    window.clearTimeout(factFilterTimer)
+  }
+  factFilterTimer = window.setTimeout(() => {
+    applyFactFilters()
+  }, 250)
 })
+
+let evidenceGapFilterTimer: number | undefined
+watch(
+  [
+    () => evidenceGapFilter.assetId,
+    () => evidenceGapFilter.kind,
+    () => evidenceGapFilter.status,
+    () => evidenceGapFilter.query,
+  ],
+  () => {
+    if (activeTab.value !== 'evidence-gaps') {
+      return
+    }
+    if (evidenceGapFilterTimer) {
+      window.clearTimeout(evidenceGapFilterTimer)
+    }
+    evidenceGapFilterTimer = window.setTimeout(() => {
+      applyEvidenceGapFilters()
+    }, 250)
+  },
+)
 
 watch(graphAssetFilter, () => {
   if (activeTab.value === 'attack') {
@@ -914,6 +1211,19 @@ watch(graphScope, () => {
   if (activeTab.value === 'attack') {
     void loadTab()
   }
+})
+
+let intentSearchTimer: number | undefined
+watch([intentSearchQuery, intentStatusFilter, intentAssetFilter], () => {
+  if (activeTab.value !== 'pending-intents') {
+    return
+  }
+  if (intentSearchTimer) {
+    window.clearTimeout(intentSearchTimer)
+  }
+  intentSearchTimer = window.setTimeout(() => {
+    applyIntentFilters()
+  }, 250)
 })
 
 function isSyntheticNode(node: GraphNode) {
@@ -979,6 +1289,23 @@ function openPendingIntentEditor(node: GraphNode) {
 function closePendingIntentEditor() {
   pendingIntentEditOpen.value = false
   resetNodeDraft()
+}
+
+function openIntentResult(node: GraphNode) {
+  intentResultNode.value = node
+}
+
+function closeIntentResult() {
+  intentResultNode.value = null
+}
+
+function intentResultPreview(node: GraphNode) {
+  return (
+    node.result?.trim() ||
+    node.stateReason?.trim() ||
+    node.evidence?.trim() ||
+    t('project.intentResultMissing')
+  )
 }
 
 function savePendingIntent() {
@@ -1091,6 +1418,20 @@ function removeEdge(edge: GraphEdge) {
   }, t('graph.edgeRemoved'))
 }
 
+function isIntentFinished(status: string) {
+  return ['done', 'blocked', 'exhausted', 'stopped'].includes(status)
+}
+
+function intentHasCompletion(node: GraphNode) {
+  return Boolean(
+    node.result ||
+      node.stateReason ||
+      node.evidence ||
+      (node.evidenceRefs?.length ?? 0) > 0 ||
+      node.findingId,
+  )
+}
+
 function graphStatusLabel(status: string) {
   const key = GRAPH_STATUS_LABELS[status]
   return key ? t(key) : status
@@ -1200,6 +1541,9 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  if (intentSearchTimer) {
+    window.clearTimeout(intentSearchTimer)
+  }
   if (projectStatusTimer) {
     window.clearInterval(projectStatusTimer)
   }
@@ -1230,6 +1574,10 @@ onUnmounted(() => {
             <div>
               <dt>{{ t('project.goalsLabel') }}</dt>
               <dd>{{ project?.goals || t('project.briefEmpty') }}</dd>
+            </div>
+            <div v-if="project?.constraints">
+              <dt>{{ t('project.constraintsLabel') }}</dt>
+              <dd class="project-constraints">{{ project.constraints }}</dd>
             </div>
             <div>
               <dt>{{ t('project.scopeLabel') }}</dt>
@@ -1298,6 +1646,14 @@ onUnmounted(() => {
           <span>
             <small>{{ t('project.pendingIntentLabel') }}</small>
             <strong>{{ coverage.intentsOpen + coverage.intentsRunning }}</strong>
+          </span>
+          <span :class="{ 'is-warning': intentCapacityWarning }">
+            <small>{{ t('project.intentCapacityLabel') }}</small>
+            <strong>{{ activeIntentTotal }} / {{ intentCapacity }}</strong>
+          </span>
+          <span>
+            <small>{{ t('project.capacityBlockedLabel') }}</small>
+            <strong>{{ counts?.capacityBlockedIntents ?? 0 }}</strong>
           </span>
           <span>
             <small>{{ t('project.assets') }}</small>
@@ -1499,6 +1855,16 @@ onUnmounted(() => {
           :placeholder="t('project.intentSearchPlaceholder')"
         />
         <select
+          v-model="intentAssetFilter"
+          class="asset-filter-select"
+          :aria-label="t('project.factAsset')"
+        >
+          <option value="">{{ t('project.allAssets') }}</option>
+          <option v-for="asset in assets" :key="asset.id" :value="asset.id">
+            {{ asset.name || asset.value }}
+          </option>
+        </select>
+        <select
           v-model="intentStatusFilter"
           class="asset-filter-select"
           :aria-label="t('project.intentStatusFilter')"
@@ -1512,7 +1878,7 @@ onUnmounted(() => {
           {{
             t('project.filterCount', {
               filtered: filteredIntentCards.length,
-              total: intentCards.length,
+              total: intentTotal,
             })
           }}
         </span>
@@ -1521,7 +1887,7 @@ onUnmounted(() => {
         <article
           v-for="item in filteredIntentCards"
           :key="`tab-intent-${item.node.id}`"
-          class="fact-card"
+          class="fact-card intent-card"
         >
           <header>
             <span class="fact-type">
@@ -1533,6 +1899,18 @@ onUnmounted(() => {
           <p class="fact-summary" :title="item.node.detail || item.reason">
             {{ item.node.detail || item.reason }}
           </p>
+          <section
+            v-if="isIntentFinished(item.node.status) || intentHasCompletion(item.node)"
+            class="intent-result"
+          >
+            <strong>{{ t('project.intentExecutionResult') }}</strong>
+            <p class="intent-result-preview" :title="intentResultPreview(item.node)">
+              {{ intentResultPreview(item.node) }}
+            </p>
+            <button class="link-button intent-result-link" type="button" @click="openIntentResult(item.node)">
+              {{ t('common.view') }}
+            </button>
+          </section>
           <p v-if="item.node.assetId" class="fact-scope">
             {{ t('project.factAsset') }}: {{ assetName(item.node.assetId) }}
           </p>
@@ -1552,11 +1930,19 @@ onUnmounted(() => {
       </div>
       <p v-else class="empty-cell">
         {{
-          intentSearchQuery || intentStatusFilter
+          intentSearchQuery || intentStatusFilter || intentAssetFilter
             ? t('project.intentNoMatch')
             : t('project.pendingIntentBoardEmpty')
         }}
       </p>
+      <DataPagination
+        :total="intentTotal"
+        :page="intentPage"
+        :page-size="intentPageSize"
+        :total-pages="Math.ceil(intentTotal / intentPageSize)"
+        @page-change="changeIntentPage"
+        @page-size-change="changeIntentPageSize"
+      />
     </section>
 
     <section v-if="activeTab === 'evidence-gaps'" class="panel">
@@ -1564,91 +1950,76 @@ onUnmounted(() => {
         <h2>{{ t('project.tabEvidenceGaps') }}</h2>
         <span class="panel-hint">{{ t('project.evidenceGapManageHint') }}</span>
       </header>
-      <div
-        v-if="evidenceGapFacts.length || evidenceGapFindings.length"
-        class="evidence-gap-columns"
-      >
-        <section class="evidence-gap-group">
+      <div class="project-filter-toolbar">
+        <input
+          v-model.trim="evidenceGapFilter.query"
+          class="project-search-input"
+          type="search"
+          :placeholder="t('project.evidenceGapSearchPlaceholder')"
+        />
+        <select
+          v-model="evidenceGapFilter.assetId"
+          class="asset-filter-select"
+          :aria-label="t('project.factAsset')"
+        >
+          <option value="">{{ t('project.allAssets') }}</option>
+          <option v-for="asset in assets" :key="asset.id" :value="asset.id">
+            {{ asset.name || asset.value }}
+          </option>
+        </select>
+        <select
+          v-model="evidenceGapFilter.kind"
+          class="asset-filter-select"
+          :aria-label="t('vulnerability.type')"
+        >
+          <option value="">{{ t('project.evidenceGapAllKinds') }}</option>
+          <option value="fact">{{ t('project.factEvidenceGap') }}</option>
+          <option value="finding">{{ t('project.findingEvidenceGap') }}</option>
+        </select>
+        <select
+          v-model="evidenceGapFilter.status"
+          class="asset-filter-select"
+          :aria-label="t('project.factStatus')"
+        >
+          <option value="">{{ t('project.statusAll') }}</option>
+          <option value="missing_evidence">{{ t('project.factStatusMissingEvidence') }}</option>
+        </select>
+        <span class="project-filter-count">
+          {{ t('project.filterCount', { filtered: evidenceGapItems.length, total: evidenceGapResultTotal }) }}
+        </span>
+      </div>
+      <div v-if="evidenceGapItems.length" class="fact-grid">
+        <article
+          v-for="item in evidenceGapItems"
+          :key="`evidence-gap-${item.kind}-${item.id}`"
+          class="fact-card"
+        >
           <header>
-            <strong>{{ t('project.factEvidenceGap') }}</strong>
-            <span>{{ evidenceGapFacts.length }}</span>
+            <span class="fact-type">
+              {{ item.kind === 'finding' ? severityLabel(item.severity) : 'FACT GAP' }}
+            </span>
+            <strong class="fact-key" :title="item.title">{{ item.title }}</strong>
+            <span class="fact-confidence">{{ item.status }}</span>
           </header>
-          <div class="fact-grid">
-            <article
-              v-for="item in evidenceGapFacts"
-              :key="`tab-fact-gap-${item.fact.id}`"
-              class="fact-card"
-            >
-              <header>
-                <span class="fact-type">FACT GAP</span>
-                <strong class="fact-key" :title="item.fact.key">{{ item.fact.key }}</strong>
-                <span class="fact-confidence">{{ item.target.score }}</span>
-              </header>
-              <p class="fact-summary" :title="item.fact.body || item.fact.summary">
-                {{ item.fact.summary || item.fact.value || item.target.reason }}
-              </p>
-              <p class="fact-scope">{{ item.fact.factType || 'fact' }}</p>
-              <p class="fact-body" :title="item.target.reason">{{ item.target.reason }}</p>
-              <footer>
-                <small>{{ formatTime(item.fact.updatedAt) }}</small>
-                <div class="fact-actions">
-                  <button class="button compact" type="button" @click="editEvidenceFact(item.fact)">
-                    {{ t('common.edit') }}
-                  </button>
-                  <button class="button compact danger" type="button" @click="removeFact(item.fact)">
-                    {{ t('common.delete') }}
-                  </button>
-                </div>
-              </footer>
-            </article>
-          </div>
-        </section>
-        <section class="evidence-gap-group">
-          <header>
-            <strong>{{ t('project.findingEvidenceGap') }}</strong>
-            <span>{{ evidenceGapFindings.length }}</span>
-          </header>
-          <div class="fact-grid">
-            <article
-              v-for="item in evidenceGapFindings"
-              :key="`tab-finding-gap-${item.finding.id}`"
-              class="fact-card"
-            >
-              <header>
-                <span class="fact-type">
-                  {{ severityLabel(item.finding.severity) }}
-                </span>
-                <strong class="fact-key" :title="item.finding.title">{{ item.finding.title }}</strong>
-                <span class="fact-confidence">{{ item.target.score }}</span>
-              </header>
-              <p class="fact-summary">{{ item.finding.target || item.target.reason }}</p>
-              <p class="fact-scope">FINDING GAP</p>
-              <p class="fact-body" :title="item.target.reason">{{ item.target.reason }}</p>
-              <footer>
-                <small>{{ formatTime(item.finding.updatedAt) }}</small>
-                <div class="fact-actions">
-                  <button
-                    class="button compact"
-                    type="button"
-                    :disabled="vulnerabilityEditLoading"
-                    @click="openVulnerabilityEditor(item.finding)"
-                  >
-                    {{ t('common.edit') }}
-                  </button>
-                  <button
-                    class="button compact danger"
-                    type="button"
-                    @click="removeEvidenceFinding(item.finding)"
-                  >
-                    {{ t('common.delete') }}
-                  </button>
-                </div>
-              </footer>
-            </article>
-          </div>
-        </section>
+          <p class="fact-summary">{{ item.summary || '-' }}</p>
+          <p class="fact-scope">{{ item.factType || item.kind }}</p>
+          <p v-if="item.assetId" class="fact-scope">
+            {{ t('project.factAsset') }}: {{ assetName(item.assetId) }}
+          </p>
+          <footer>
+            <small>{{ formatTime(item.updatedAt) }}</small>
+          </footer>
+        </article>
       </div>
       <p v-else class="empty-cell">{{ t('project.evidenceGapBoardEmpty') }}</p>
+      <DataPagination
+        :total="evidenceGapResultTotal"
+        :page="evidenceGapPage"
+        :page-size="evidenceGapPageSize"
+        :total-pages="Math.ceil(evidenceGapResultTotal / evidenceGapPageSize)"
+        @page-change="changeEvidenceGapPage"
+        @page-size-change="changeEvidenceGapPageSize"
+      />
     </section>
 
     <section v-if="activeTab === 'facts'" class="panel">
@@ -1679,11 +2050,37 @@ onUnmounted(() => {
             {{ asset.name || asset.value }}
           </option>
         </select>
+        <select
+          v-model="factTypeFilter"
+          class="asset-filter-select"
+          :aria-label="t('project.factType')"
+        >
+          <option value="">{{ t('project.allFactTypes') }}</option>
+          <option value="general">general</option>
+          <option value="scope">scope</option>
+          <option value="credential">credential</option>
+          <option value="asset">asset</option>
+          <option value="finding">finding</option>
+          <option value="topology">topology</option>
+          <option value="constraint">constraint</option>
+        </select>
+        <select
+          v-model="factStatusFilter"
+          class="asset-filter-select"
+          :aria-label="t('project.factStatus')"
+        >
+          <option value="">{{ t('project.factStatusAll') }}</option>
+          <option value="with_evidence">{{ t('project.factStatusWithEvidence') }}</option>
+          <option value="missing_evidence">{{ t('project.factStatusMissingEvidence') }}</option>
+          <option value="tainted">{{ t('project.factStatusTainted') }}</option>
+          <option value="conflict">{{ t('project.factStatusConflict') }}</option>
+          <option value="pinned">{{ t('project.factStatusPinned') }}</option>
+        </select>
         <span class="project-filter-count">
           {{
             t('project.filterCount', {
               filtered: filteredFacts.length,
-              total: facts.length,
+              total: factsTotal,
             })
           }}
         </span>
@@ -1727,17 +2124,20 @@ onUnmounted(() => {
         </article>
       </div>
       <p v-else class="fact-empty">
-        {{ factSearchQuery ? t('project.factNoMatch') : t('project.factEmpty') }}
+        {{
+          factSearchQuery || factAssetFilter || factTypeFilter || factStatusFilter
+            ? t('project.factNoMatch')
+            : t('project.factEmpty')
+        }}
       </p>
-      <button
-        v-if="factsHasMore"
-        class="button panel-load-more"
-        type="button"
-        :disabled="factsLoadingMore"
-        @click="loadMoreFacts"
-      >
-        {{ factsLoadingMore ? t('common.loading') : t('common.loadMore') }}
-      </button>
+      <DataPagination
+        :total="factsTotal"
+        :page="factsPage"
+        :page-size="factsPageSize"
+        :total-pages="Math.ceil(factsTotal / factsPageSize)"
+        @page-change="changeFactsPage"
+        @page-size-change="changeFactsPageSize"
+      />
 
       <div v-if="showFactModal" class="fact-modal-backdrop" @click.self="closeFactModal">
         <section
@@ -2076,42 +2476,101 @@ onUnmounted(() => {
         <h2>{{ t('project.tabAssets') }}</h2>
         <RouterLink class="panel-link" to="/business">{{ t('project.createAsset') }}</RouterLink>
       </header>
+      <div class="project-filter-toolbar">
+        <select
+          v-model="assetOverviewFilter.state"
+          class="asset-filter-select"
+          :aria-label="t('project.assetWorkState')"
+          @change="applyAssetOverviewFilters"
+        >
+          <option value="all">{{ t('project.assetFilterAll') }}</option>
+          <option value="pending">{{ t('project.assetFilterPending') }}</option>
+          <option value="active">{{ t('project.assetFilterActive') }}</option>
+          <option value="blocked">{{ t('project.assetFilterBlocked') }}</option>
+          <option value="complete">{{ t('project.assetFilterComplete') }}</option>
+        </select>
+        <select
+          v-model="assetOverviewFilter.kind"
+          class="asset-filter-select"
+          :aria-label="t('vulnerability.type')"
+          @change="applyAssetOverviewFilters"
+        >
+          <option value="">{{ t('project.assetFilterAllKinds') }}</option>
+          <option value="domain">domain</option>
+          <option value="ip">ip</option>
+          <option value="url">url</option>
+          <option value="source">source</option>
+          <option value="host">host (legacy)</option>
+        </select>
+        <input
+          v-model.trim="assetOverviewFilter.search"
+          class="project-search-input"
+          type="search"
+          :placeholder="t('project.assetSearchPlaceholder')"
+          @keyup.enter="applyAssetOverviewFilters"
+        />
+        <button class="button compact" type="button" @click="applyAssetOverviewFilters">
+          {{ t('common.query') }}
+        </button>
+      </div>
       <div class="factory-table-scroll">
         <table class="data-list">
         <thead>
           <tr>
             <th>{{ t('project.assetName') }}</th>
             <th>{{ t('vulnerability.type') }}</th>
-            <th>{{ t('project.assetValue') }}</th>
-            <th>{{ t('common.status') }}</th>
-            <th>{{ t('project.assetCriticality') }}</th>
-            <th>{{ t('project.assetRisk') }}</th>
+            <th>{{ t('asset.source') }}</th>
+            <th>{{ t('project.assetAuthorization') }}</th>
+            <th>{{ t('project.assetWorkState') }}</th>
+            <th>{{ t('project.assetCoverage') }}</th>
+            <th>{{ t('project.assetRiskPriority') }}</th>
+            <th>{{ t('project.assetWorkReason') }}</th>
+            <th>{{ t('common.actions') }}</th>
           </tr>
         </thead>
         <tbody>
-          <tr v-for="asset in assets" :key="asset.id">
-            <td>{{ asset.name }}</td>
+          <tr v-for="asset in assetOverviewItems" :key="asset.id">
+            <td>
+              <strong>{{ assetPrimaryLabel(asset) }}</strong>
+              <small v-if="assetSecondaryLabel(asset)" class="wrap-cell">
+                {{ assetSecondaryLabel(asset) }}
+              </small>
+            </td>
             <td>{{ asset.kind }}</td>
-            <td class="wrap-cell">{{ asset.value }}</td>
-            <td>{{ asset.status }}</td>
-            <td>{{ asset.criticality }}</td>
-            <td>{{ asset.riskScore }}</td>
+            <td>{{ asset.source || '-' }}</td>
+            <td>{{ asset.authorizationState }}</td>
+            <td>{{ asset.workState }}</td>
+            <td>
+              {{ asset.coverageStatus || '-' }}
+              <small v-if="asset.testsTotal">{{ asset.testsCovered }}/{{ asset.testsTotal }}</small>
+            </td>
+            <td>{{ asset.riskScore }} / {{ asset.priority }}</td>
+            <td class="wrap-cell">{{ asset.stateReason || '-' }}</td>
+            <td>
+              <button
+                v-if="['complete', 'blocked', 'awaiting_user'].includes(asset.workState)"
+                class="button compact"
+                type="button"
+                @click="reopenAssetWork(asset)"
+              >
+                {{ t('project.assetWorkReopen') }}
+              </button>
+            </td>
           </tr>
-          <tr v-if="!assets.length">
-            <td class="empty-cell" colspan="6">{{ t('project.assetEmpty') }}</td>
+          <tr v-if="!assetOverviewItems.length">
+            <td class="empty-cell" colspan="9">{{ t('project.assetEmpty') }}</td>
           </tr>
         </tbody>
         </table>
       </div>
-      <button
-        v-if="assetsHasMore"
-        class="button panel-load-more"
-        type="button"
-        :disabled="assetsLoadingMore"
-        @click="loadMoreAssets"
-      >
-        {{ assetsLoadingMore ? t('common.loading') : t('common.loadMore') }}
-      </button>
+      <DataPagination
+        :total="assetOverviewTotal"
+        :page="assetOverviewPage"
+        :page-size="assetOverviewPageSize"
+        :total-pages="Math.ceil(assetOverviewTotal / assetOverviewPageSize)"
+        @page-change="changeAssetOverviewPage"
+        @page-size-change="changeAssetOverviewPageSize"
+      />
     </section>
 
     <section v-if="false" class="panel">
@@ -2267,15 +2726,14 @@ onUnmounted(() => {
         </li>
       </ul>
       <p v-if="!conversations.length" class="empty-cell">{{ t('project.conversationEmpty') }}</p>
-      <button
-        v-if="conversationsHasMore"
-        class="button panel-load-more"
-        type="button"
-        :disabled="conversationsLoadingMore"
-        @click="loadMoreConversations"
-      >
-        {{ conversationsLoadingMore ? t('common.loading') : t('common.loadMore') }}
-      </button>
+      <DataPagination
+        :total="conversationsTotal"
+        :page="conversationsPage"
+        :page-size="conversationsPageSize"
+        :total-pages="Math.ceil(conversationsTotal / conversationsPageSize)"
+        @page-change="changeConversationsPage"
+        @page-size-change="changeConversationsPageSize"
+      />
     </section>
 
     <section v-if="activeTab === 'vulnerabilities'" class="panel">
@@ -2283,15 +2741,48 @@ onUnmounted(() => {
         <h2>{{ t('project.tabVulnerabilities') }}</h2>
         <RouterLink class="panel-link" to="/vulnerabilities">{{ t('project.goVulnerabilities') }}</RouterLink>
       </header>
-      <section v-if="vulnerabilityReportDrafts.length" class="vulnerability-draft-section">
+      <section
+        v-if="vulnerabilityReportDrafts.length"
+        class="vulnerability-draft-section"
+        :class="{ expanded: vulnerabilityDraftsExpanded }"
+      >
         <header class="vulnerability-draft-section-head">
           <div>
             <strong>{{ t('project.pendingVulnerabilityDrafts') }}</strong>
-            <p>{{ t('project.pendingVulnerabilityDraftsHint') }}</p>
+            <p v-if="vulnerabilityDraftsExpanded">
+              {{ t('project.pendingVulnerabilityDraftsHint') }}
+            </p>
           </div>
-          <span class="chip">{{ vulnerabilityReportDrafts.length }}</span>
+          <div class="vulnerability-draft-summary">
+            <span
+              class="chip"
+              :class="{ 'is-warning': vulnerabilityDraftAttentionCount > 0 }"
+            >
+              {{
+                vulnerabilityDraftAttentionCount
+                  ? t('project.pendingVulnerabilityDraftsAttention', {
+                      count: vulnerabilityDraftAttentionCount,
+                    })
+                  : t('project.pendingVulnerabilityDraftsSummary', {
+                      count: vulnerabilityDraftsTotal,
+                    })
+              }}
+            </span>
+            <button
+              class="button compact"
+              type="button"
+              :aria-expanded="vulnerabilityDraftsExpanded"
+              @click="vulnerabilityDraftsExpanded = !vulnerabilityDraftsExpanded"
+            >
+              {{
+                vulnerabilityDraftsExpanded
+                  ? t('project.pendingVulnerabilityDraftsCollapse')
+                  : t('project.pendingVulnerabilityDraftsExpand')
+              }}
+            </button>
+          </div>
         </header>
-        <div class="mission-gap-cards">
+        <div v-if="vulnerabilityDraftsExpanded" class="mission-gap-cards">
           <article
             v-for="item in vulnerabilityReportDrafts"
             :key="item.id"
@@ -2312,17 +2803,51 @@ onUnmounted(() => {
                 {{ vulnerabilityDraftStatusLabel(item.status) }}
                 · {{ t('project.vulnerabilityDraftAttempts', { count: item.attempts }) }}
               </span>
-              <button
-                v-if="canRetryVulnerabilityDraft(item)"
-                class="button compact"
-                type="button"
-                @click="retryVulnerabilityReportDraft(item)"
-              >
-                {{ t('project.retryVulnerabilityDraft') }}
-              </button>
+              <div class="vulnerability-draft-actions">
+                <button
+                  v-if="canRetryVulnerabilityDraft(item)"
+                  class="button compact"
+                  type="button"
+                  @click="retryVulnerabilityReportDraft(item)"
+                >
+                  {{ t('project.retryVulnerabilityDraft') }}
+                </button>
+                <button
+                  class="button compact"
+                  type="button"
+                  :disabled="item.status === 'processing' || vulnerabilityDraftConfirmingId === item.id"
+                  @click="confirmVulnerabilityDraft(item)"
+                >
+                  {{
+                    vulnerabilityDraftConfirmingId === item.id
+                      ? t('common.loading')
+                      : t('project.confirmVulnerabilityDraft')
+                  }}
+                </button>
+                <button
+                  class="button compact danger"
+                  type="button"
+                  :disabled="item.status === 'processing' || vulnerabilityDraftDeletingId === item.id"
+                  @click="deleteVulnerabilityDraft(item)"
+                >
+                  {{
+                    vulnerabilityDraftDeletingId === item.id
+                      ? t('common.loading')
+                      : t('project.deleteVulnerabilityDraft')
+                  }}
+                </button>
+              </div>
             </footer>
           </article>
         </div>
+        <DataPagination
+          :total="vulnerabilityDraftsTotal"
+          :page="vulnerabilityDraftsPage"
+          :page-size="vulnerabilityDraftsPageSize"
+          :total-pages="Math.ceil(vulnerabilityDraftsTotal / vulnerabilityDraftsPageSize)"
+          @page-change="changeVulnerabilityDraftsPage"
+          @page-size-change="changeVulnerabilityDraftsPageSize"
+        />
       </section>
       <div class="factory-table-scroll">
         <table class="data-list">
@@ -2333,6 +2858,7 @@ onUnmounted(() => {
             <th>{{ t('common.status') }}</th>
             <th>{{ t('vulnerability.target') }}</th>
             <th>{{ t('common.updatedAt') }}</th>
+            <th>{{ t('common.actions') }}</th>
           </tr>
         </thead>
         <tbody>
@@ -2342,22 +2868,32 @@ onUnmounted(() => {
             <td>{{ vulnerabilityStatusLabel(item.status) }}</td>
             <td class="wrap-cell">{{ item.target || '-' }}</td>
             <td>{{ formatTime(item.updatedAt) }}</td>
+            <td>
+              <button
+                v-if="item.status === 'pending_review'"
+                class="button compact"
+                type="button"
+                :disabled="reviewRetryingId === item.id"
+                @click="retryVulnerabilityReview(item)"
+              >
+                {{ reviewRetryingId === item.id ? t('common.loading') : t('project.retryVulnerabilityReview') }}
+              </button>
+            </td>
           </tr>
           <tr v-if="!vulnerabilities.length">
-            <td class="empty-cell" colspan="5">{{ t('project.vulnerabilityEmpty') }}</td>
+            <td class="empty-cell" colspan="6">{{ t('project.vulnerabilityEmpty') }}</td>
           </tr>
         </tbody>
         </table>
       </div>
-      <button
-        v-if="vulnerabilitiesHasMore"
-        class="button panel-load-more"
-        type="button"
-        :disabled="vulnerabilitiesLoadingMore"
-        @click="loadMoreVulnerabilities"
-      >
-        {{ vulnerabilitiesLoadingMore ? t('common.loading') : t('common.loadMore') }}
-      </button>
+      <DataPagination
+        :total="vulnerabilitiesTotal"
+        :page="vulnerabilitiesPage"
+        :page-size="vulnerabilitiesPageSize"
+        :total-pages="Math.ceil(vulnerabilitiesTotal / vulnerabilitiesPageSize)"
+        @page-change="changeVulnerabilitiesPage"
+        @page-size-change="changeVulnerabilitiesPageSize"
+      />
     </section>
 
     <div
@@ -2420,6 +2956,70 @@ onUnmounted(() => {
             </button>
           </div>
         </div>
+      </section>
+    </div>
+
+    <div
+      v-if="intentResultNode"
+      class="fact-modal-backdrop"
+      @click.self="closeIntentResult"
+    >
+      <section class="fact-modal intent-result-modal" role="dialog" aria-modal="true">
+        <header class="fact-modal-head intent-result-modal-head">
+          <div>
+            <span class="intent-result-eyebrow">INTENT // RESULT</span>
+            <h3>{{ intentResultNode.title }}</h3>
+          </div>
+          <button class="text-button dark" type="button" @click="closeIntentResult">
+            {{ t('common.close') }}
+          </button>
+        </header>
+
+        <div class="intent-result-meta">
+          <span class="chip chip-plain">{{ graphStatusLabel(intentResultNode.status) }}</span>
+          <span v-if="intentResultNode.assetId" class="chip chip-plain">
+            {{ assetName(intentResultNode.assetId) }}
+          </span>
+          <span v-if="intentResultNode.confidence" class="chip chip-plain">
+            {{ t('graph.confidenceShort', { value: intentResultNode.confidence }) }}
+          </span>
+          <span v-if="(intentResultNode.attempts ?? 0) > 0" class="chip chip-plain">
+            {{ t('project.intentAttempts', { count: intentResultNode.attempts }) }}
+          </span>
+          <span class="chip chip-plain">
+            {{ formatTime(intentResultNode.lastFinishedAt || intentResultNode.updatedAt) }}
+          </span>
+        </div>
+
+        <section v-if="intentResultNode.detail" class="intent-result-block">
+          <h4>{{ t('graph.detailLabel') }}</h4>
+          <pre>{{ intentResultNode.detail }}</pre>
+        </section>
+        <section v-if="intentResultNode.result" class="intent-result-block">
+          <h4>{{ t('project.intentCompletionResult') }}</h4>
+          <pre>{{ intentResultNode.result }}</pre>
+        </section>
+        <section v-if="intentResultNode.stateReason" class="intent-result-block">
+          <h4>{{ t('project.intentStateReason') }}</h4>
+          <pre>{{ intentResultNode.stateReason }}</pre>
+        </section>
+        <section v-if="intentResultNode.evidence" class="intent-result-block">
+          <h4>{{ t('project.intentEvidence') }}</h4>
+          <pre>{{ intentResultNode.evidence }}</pre>
+        </section>
+        <section v-if="intentResultNode.evidenceRefs?.length" class="intent-result-block">
+          <h4>{{ t('project.intentEvidenceRefs') }}</h4>
+          <div class="intent-result-refs">
+            <span v-for="ref in intentResultNode.evidenceRefs" :key="ref">{{ ref }}</span>
+          </div>
+        </section>
+        <section v-if="intentResultNode.findingId" class="intent-result-block">
+          <h4>{{ t('project.intentRelatedFinding') }}</h4>
+          <pre>{{ intentResultNode.findingId }}</pre>
+        </section>
+        <p v-if="!intentHasCompletion(intentResultNode)" class="intent-result-missing">
+          {{ t('project.intentResultMissing') }}
+        </p>
       </section>
     </div>
 
@@ -3321,6 +3921,133 @@ onUnmounted(() => {
   -webkit-line-clamp: 2;
 }
 
+.intent-card {
+  height: 236px;
+  overflow: hidden;
+}
+
+.intent-card footer {
+  margin-top: auto;
+}
+
+.intent-result {
+  display: grid;
+  gap: 3px;
+  padding: 7px 0 7px 10px;
+  border-left: 2px solid var(--accent-line);
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.intent-result > strong {
+  color: var(--accent);
+  font-size: 11px;
+}
+
+.intent-result p,
+.intent-result small {
+  margin: 0;
+}
+
+.intent-result-preview {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.intent-result-link {
+  width: fit-content;
+  padding: 0;
+  font-size: 10px;
+}
+
+.intent-result p > span {
+  margin-right: 4px;
+  color: var(--text-muted);
+}
+
+.intent-result-missing {
+  color: var(--warning, var(--text-muted));
+}
+
+.intent-result-modal {
+  width: min(920px, calc(100vw - 32px));
+  max-height: calc(100vh - 32px);
+  overflow: auto;
+}
+
+.intent-result-modal-head {
+  align-items: flex-start;
+}
+
+.intent-result-modal-head h3 {
+  overflow-wrap: anywhere;
+}
+
+.intent-result-eyebrow {
+  color: var(--text-muted);
+  font-family: var(--mono);
+  font-size: 9px;
+}
+
+.intent-result-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.intent-result-modal > .intent-result-block,
+.intent-result-modal > .intent-result-missing {
+  min-height: 0;
+}
+
+.intent-result-block {
+  display: grid;
+  gap: 6px;
+}
+
+.intent-result-block h4 {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.intent-result-block pre {
+  max-height: 220px;
+  margin: 0;
+  padding: 10px 12px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--text-secondary);
+  background: var(--field-bg);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.intent-result-refs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.intent-result-refs span {
+  padding: 4px 7px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  color: var(--text-muted);
+  background: var(--field-bg);
+  font-family: var(--mono);
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+
 .fact-scope {
   margin: 0;
   color: var(--accent);
@@ -3645,7 +4372,7 @@ onUnmounted(() => {
 
 .coverage-signals {
   display: grid;
-  grid-template-columns: repeat(3, minmax(74px, 1fr));
+  grid-template-columns: repeat(5, minmax(74px, 1fr));
   gap: 1px;
   overflow: hidden;
   border: 1px solid var(--project-line);
@@ -3672,6 +4399,10 @@ onUnmounted(() => {
   font-family: var(--mono);
   font-size: 16px;
   font-weight: 500;
+}
+
+.coverage-signals span.is-warning strong {
+  color: var(--danger, #e05d44);
 }
 
 .project-mission-panel .coverage-targets {
@@ -3829,9 +4560,9 @@ onUnmounted(() => {
 
 .vulnerability-draft-section {
   display: grid;
-  gap: 10px;
+  gap: 8px;
   margin-bottom: 14px;
-  padding: 12px;
+  padding: 9px 10px;
   border: 1px solid color-mix(in srgb, var(--project-accent) 24%, var(--project-line));
   border-radius: 4px;
   background: color-mix(in srgb, var(--project-accent) 3%, var(--surface));
@@ -3839,9 +4570,23 @@ onUnmounted(() => {
 
 .vulnerability-draft-section-head {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   gap: 12px;
+}
+
+.vulnerability-draft-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.vulnerability-draft-summary .chip.is-warning {
+  border-color: color-mix(in srgb, var(--warning, #d49b3f) 45%, var(--project-line));
+  color: var(--warning, #d49b3f);
+  background: color-mix(in srgb, var(--warning, #d49b3f) 8%, var(--surface));
 }
 
 .vulnerability-draft-section-head strong {
@@ -3866,6 +4611,13 @@ onUnmounted(() => {
   font-size: 8px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.vulnerability-draft-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 5px;
 }
 
 .vulnerability-draft-error {
@@ -4436,6 +5188,7 @@ onUnmounted(() => {
 
   .coverage-signals {
     width: 100%;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .gap-management-row {

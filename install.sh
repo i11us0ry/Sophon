@@ -581,6 +581,7 @@ build_sophon() {
     CGO_ENABLED=1 "$(command -v go)" build -trimpath -ldflags="-s -w" -o "${BUILD_ROOT}/sophon-server" ./cmd/server
     CGO_ENABLED=1 "$(command -v go)" build -trimpath -ldflags="-s -w" -o "${BUILD_ROOT}/sophon-mcp-tools" ./cmd/mcp-tools
     CGO_ENABLED=1 "$(command -v go)" build -trimpath -ldflags="-s -w" -o "${BUILD_ROOT}/sophon-tool-runner" ./cmd/tool-runner
+    CGO_ENABLED=1 "$(command -v go)" build -trimpath -ldflags="-s -w" -o "${BUILD_ROOT}/sophon-process-supervisor" ./cmd/process-supervisor
   )
   info "构建前端..."
   (
@@ -656,6 +657,7 @@ copy_release() {
   run_root install -m 0755 "${BUILD_ROOT}/sophon-server" "${APP_ROOT}/backend/sophon-server"
   run_root install -m 0755 "${BUILD_ROOT}/sophon-mcp-tools" "${APP_ROOT}/backend/sophon-mcp-tools"
   run_root install -m 0755 "${BUILD_ROOT}/sophon-tool-runner" "${APP_ROOT}/backend/sophon-tool-runner"
+  run_root install -m 0755 "${BUILD_ROOT}/sophon-process-supervisor" "${APP_ROOT}/backend/sophon-process-supervisor"
   run_root cp -a "$ROOT_DIR/frontend/dist/." "${APP_ROOT}/frontend/dist/"
   for name in deploy roles skills tools customTools licenses; do
     run_root cp -a "$ROOT_DIR/${name}/." "${APP_ROOT}/${name}/"

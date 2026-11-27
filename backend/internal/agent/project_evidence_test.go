@@ -378,7 +378,7 @@ func TestProjectFindingFingerprintMergesDuplicateEvidence(t *testing.T) {
 	if len(findings[0].EvidenceRefs) != 2 {
 		t.Fatalf("合并后证据引用应去重保留: %+v", findings[0].EvidenceRefs)
 	}
-	if findings[0].Fingerprint == "" || findings[0].VerificationState != "verified" {
+	if findings[0].Fingerprint == "" || findings[0].VerificationState != "observed" {
 		t.Fatalf("漏洞指纹或验证状态缺失: %+v", findings[0])
 	}
 	tests, err := service.db.ListProjectTestResults(ctx, "project-tools", 20)

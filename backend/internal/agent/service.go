@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -532,14 +533,16 @@ type Service struct {
 	workerControlMu sync.Mutex
 	workerControls  map[string]*workerControl
 	// 后台压缩：按会话冷却，避免每轮重复触发。
-	compactMu        sync.Mutex
-	compactLast      map[string]time.Time
-	compactRunning   map[string]bool
-	backgroundWG     sync.WaitGroup
-	draftWorkerOnce  sync.Once
-	draftWorkerWG    sync.WaitGroup
-	updateWorkerOnce sync.Once
-	updateWorkerWG   sync.WaitGroup
+	compactMu         sync.Mutex
+	compactLast       map[string]time.Time
+	compactRunning    map[string]bool
+	backgroundWG      sync.WaitGroup
+	draftWorkerOnce   sync.Once
+	draftWorkerWG     sync.WaitGroup
+	draftWorkerActive atomic.Bool
+	draftWorkerWake   chan struct{}
+	updateWorkerOnce  sync.Once
+	updateWorkerWG    sync.WaitGroup
 	// 项目图与记忆同步按项目合并，避免每次写回都执行完整全量同步。
 	syncMu       sync.Mutex
 	projectSyncs map[string]*projectSyncState
@@ -563,6 +566,11 @@ type Service struct {
 	// 漏洞写库前审核；测试可注入确定性实现，生产默认调用独立审核 Agent。
 	vulnerabilityReviewHook vulnerabilityReviewHook
 	vulnerabilityReviewSem  chan struct{}
+	reviewCacheMu           sync.Mutex
+	reviewCache             map[string]vulnerabilityReviewCacheEntry
+	llmCircuitMu            sync.Mutex
+	llmCircuitUntil         time.Time
+	llmCircuitReason        string
 	vulnerabilityReviewOnce sync.Once
 }
 

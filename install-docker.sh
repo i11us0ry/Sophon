@@ -596,7 +596,8 @@ build_backend_in_container() {
   go_build "${BUILD_ROOT}/backend" "${BUILD_ROOT}/sophon-server" "./cmd/server"
   go_build "${BUILD_ROOT}/backend" "${BUILD_ROOT}/sophon-mcp-tools" "./cmd/mcp-tools"
   go_build "${BUILD_ROOT}/backend" "${BUILD_ROOT}/sophon-tool-runner" "./cmd/tool-runner"
-  exec_sh "test -x '${BUILD_ROOT}/sophon-server' && test -x '${BUILD_ROOT}/sophon-mcp-tools' && test -x '${BUILD_ROOT}/sophon-tool-runner'"
+  go_build "${BUILD_ROOT}/backend" "${BUILD_ROOT}/sophon-process-supervisor" "./cmd/process-supervisor"
+  exec_sh "test -x '${BUILD_ROOT}/sophon-server' && test -x '${BUILD_ROOT}/sophon-mcp-tools' && test -x '${BUILD_ROOT}/sophon-tool-runner' && test -x '${BUILD_ROOT}/sophon-process-supervisor'"
 }
 
 copy_resources() {
@@ -605,7 +606,8 @@ copy_resources() {
     '${APP_ROOT}/thirdTools' '${APP_ROOT}/licenses'"
   exec_sh "install -m 0755 '${BUILD_ROOT}/sophon-server' '${APP_ROOT}/backend/sophon-server' && \
     install -m 0755 '${BUILD_ROOT}/sophon-mcp-tools' '${APP_ROOT}/backend/sophon-mcp-tools' && \
-    install -m 0755 '${BUILD_ROOT}/sophon-tool-runner' '${APP_ROOT}/backend/sophon-tool-runner'"
+    install -m 0755 '${BUILD_ROOT}/sophon-tool-runner' '${APP_ROOT}/backend/sophon-tool-runner' && \
+    install -m 0755 '${BUILD_ROOT}/sophon-process-supervisor' '${APP_ROOT}/backend/sophon-process-supervisor'"
   "${DOCKER[@]}" cp "${FRONTEND_BUILDER}:/work/dist/." "$CONTAINER:${APP_ROOT}/frontend/dist/"
   for name in deploy roles skills tools customTools licenses; do
     "${DOCKER[@]}" cp "$ROOT_DIR/${name}/." "$CONTAINER:${APP_ROOT}/${name}/"

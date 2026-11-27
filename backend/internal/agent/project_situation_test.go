@@ -63,7 +63,7 @@ func TestProjectSituationIncludesGoalsIntentsFactsFindings(t *testing.T) {
 		"事实索引",
 		"目标IP",
 		"漏洞摘要",
-		"[critical/open/verified]",
+		"[critical/open/observed]",
 		"SQL 注入",
 		"https://a.com/x?id=1",
 		"未测试资产",

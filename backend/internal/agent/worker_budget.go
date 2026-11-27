@@ -136,7 +136,7 @@ func (b *workerBudgetState) noteBlockedCall() int {
 
 func isWorkerStateReadTool(name string) bool {
 	switch strings.ToLower(strings.TrimSpace(name)) {
-	case "project_list", "project_get", "project_next_targets", "project_graph_overview",
+	case "project_list", "project_get", "project_next_targets", "project_next_assets", "project_asset_closeout", "project_graph_overview",
 		"project_list_hypotheses", "planner_todo_list":
 		return true
 	default:

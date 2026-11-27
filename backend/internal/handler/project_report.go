@@ -18,11 +18,13 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 	"unicode"
 
 	"sophon/internal/database"
 	"sophon/internal/middleware"
+	"sophon/internal/procwrap"
 
 	"github.com/gin-gonic/gin"
 )
@@ -620,7 +622,7 @@ func renderProjectReportPDF(
 	}
 	renderCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
-	command := exec.CommandContext(
+	command := procwrap.CommandContext(
 		renderCtx,
 		chromium,
 		"--headless=new",
@@ -628,12 +630,14 @@ func renderProjectReportPDF(
 		"--disable-gpu",
 		"--disable-dev-shm-usage",
 		"--disable-background-networking",
+		"--disable-breakpad",
 		"--host-resolver-rules=MAP * ~NOTFOUND",
 		"--user-data-dir="+profilePath,
 		"--no-pdf-header-footer",
 		"--print-to-pdf="+pdfPath,
 		(&url.URL{Scheme: "file", Path: htmlPath}).String(),
 	)
+	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	output, err := command.CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("Chromium 生成 PDF 失败: %v: %s", err, truncateRunes(string(output), 500))

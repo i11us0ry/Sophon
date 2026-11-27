@@ -359,7 +359,7 @@ func TestTaskFinalizationRequiresAuditStateChange(t *testing.T) {
 		ProjectID:   "project-tools",
 		OwnerUserID: "user-1",
 		Name:        "源码包",
-		Kind:        "host",
+		Kind:        "source",
 		Value:       "source.zip",
 		Status:      "active",
 		Criticality: "medium",

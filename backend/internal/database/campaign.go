@@ -953,7 +953,7 @@ func (db *DB) ListCampaignAssets(
 	rows, err := db.QueryContext(
 		ctx,
 		`SELECT DISTINCT a.id, a.project_id, a.owner_user_id, a.name, a.kind,
-			a.value, a.status, a.source, a.criticality, a.risk_score,
+			a.value, a.normalized_value, a.quality_status, a.status, a.source, a.criticality, a.risk_score,
 			a.created_at, a.updated_at
 		 FROM assets a
 		 JOIN campaign_endpoints e ON e.asset_id = a.id
@@ -977,6 +977,8 @@ func (db *DB) ListCampaignAssets(
 			&item.Name,
 			&item.Kind,
 			&item.Value,
+			&item.NormalizedValue,
+			&item.QualityStatus,
 			&item.Status,
 			&item.Source,
 			&item.Criticality,
@@ -991,6 +993,39 @@ func (db *DB) ListCampaignAssets(
 		items = append(items, item)
 	}
 	return items, rows.Err()
+}
+
+func (db *DB) ListAuthorizedCampaignAssets(
+	ctx context.Context,
+	campaignID string,
+	ownerUserID string,
+) ([]Asset, error) {
+	campaignID = strings.TrimSpace(campaignID)
+	ownerUserID = strings.TrimSpace(ownerUserID)
+	var projectID string
+	if err := db.QueryRowContext(
+		ctx,
+		`SELECT project_id FROM conversation_batches WHERE id = ? AND owner_user_id = ?`,
+		campaignID,
+		ownerUserID,
+	).Scan(&projectID); err != nil {
+		return nil, err
+	}
+	project, err := db.GetProject(ctx, projectID, ownerUserID)
+	if err != nil {
+		return nil, err
+	}
+	assets, err := db.ListCampaignAssets(ctx, campaignID, ownerUserID)
+	if err != nil {
+		return nil, err
+	}
+	authorized := make([]Asset, 0, len(assets))
+	for _, asset := range assets {
+		if assetTestingEligible(project.Scope, asset) {
+			authorized = append(authorized, asset)
+		}
+	}
+	return authorized, nil
 }
 
 func (db *DB) CampaignSummary(

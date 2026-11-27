@@ -2140,7 +2140,8 @@ func localAnalysisToolAllowed(name string) bool {
 	switch name {
 	case "project_list", "project_get", "project_list_assets", "project_asset_card", "project_list_facts",
 		"project_record_fact", "project_record_audit", "project_list_findings", "project_get_finding", "project_report_finding",
-		"project_next_targets", "project_plan_hypotheses", "project_list_hypotheses",
+		"project_next_targets", "project_next_assets", "project_asset_closeout",
+		"project_plan_hypotheses", "project_list_hypotheses",
 		"project_start_hypothesis", "project_complete_hypothesis", "project_record_test",
 		"project_add_intent", "project_update_intent", "project_update_goal",
 		"project_add_goal", "project_add_hint",
@@ -2216,7 +2217,7 @@ func workerRoleToolAllowed(name string) bool {
 func coordinatedProjectReadToolAllowed(name string) bool {
 	name = strings.ToLower(strings.TrimSpace(name))
 	switch name {
-	case "project_next_targets", "project_asset_card", "project_fact_audit":
+	case "project_next_targets", "project_next_assets", "project_asset_card", "project_asset_closeout", "project_fact_audit":
 		return true
 	}
 	for _, prefix := range []string{
@@ -2273,7 +2274,8 @@ func assetInventoryToolAllowed(name string) bool {
 	case "project_list", "project_get", "project_list_assets", "project_insert_assets", "project_asset_card",
 		intelSearchToolName,
 		"project_list_facts", "project_query_memory", "project_list_findings", "project_get_finding",
-		"project_next_targets", "project_list_hypotheses", "project_list_entities",
+		"project_next_targets", "project_next_assets", "project_asset_closeout",
+		"project_list_hypotheses", "project_list_entities",
 		"project_memory_graph", "project_conversation_entities", "project_fact_audit",
 		"project_graph_overview", "project_graph_node", "project_list_chains",
 		"project_campaign_overview", searchProjectHistoryToolName, discoverProjectSourcesToolName:
@@ -2287,7 +2289,8 @@ func generalMissionToolAllowed(name string) bool {
 	switch name {
 	case readSkillToolName, "read_artifact", internetSearchToolName, intelSearchToolName,
 		"project_list", "project_get", "project_list_assets", "project_asset_card", "project_list_facts",
-		"project_list_findings", "project_get_finding", "project_next_targets", "project_list_hypotheses",
+		"project_list_findings", "project_get_finding", "project_next_targets",
+		"project_next_assets", "project_asset_closeout", "project_list_hypotheses",
 		"project_list_entities", "project_memory_graph", "project_conversation_entities",
 		"project_fact_audit", "project_graph_overview", "project_graph_node",
 		"project_query_memory", "project_campaign_overview", "project_list_chains",
@@ -2418,7 +2421,7 @@ func projectReadResourceMissionDecision(
 	var ok bool
 	switch toolName {
 	case "project_list":
-		_, ok = legacyProjectListToolName(resource)
+		ok = validProjectListResource(resource)
 	case "project_get":
 		_, ok = legacyProjectGetToolName(resource)
 	default:
@@ -2428,6 +2431,15 @@ func projectReadResourceMissionDecision(
 		return false, fmt.Sprintf("%s 必须指定有效的 resource", toolName)
 	}
 	return true, ""
+}
+
+func validProjectListResource(resource string) bool {
+	switch strings.ToLower(strings.TrimSpace(resource)) {
+	case "facts", "intents", "evidence_gaps", "assets", "findings", "hypotheses", "entities", "chains":
+		return true
+	default:
+		return false
+	}
 }
 
 func authorizeProjectReadResource(ctx context.Context, toolName, resource string) error {

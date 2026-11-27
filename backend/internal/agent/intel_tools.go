@@ -499,28 +499,12 @@ func intelAssetTarget(result intel.Result) (string, string, error) {
 		}{kind: "url", value: value})
 	}
 	if domain := strings.TrimSpace(result.Domain); domain != "" {
-		value := domain
-		if result.Port > 0 {
-			value = net.JoinHostPort(domain, strconv.Itoa(result.Port))
-		}
-		candidates = append(candidates,
-			struct {
-				kind  string
-				value string
-			}{kind: "domain", value: value},
-			struct {
-				kind  string
-				value string
-			}{kind: "host", value: value},
-		)
+		candidates = append(candidates, struct {
+			kind  string
+			value string
+		}{kind: "domain", value: domain})
 	}
 	if ip := strings.TrimSpace(result.IP); ip != "" {
-		if result.Port > 0 {
-			candidates = append(candidates, struct {
-				kind  string
-				value string
-			}{kind: "host", value: net.JoinHostPort(ip, strconv.Itoa(result.Port))})
-		}
 		candidates = append(candidates, struct {
 			kind  string
 			value string

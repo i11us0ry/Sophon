@@ -9,7 +9,41 @@ import (
 
 	"sophon/internal/database"
 	"sophon/internal/execctx"
+
+	"github.com/cloudwego/eino/components/model"
+	"github.com/cloudwego/eino/schema"
 )
+
+type cancelingProactiveUpdateModel struct {
+	cancel context.CancelFunc
+}
+
+func (m *cancelingProactiveUpdateModel) WithTools(_ []*schema.ToolInfo) (model.ToolCallingChatModel, error) {
+	return m, nil
+}
+
+func (m *cancelingProactiveUpdateModel) Generate(
+	_ context.Context,
+	_ []*schema.Message,
+	_ ...model.Option,
+) (*schema.Message, error) {
+	if m.cancel != nil {
+		m.cancel()
+	}
+	return nil, context.Canceled
+}
+
+func (m *cancelingProactiveUpdateModel) Stream(
+	ctx context.Context,
+	messages []*schema.Message,
+	opts ...model.Option,
+) (*schema.StreamReader[*schema.Message], error) {
+	message, err := m.Generate(ctx, messages, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return schema.StreamReaderFromArray([]*schema.Message{message}), nil
+}
 
 func createProactiveUpdateConversation(t *testing.T, service *Service, suffix string) (*database.Project, *database.Conversation) {
 	t.Helper()
@@ -99,6 +133,35 @@ func TestProcessBackgroundUpdateCreatesProactiveMessage(t *testing.T) {
 	}
 	if count, err := service.db.CountPendingBackgroundUpdates(ctx, conversation.ID); err != nil || count != 0 {
 		t.Fatalf("通知事件未完成: count=%d err=%v", count, err)
+	}
+}
+
+func TestBackgroundUpdateFallbackSurvivesGenerationContextCancellation(t *testing.T) {
+	service := newSubAgentTestService(t)
+	project, conversation := createProactiveUpdateConversation(t, service, "fallback-cancel")
+	ctx, cancel := context.WithCancel(context.Background())
+	service.model = &cancelingProactiveUpdateModel{cancel: cancel}
+	now := time.Now().UTC()
+	if err := service.db.EnqueueBackgroundUpdate(context.Background(), database.BackgroundUpdateEvent{
+		ID:             "update-fallback-cancel",
+		ConversationID: conversation.ID,
+		ProjectID:      project.ID,
+		OwnerUserID:    project.OwnerUserID,
+		Kind:           "worker_result",
+		Priority:       100,
+		DedupeKey:      "worker:cancel",
+		PayloadJSON:    `{"summary":"worker result"}`,
+		NotBefore:      now.Add(-time.Second),
+		CreatedAt:      now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !service.processBackgroundUpdateConversation(ctx, conversation.ID, now) {
+		t.Fatal("生成上下文取消后仍应交付降级消息")
+	}
+	messages, err := service.db.GetMessages(context.Background(), conversation.ID, 10)
+	if err != nil || len(messages) != 1 || !strings.Contains(messages[0].Content, "后台进展") {
+		t.Fatalf("降级消息未保存: %+v err=%v", messages, err)
 	}
 }
 

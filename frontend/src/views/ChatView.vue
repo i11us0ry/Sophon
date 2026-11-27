@@ -173,6 +173,13 @@ const projectInactive = computed(
 const projectBlocked = computed(
   () => projectRequired.value || projectUnavailable.value || projectInactive.value,
 )
+const canCreateConversation = computed(
+  () =>
+    chat.projects.some((project) => project.status === 'active') &&
+    !chat.creatingConversation &&
+    !chat.updatingConversationProject &&
+    !chat.streaming,
+)
 const composerBlocked = computed(
   () =>
     projectBlocked.value ||
@@ -334,6 +341,23 @@ function conversationInitial(conversation: Conversation) {
     return 'B'
   }
   return (Array.from(conversation.title.trim())[0] || 'C').toUpperCase()
+}
+
+function createConversationFromList() {
+  const selected = chat.projects.find(
+    (project) => project.id === chat.selectedProjectId && project.status === 'active',
+  )
+  const target = selected ?? chat.projects.find((project) => project.status === 'active')
+  if (!target) {
+    const current = chat.projects.find((project) => project.id === chat.selectedProjectId)
+    chat.error = current
+      ? t('chat.projectInactive', {
+          status: t(`projectStatus.${current.status}`),
+        })
+      : t('chat.projectRequired')
+    return
+  }
+  void chat.createConversation(target.id)
 }
 
 function conversationDisplayTitle(conversation: Conversation) {
@@ -1771,6 +1795,16 @@ onUnmounted(() => {
         </div>
         <div class="conversation-header-actions">
           <span class="conversation-count">{{ visibleConversations.length }}</span>
+          <button
+            class="button new-conversation-button"
+            type="button"
+            :title="t('chat.newConversation')"
+            :aria-label="t('chat.newConversation')"
+            :disabled="!canCreateConversation"
+            @click="createConversationFromList"
+          >
+            {{ chat.creatingConversation ? t('common.loading') : t('chat.newConversation') }}
+          </button>
         </div>
       </div>
 

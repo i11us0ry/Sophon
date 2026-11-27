@@ -9,7 +9,8 @@ import (
 
 // dedupeProjectGraph 清理历史重复的攻击路径节点与连线，并建立唯一索引（幂等）。
 // 背景：并发同步（多个写工具一轮内并行触发）曾产生重复节点/连线。
-// 规则：每组 (project_id, kind, asset_id, title/source_ref_id) 保留最早的一条，指向重复节点的连线重映射到保留节点，
+// 规则：来源节点按 (project_id, kind, source_ref_id)、无来源节点按
+// (project_id, kind, asset_id, title) 保留最早的一条，指向重复节点的连线重映射到保留节点，
 // 随后删除重复节点、自环与重复连线，最后创建唯一索引防止再次发生。
 func (db *DB) dedupeProjectGraph(ctx context.Context) error {
 	rows, err := db.QueryContext(
@@ -33,7 +34,10 @@ func (db *DB) dedupeProjectGraph(ctx context.Context) error {
 		if sourceRefID != "" {
 			identity = "ref:" + sourceRefID
 		}
-		key := projectID + "\x00" + kind + "\x00" + assetID + "\x00" + identity
+		key := projectID + "\x00" + kind + "\x00" + identity
+		if sourceRefID == "" {
+			key += "\x00asset:" + assetID
+		}
 		if keep, ok := canonical[key]; ok {
 			remap[id] = keep
 			duplicates = append(duplicates, id)
@@ -85,7 +89,7 @@ func (db *DB) dedupeProjectGraph(ctx context.Context) error {
 	for _, statement := range []string{
 		`DROP INDEX IF EXISTS idx_project_graph_nodes_unique`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_project_graph_nodes_ref_unique
-		 ON project_graph_nodes(project_id, kind, asset_id, source_ref_id)
+		 ON project_graph_nodes(project_id, kind, source_ref_id)
 		 WHERE source_ref_id <> ''`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_project_graph_nodes_title_unique
 		 ON project_graph_nodes(project_id, kind, asset_id, title)
@@ -97,6 +101,30 @@ func (db *DB) dedupeProjectGraph(ctx context.Context) error {
 			return fmt.Errorf("create project graph unique index: %w", err)
 		}
 	}
+	if _, err := db.ExecContext(
+		ctx,
+		`UPDATE project_graph_nodes
+		 SET asset_id = COALESCE((
+				SELECT v.asset_id FROM vulnerabilities v
+				WHERE v.project_id = project_graph_nodes.project_id
+				  AND v.id = project_graph_nodes.source_ref_id
+			 ), asset_id),
+			status = CASE (
+				SELECT v.status FROM vulnerabilities v
+				WHERE v.project_id = project_graph_nodes.project_id
+				  AND v.id = project_graph_nodes.source_ref_id
+			 )
+				WHEN 'pending_review' THEN 'open'
+				WHEN 'fixed' THEN 'dismissed'
+				WHEN 'ignored' THEN 'dismissed'
+				WHEN 'false_positive' THEN 'dismissed'
+				WHEN 'confirmed' THEN 'confirmed'
+				ELSE 'open'
+			 END
+		 WHERE kind = 'finding' AND source_ref_id <> ''`,
+	); err != nil {
+		return fmt.Errorf("reconcile project graph findings: %w", err)
+	}
 	return nil
 }
 
@@ -105,7 +133,7 @@ func (db *DB) dedupeProjectGraph(ctx context.Context) error {
 func (db *DB) UpsertProjectGraphNode(ctx context.Context, item GraphNode) (*GraphNode, error) {
 	conflictTarget := `(project_id, kind, asset_id, title) WHERE source_ref_id = ''`
 	if item.SourceRefID != "" {
-		conflictTarget = `(project_id, kind, asset_id, source_ref_id) WHERE source_ref_id <> ''`
+		conflictTarget = `(project_id, kind, source_ref_id) WHERE source_ref_id <> ''`
 	}
 	_, err := db.ExecContext(
 		ctx,
@@ -157,7 +185,6 @@ func (db *DB) GetProjectGraphNodeBySourceRef(
 	return db.getProjectGraphNodeByIdentity(ctx, GraphNode{
 		ProjectID:   strings.TrimSpace(projectID),
 		Kind:        strings.TrimSpace(kind),
-		AssetID:     strings.TrimSpace(assetID),
 		SourceRefID: sourceRefID,
 	})
 }
@@ -175,8 +202,8 @@ func (db *DB) getProjectGraphNodeByIdentity(
 		query = `SELECT id, project_id, kind, title, detail, status, confidence, severity,
 			asset_id, source, source_ref_id, pos_x, pos_y, created_at, updated_at
 			FROM project_graph_nodes
-			WHERE project_id = ? AND kind = ? AND asset_id = ? AND source_ref_id = ?`
-		args = []interface{}{item.ProjectID, item.Kind, item.AssetID, item.SourceRefID}
+			WHERE project_id = ? AND kind = ? AND source_ref_id = ?`
+		args = []interface{}{item.ProjectID, item.Kind, item.SourceRefID}
 	}
 	row := db.QueryRowContext(ctx, query, args...)
 	var stored GraphNode
