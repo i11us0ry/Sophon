@@ -377,18 +377,27 @@ func upsertProjectTestResult(
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(project_id, asset_id, dimension, technique) DO UPDATE SET
 			status = CASE
+				WHEN project_test_results.status = 'stopped'
+					AND project_test_results.state_reason = 'user_asset_stopped'
+				THEN 'stopped'
 				WHEN project_test_results.status IN ('tested_clean', 'confirmed', 'blocked', 'suspicious', 'stopped', 'exhausted')
 					AND excluded.status IN ('untested', 'running')
 				THEN project_test_results.status
 				ELSE excluded.status
 			END,
 			execution_state = CASE
+				WHEN project_test_results.status = 'stopped'
+					AND project_test_results.state_reason = 'user_asset_stopped'
+				THEN 'stopped'
 				WHEN project_test_results.execution_state IN ('done', 'blocked', 'stopped', 'exhausted')
 					AND excluded.execution_state IN ('open', 'running')
 				THEN project_test_results.execution_state
 				ELSE excluded.execution_state
 			END,
 			outcome_state = CASE
+				WHEN project_test_results.status = 'stopped'
+					AND project_test_results.state_reason = 'user_asset_stopped'
+				THEN project_test_results.outcome_state
 				WHEN project_test_results.outcome_state = 'confirmed' THEN 'confirmed'
 				WHEN project_test_results.outcome_state = 'suspicious' AND excluded.outcome_state IN ('unknown', 'clean')
 				THEN 'suspicious'
@@ -397,26 +406,44 @@ func upsertProjectTestResult(
 				ELSE excluded.outcome_state
 			END,
 			state_reason = CASE
+				WHEN project_test_results.status = 'stopped'
+					AND project_test_results.state_reason = 'user_asset_stopped'
+				THEN project_test_results.state_reason
 				WHEN excluded.state_reason <> '' THEN excluded.state_reason
 				ELSE project_test_results.state_reason
 			END,
 			result = CASE
+				WHEN project_test_results.status = 'stopped'
+					AND project_test_results.state_reason = 'user_asset_stopped'
+				THEN project_test_results.result
 				WHEN excluded.result = '' THEN project_test_results.result
 				ELSE excluded.result
 			END,
 			evidence = CASE
+				WHEN project_test_results.status = 'stopped'
+					AND project_test_results.state_reason = 'user_asset_stopped'
+				THEN project_test_results.evidence
 				WHEN excluded.evidence = '' THEN project_test_results.evidence
 				ELSE excluded.evidence
 			END,
 			evidence_refs = CASE
+				WHEN project_test_results.status = 'stopped'
+					AND project_test_results.state_reason = 'user_asset_stopped'
+				THEN project_test_results.evidence_refs
 				WHEN excluded.evidence_refs IN ('', '[]') THEN project_test_results.evidence_refs
 				ELSE excluded.evidence_refs
 			END,
 			confidence = CASE
+				WHEN project_test_results.status = 'stopped'
+					AND project_test_results.state_reason = 'user_asset_stopped'
+				THEN project_test_results.confidence
 				WHEN excluded.confidence > project_test_results.confidence THEN excluded.confidence
 				ELSE project_test_results.confidence
 			END,
 			finding_id = CASE
+				WHEN project_test_results.status = 'stopped'
+					AND project_test_results.state_reason = 'user_asset_stopped'
+				THEN project_test_results.finding_id
 				WHEN excluded.finding_id <> '' THEN excluded.finding_id
 				ELSE project_test_results.finding_id
 			END,
@@ -458,6 +485,9 @@ func upsertProjectTestResult(
 				ELSE project_test_results.last_started_at
 			END,
 			last_finished_at = CASE
+				WHEN project_test_results.status = 'stopped'
+					AND project_test_results.state_reason = 'user_asset_stopped'
+				THEN project_test_results.last_finished_at
 				WHEN excluded.last_finished_at > project_test_results.last_finished_at
 				THEN excluded.last_finished_at
 				ELSE project_test_results.last_finished_at
@@ -472,7 +502,12 @@ func upsertProjectTestResult(
 				THEN project_test_results.origin_run_id
 				ELSE excluded.origin_run_id
 			END,
-			updated_at = excluded.updated_at`,
+			updated_at = CASE
+				WHEN project_test_results.status = 'stopped'
+					AND project_test_results.state_reason = 'user_asset_stopped'
+				THEN project_test_results.updated_at
+				ELSE excluded.updated_at
+			END`,
 		item.ID,
 		item.ProjectID,
 		item.AssetID,

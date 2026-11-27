@@ -77,6 +77,59 @@ func TestProjectTestResultsUpsertAndCoverageState(t *testing.T) {
 	}
 }
 
+func TestUserStoppedProjectTestResultCannotBeOverwritten(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "test-result-user-stop.db"))
+	if err != nil {
+		t.Fatalf("打开数据库失败: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ctx := context.Background()
+	now := time.Now().UTC()
+	if err := db.CreateProject(ctx, Project{
+		ID: "project-test-user-stop", OwnerUserID: "user-1", Name: "停止测试终态",
+		Status: "active", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("创建项目失败: %v", err)
+	}
+	original, err := db.UpsertProjectTestResult(ctx, ProjectTestResult{
+		ID:          "user-stop-terminal",
+		ProjectID:   "project-test-user-stop",
+		AssetID:     "asset-user-stop-terminal",
+		Dimension:   "停止后并发写回",
+		Technique:   "http",
+		Status:      "stopped",
+		StateReason: AssetUserStopReason,
+		Result:      "用户停止探测",
+		Evidence:    "停止时证据",
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	})
+	if err != nil {
+		t.Fatalf("创建停止结果失败: %v", err)
+	}
+	updated, err := db.UpsertProjectTestResult(ctx, ProjectTestResult{
+		ProjectID: "project-test-user-stop",
+		AssetID:   "asset-user-stop-terminal",
+		Dimension: "停止后并发写回",
+		Technique: "http",
+		Status:    "tested_clean",
+		Result:    "Worker 后写回完成",
+		Evidence:  "HTTP 200",
+		CreatedAt: now.Add(time.Second),
+		UpdatedAt: now.Add(time.Second),
+	})
+	if err != nil {
+		t.Fatalf("并发写回失败: %v", err)
+	}
+	if updated.ID != original.ID || updated.Status != "stopped" ||
+		updated.ExecutionState != ProjectExecutionStopped ||
+		updated.StateReason != AssetUserStopReason ||
+		updated.Result != "用户停止探测" ||
+		updated.Evidence != "停止时证据" {
+		t.Fatalf("用户停止终态被覆盖: %+v", updated)
+	}
+}
+
 func TestClaimNextProjectHypothesisIsAtomic(t *testing.T) {
 	db, err := Open(filepath.Join(t.TempDir(), "claim-results.db"))
 	if err != nil {

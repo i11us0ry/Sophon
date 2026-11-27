@@ -19,8 +19,11 @@ import (
 )
 
 const (
-	maxHypothesesPerPlan  = 4
-	maxFollowUpPerFinding = 5
+	maxHypothesesPerPlan   = 4
+	maxFollowUpPerFinding  = 5
+	assetAccessBlockLimit  = 2
+	assetAccessBlockWindow = 10 * time.Minute
+	accessBlockReasonTag   = "[access_block:"
 )
 
 type hypothesisInput struct {
@@ -130,6 +133,14 @@ func (s *Service) planHypothesesTool() tool.BaseTool {
 					assetID, err = s.validateProjectAsset(ctx, projectID, userID, assetID)
 					if err != nil {
 						return "", err
+					}
+					blocked, blockedErr := s.db.ProjectAssetWorkBlocked(ctx, projectID, assetID)
+					if blockedErr != nil {
+						return "", fmt.Errorf("读取资产阻断状态失败: %w", blockedErr)
+					}
+					if blocked {
+						skipped++
+						continue
 					}
 				} else if !assetlessSourceAudit {
 					return "", fmt.Errorf("asset_id 不能为空；只有项目无网络资产且存在上传附件时才能创建源码审计假设")
@@ -478,12 +489,14 @@ func (s *Service) completeHypothesisTool() tool.BaseTool {
 			"evidence_refs": stringArrayParam("证据引用数组；" + evidenceReferenceFormatHint),
 			"confidence":    integerParam("置信度 0-100"),
 			"finding_id":    stringParam("confirmed 时关联漏洞 id"),
+			"block_kind":    stringParam("blocked 时填写 waf/target_unreachable/other；同一资产连续 2 次访问阻断会停止该资产全部意图"),
 		},
 		run: func(ctx context.Context, raw string) (string, error) {
 			var request struct {
 				HypothesisID string   `json:"hypothesis_id"`
 				Status       string   `json:"status"`
 				StateReason  string   `json:"state_reason"`
+				BlockKind    string   `json:"block_kind"`
 				Result       string   `json:"result"`
 				Evidence     string   `json:"evidence"`
 				EvidenceRefs []string `json:"evidence_refs"`
@@ -504,6 +517,9 @@ func (s *Service) completeHypothesisTool() tool.BaseTool {
 			if err := validateWorkerHypothesisAccess(ctx, item); err != nil {
 				return "", err
 			}
+			if item.Status == "stopped" && item.StateReason == database.AssetUserStopReason {
+				return "", fmt.Errorf("资产已被用户停止探测，禁止覆盖已停止的测试假设")
+			}
 			status, ok := database.NormalizeProjectTestResultStatus(request.Status)
 			if !ok || !database.IsProjectTestResultTerminal(status) {
 				return "", fmt.Errorf("完成状态必须是 tested_clean/blocked/suspicious/confirmed/stopped/exhausted")
@@ -511,6 +527,7 @@ func (s *Service) completeHypothesisTool() tool.BaseTool {
 			result := truncateProjectText(request.Result, projectToolLongText)
 			evidence := truncateProjectText(request.Evidence, projectToolLongText)
 			evidenceRefs := append([]string(nil), request.EvidenceRefs...)
+			stateReason := strings.TrimSpace(request.StateReason)
 			switch status {
 			case "tested_clean":
 				if result == "" || (evidence == "" && len(evidenceRefs) == 0) {
@@ -543,12 +560,21 @@ func (s *Service) completeHypothesisTool() tool.BaseTool {
 					return "", err
 				}
 			case "stopped", "exhausted":
-				if result == "" && strings.TrimSpace(request.StateReason) == "" {
+				if result == "" && stateReason == "" {
 					return "", fmt.Errorf("%s 必须说明原因", status)
 				}
 			}
+			if status == "blocked" {
+				blockKind := resolveAccessBlockKind(
+					request.BlockKind,
+					stateReason,
+					result,
+					evidence,
+				)
+				stateReason = formatAccessBlockStateReason(blockKind, stateReason, result)
+			}
 			item.Status = status
-			item.StateReason = strings.TrimSpace(request.StateReason)
+			item.StateReason = stateReason
 			item.Result = result
 			item.Evidence = evidence
 			item.EvidenceRefs = evidenceRefs
@@ -566,16 +592,194 @@ func (s *Service) completeHypothesisTool() tool.BaseTool {
 				saved.ExecutionState,
 				saved.StateReason,
 			)
-			return fmt.Sprintf(
+			message := fmt.Sprintf(
 				"测试假设已完成：%s/%s，status=%s，confidence=%d（id=%s）",
 				saved.Dimension,
 				orDefaultProjectToolValue(saved.Technique, "-"),
 				saved.Status,
 				saved.Confidence,
 				saved.ID,
-			), nil
+			)
+			if saved.Status == "blocked" && saved.AssetID != "" {
+				blocked, blockReason, blockErr := s.blockAssetAfterRepeatedAccessFailure(
+					ctx,
+					projectID,
+					userID,
+					saved.AssetID,
+				)
+				if blockErr != nil {
+					return "", fmt.Errorf("检查资产级访问阻断失败: %w", blockErr)
+				}
+				if blocked {
+					message += "；" + blockReason
+				}
+			}
+			return message, nil
 		},
 	}
+}
+
+func resolveAccessBlockKind(explicit, stateReason, result, evidence string) string {
+	switch kind := strings.ToLower(strings.TrimSpace(explicit)); kind {
+	case "waf", "target_unreachable", "other":
+		return kind
+	}
+	text := strings.ToLower(strings.Join([]string{stateReason, result, evidence}, "\n"))
+	switch {
+	case containsAnyText(text,
+		"waf",
+		"web application firewall",
+		"challenge",
+		"cloudflare",
+		"云盾",
+		"安全狗",
+		"雷池",
+		"访问被拦截",
+		"拦截页",
+	):
+		return "waf"
+	case containsAnyText(text,
+		"target_unreachable",
+		"unreachable",
+		"connection refused",
+		"no route to host",
+		"no such host",
+		"name resolution",
+		"dns",
+		"timed out",
+		"timeout",
+		"无法访问",
+		"不可达",
+		"无法连接",
+		"连接被拒绝",
+		"拒绝连接",
+		"关站",
+		"停止服务",
+		"超时",
+	):
+		return "target_unreachable"
+	default:
+		return "other"
+	}
+}
+
+func formatAccessBlockStateReason(kind, stateReason, result string) string {
+	if kind == "" || kind == "other" {
+		return strings.TrimSpace(stateReason)
+	}
+	reason := strings.TrimSpace(stateReason)
+	if reason == "" {
+		reason = strings.TrimSpace(result)
+	}
+	if reason == "" {
+		reason = "目标访问受阻"
+	}
+	return accessBlockReasonTag + kind + "] " + reason
+}
+
+func accessBlockKindFromStateReason(stateReason string) string {
+	value := strings.ToLower(strings.TrimSpace(stateReason))
+	switch {
+	case strings.HasPrefix(value, accessBlockReasonTag+"waf]"):
+		return "waf"
+	case strings.HasPrefix(value, accessBlockReasonTag+"target_unreachable]"):
+		return "target_unreachable"
+	default:
+		return ""
+	}
+}
+
+func accessBlockKindLabel(kind string) string {
+	switch kind {
+	case "waf":
+		return "WAF 拦截"
+	case "target_unreachable":
+		return "目标不可达"
+	default:
+		return "访问受阻"
+	}
+}
+
+func (s *Service) blockAssetAfterRepeatedAccessFailure(
+	ctx context.Context,
+	projectID string,
+	userID string,
+	assetID string,
+) (bool, string, error) {
+	items, err := s.db.RecentTerminalProjectTestResultsByAsset(
+		ctx,
+		projectID,
+		assetID,
+		time.Now().UTC().Add(-assetAccessBlockWindow),
+		assetAccessBlockLimit,
+	)
+	if err != nil {
+		return false, "", err
+	}
+	if len(items) < assetAccessBlockLimit {
+		return false, "", nil
+	}
+	if strings.TrimSpace(items[0].IntentID) == "" ||
+		strings.TrimSpace(items[0].IntentID) == strings.TrimSpace(items[1].IntentID) {
+		return false, "", nil
+	}
+	firstKind := ""
+	secondKind := ""
+	for index := 0; index < assetAccessBlockLimit; index++ {
+		if items[index].Status != "blocked" {
+			return false, "", nil
+		}
+		kind := accessBlockKindFromStateReason(items[index].StateReason)
+		if kind == "" {
+			return false, "", nil
+		}
+		if index == 0 {
+			firstKind = kind
+		} else {
+			secondKind = kind
+		}
+	}
+	blocked, err := s.db.ProjectAssetWorkBlocked(ctx, projectID, assetID)
+	if err != nil || blocked {
+		return false, "", err
+	}
+	label := accessBlockKindLabel(firstKind)
+	if secondKind != firstKind {
+		label = accessBlockKindLabel(firstKind) + "、" + accessBlockKindLabel(secondKind)
+	}
+	lastResult := truncateProjectText(items[0].Result, projectToolLongText)
+	reason := fmt.Sprintf(
+		"资产连续 %d 次访问受阻（%s），已停止该资产全部待办意图。触发测试：%s、%s。最后一次结论：%s",
+		assetAccessBlockLimit,
+		label,
+		items[1].ID,
+		items[0].ID,
+		orDefaultProjectToolValue(lastResult, "未记录详细结论"),
+	)
+	count, err := s.db.BlockProjectAssetForAccessFailure(
+		ctx,
+		projectID,
+		userID,
+		assetID,
+		reason,
+	)
+	if err != nil {
+		return false, "", err
+	}
+	if count == 0 {
+		return false, "", nil
+	}
+	s.auditAssetWork(ctx, "asset_work.access_blocked", assetID, reason)
+	stopped := s.StopAssetWorkers(projectID, assetID, reason)
+	if stopped > 0 {
+		s.auditAssetWork(
+			ctx,
+			"asset_work.workers_stopped",
+			assetID,
+			fmt.Sprintf("资产级阻断后停止 %d 个运行中的 Worker", stopped),
+		)
+	}
+	return true, fmt.Sprintf("已阻断该资产 %d 个未完成意图，停止 %d 个 Worker；%s", count, stopped, reason), nil
 }
 
 func validateWorkerHypothesisAccess(ctx context.Context, item *database.ProjectTestResult) error {

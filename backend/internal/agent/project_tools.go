@@ -718,6 +718,8 @@ func (s *Service) recordTestResultTool() tool.BaseTool {
 			"dimension":     stringParam("测试维度，例如 SQL注入、XSS、认证", true),
 			"technique":     stringParam("测试技术，例如 boolean/error/union/time-based"),
 			"status":        stringParam("状态：untested/running/tested_clean/blocked/suspicious/confirmed", true),
+			"state_reason":  stringParam("执行终态原因，blocked 时必须写清具体阻断原因"),
+			"block_kind":    stringParam("blocked 时填写 waf/target_unreachable/other；同一资产连续 2 次访问阻断会停止该资产全部意图"),
 			"result":        stringParam("测试结论或负向结果"),
 			"evidence":      stringParam("证据摘要"),
 			"evidence_refs": stringArrayParam("证据引用数组；" + evidenceReferenceFormatHint),
@@ -731,6 +733,8 @@ func (s *Service) recordTestResultTool() tool.BaseTool {
 				Dimension    string   `json:"dimension"`
 				Technique    string   `json:"technique"`
 				Status       string   `json:"status"`
+				StateReason  string   `json:"state_reason"`
+				BlockKind    string   `json:"block_kind"`
 				Result       string   `json:"result"`
 				Evidence     string   `json:"evidence"`
 				EvidenceRefs []string `json:"evidence_refs"`
@@ -776,6 +780,7 @@ func (s *Service) recordTestResultTool() tool.BaseTool {
 			result := truncateProjectText(request.Result, projectToolLongText)
 			evidence := truncateProjectText(request.Evidence, projectToolLongText)
 			evidenceRefs := append([]string(nil), request.EvidenceRefs...)
+			stateReason := strings.TrimSpace(request.StateReason)
 			switch status {
 			case "tested_clean":
 				if result == "" || (evidence == "" && len(evidenceRefs) == 0) {
@@ -806,6 +811,15 @@ func (s *Service) recordTestResultTool() tool.BaseTool {
 					return "", fmt.Errorf("blocked 必须说明阻断原因")
 				}
 			}
+			if status == "blocked" {
+				blockKind := resolveAccessBlockKind(
+					request.BlockKind,
+					stateReason,
+					result,
+					evidence,
+				)
+				stateReason = formatAccessBlockStateReason(blockKind, stateReason, result)
+			}
 			confidence := int(request.Confidence)
 			if confidence < 0 {
 				confidence = 0
@@ -831,10 +845,14 @@ func (s *Service) recordTestResultTool() tool.BaseTool {
 				if err := validateWorkerHypothesisAccess(ctx, current); err != nil {
 					return "", err
 				}
+				if current.Status == "stopped" && current.StateReason == database.AssetUserStopReason {
+					return "", fmt.Errorf("资产已被用户停止探测，禁止覆盖已停止的测试结果")
+				}
 				if assetID != "" && strings.TrimSpace(current.AssetID) != assetID {
 					return "", fmt.Errorf("当前 Worker 假设不属于指定资产")
 				}
 				current.Status = status
+				current.StateReason = stateReason
 				current.Result = result
 				current.Evidence = evidence
 				current.EvidenceRefs = evidenceRefs
@@ -869,6 +887,7 @@ func (s *Service) recordTestResultTool() tool.BaseTool {
 					Dimension:            dimension,
 					Technique:            technique,
 					Status:               status,
+					StateReason:          stateReason,
 					Result:               result,
 					Evidence:             evidence,
 					EvidenceRefs:         evidenceRefs,
@@ -897,14 +916,29 @@ func (s *Service) recordTestResultTool() tool.BaseTool {
 					return "", fmt.Errorf("更新 Campaign 覆盖率失败: %w", err)
 				}
 			}
-			return fmt.Sprintf(
+			message := fmt.Sprintf(
 				"已记录测试结果：%s / %s，状态 %s，置信度 %d（id %s）",
 				saved.Dimension,
 				orDefaultProjectToolValue(saved.Technique, "-"),
 				saved.Status,
 				saved.Confidence,
 				saved.ID,
-			), nil
+			)
+			if saved.Status == "blocked" && saved.AssetID != "" {
+				blocked, blockReason, blockErr := s.blockAssetAfterRepeatedAccessFailure(
+					ctx,
+					projectID,
+					userID,
+					saved.AssetID,
+				)
+				if blockErr != nil {
+					return "", fmt.Errorf("检查资产级访问阻断失败: %w", blockErr)
+				}
+				if blocked {
+					message += "；" + blockReason
+				}
+			}
+			return message, nil
 		},
 	}
 }
@@ -2937,6 +2971,13 @@ func (s *Service) addIntentTool() tool.BaseTool {
 			assetID, err = s.validateProjectAsset(ctx, projectID, userID, assetID)
 			if err != nil {
 				return "", err
+			}
+			blocked, err := s.db.ProjectAssetWorkBlocked(ctx, projectID, assetID)
+			if err != nil {
+				return "", fmt.Errorf("读取资产阻断状态失败: %w", err)
+			}
+			if blocked {
+				return "", fmt.Errorf("资产 %s 已被资产级访问阻断，需用户重开资产后才能新增意图", assetID)
 			}
 			if err := s.validateCampaignAssetScope(ctx, assetID); err != nil {
 				return "", err

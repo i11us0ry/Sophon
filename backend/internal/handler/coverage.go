@@ -1,6 +1,8 @@
 package handler
 
 import (
+	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -200,4 +202,64 @@ func (h *ProjectHandler) ReopenAssetWork(c *gin.Context) {
 		"用户手动重开资产工作项",
 	)
 	c.JSON(http.StatusOK, gin.H{"reopened": true, "assetId": assetID})
+}
+
+func (h *ProjectHandler) StopAssetWork(c *gin.Context) {
+	project, ok := h.projectForRequest(c)
+	if !ok {
+		return
+	}
+	user := middleware.UserFromContext(c)
+	if user == nil {
+		unauthorized(c)
+		return
+	}
+	assetID := strings.TrimSpace(c.Param("assetId"))
+	if assetID == "" {
+		badRequest(c, "invalid_asset_id", "资产 id 不能为空")
+		return
+	}
+	reason := "用户停止资产探测"
+	result, err := h.db.StopProjectAssetWork(
+		c.Request.Context(),
+		project.ID,
+		user.ID,
+		assetID,
+		reason,
+	)
+	if err != nil {
+		if errors.Is(err, database.ErrAssetWorkNotStoppable) {
+			c.JSON(http.StatusConflict, gin.H{
+				"code":    "asset_not_stoppable",
+				"message": "资产当前状态不允许停止探测",
+			})
+			return
+		}
+		internalError(c, "project_asset_stop_failed", "停止资产探测失败")
+		return
+	}
+	stoppedWorkers := 0
+	if h.assetAgentController != nil {
+		stoppedWorkers = h.assetAgentController.StopAssetWorkers(project.ID, assetID, reason)
+	}
+	detail := fmt.Sprintf(
+		"用户停止资产探测：意图 %d 个，测试假设 %d 个，Worker %d 个",
+		result.StoppedIntents,
+		result.StoppedTests,
+		stoppedWorkers,
+	)
+	h.auditProjectAction(
+		c,
+		"project_asset_work.stop",
+		"project_asset_work",
+		assetID,
+		detail,
+	)
+	c.JSON(http.StatusOK, gin.H{
+		"stopped":        true,
+		"assetId":        assetID,
+		"stoppedIntents": result.StoppedIntents,
+		"stoppedTests":   result.StoppedTests,
+		"stoppedWorkers": stoppedWorkers,
+	})
 }

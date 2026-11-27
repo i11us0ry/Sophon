@@ -16,9 +16,11 @@ type workerControl struct {
 	cancel      context.CancelFunc
 	cancelCause context.CancelCauseFunc
 
-	mu      sync.Mutex
-	steer   []string
-	stopped bool
+	mu        sync.Mutex
+	steer     []string
+	stopped   bool
+	projectID string
+	assetID   string
 
 	stopReason  string
 	stopMessage string
@@ -110,6 +112,41 @@ func (c *workerControl) snapshot() map[string]interface{} {
 		"stopReason":   c.stopReason,
 		"stopMessage":  c.stopMessage,
 	}
+}
+
+func (c *workerControl) bindAsset(projectID, assetID string) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	c.projectID = strings.TrimSpace(projectID)
+	c.assetID = strings.TrimSpace(assetID)
+	c.mu.Unlock()
+}
+
+func (s *Service) StopAssetWorkers(projectID, assetID, reason string) int {
+	if s == nil || strings.TrimSpace(assetID) == "" {
+		return 0
+	}
+	s.workerControlMu.Lock()
+	controls := make([]*workerControl, 0)
+	for _, control := range s.workerControls {
+		if control == nil {
+			continue
+		}
+		control.mu.Lock()
+		matches := control.assetID == strings.TrimSpace(assetID) &&
+			(control.projectID == "" || control.projectID == strings.TrimSpace(projectID))
+		control.mu.Unlock()
+		if matches {
+			controls = append(controls, control)
+		}
+	}
+	s.workerControlMu.Unlock()
+	for _, control := range controls {
+		control.stop("asset_access_blocked", reason)
+	}
+	return len(controls)
 }
 
 func withWorkerControl(ctx context.Context, control *workerControl) context.Context {

@@ -621,3 +621,215 @@ func TestRequalifyLegacyUploadCleanHypotheses(t *testing.T) {
 		t.Fatalf("非上传假设不应被历史门禁降级: %+v err=%v", nonUploadAfter, err)
 	}
 }
+
+func TestRepeatedAssetAccessFailuresBlockAllAssetIntents(t *testing.T) {
+	service, ctx := openProjectToolService(t, true)
+	now := time.Now().UTC()
+	if err := service.db.CreateAsset(ctx, database.Asset{
+		ID: "asset-access-block", ProjectID: "project-tools", OwnerUserID: "user-1",
+		Name: "WAF 目标", Kind: "url", Value: "https://waf.example/",
+		Status: "active", Criticality: "high", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("创建资产失败: %v", err)
+	}
+	out, err := invokeProjectTool(t, service, ctx, "project_plan_hypotheses", map[string]interface{}{
+		"hypotheses_json": `[
+			{"asset_id":"asset-access-block","dimension":"入口 A","technique":"http","rationale":"验证入口 A","expected_evidence":"请求结果","priority":90},
+			{"asset_id":"asset-access-block","dimension":"入口 B","technique":"http","rationale":"验证入口 B","expected_evidence":"请求结果","priority":80},
+			{"asset_id":"asset-access-block","dimension":"入口 C","technique":"http","rationale":"验证入口 C","expected_evidence":"请求结果","priority":70}
+		]`,
+	})
+	if err != nil || !strings.Contains(out, "写入 3 个") {
+		t.Fatalf("规划假设失败: %q err=%v", out, err)
+	}
+	items, err := service.db.ListProjectHypotheses(ctx, "project-tools", "untested", 10)
+	if err != nil || len(items) != 3 {
+		t.Fatalf("读取假设失败: %+v err=%v", items, err)
+	}
+	if _, err := invokeProjectTool(t, service, ctx, "project_complete_hypothesis", map[string]interface{}{
+		"hypothesis_id": items[0].ID,
+		"status":        "blocked",
+		"block_kind":    "waf",
+		"state_reason":  "请求被 WAF Challenge 拦截",
+		"result":        "入口 A 返回 WAF Challenge",
+	}); err != nil {
+		t.Fatalf("第一次阻断写回失败: %v", err)
+	}
+	work, err := service.db.GetProjectAssetWork(ctx, "project-tools", "user-1", "asset-access-block")
+	if err != nil {
+		t.Fatalf("读取资产工作项失败: %v", err)
+	}
+	if work != nil && work.WorkState == database.AssetWorkBlocked {
+		t.Fatalf("单次阻断不应直接阻断资产: %+v", work)
+	}
+	var runningWorkerCancelled bool
+	runningWorker := service.registerWorkerControl("conv-tools", items[2].ID, func() {
+		runningWorkerCancelled = true
+	})
+	runningWorker.bindAsset("project-tools", "asset-access-block")
+	out, err = invokeProjectTool(t, service, ctx, "project_complete_hypothesis", map[string]interface{}{
+		"hypothesis_id": items[1].ID,
+		"status":        "blocked",
+		"block_kind":    "target_unreachable",
+		"state_reason":  "连接目标持续超时",
+		"result":        "入口 B 连续连接超时",
+	})
+	if err != nil || !strings.Contains(out, "已阻断该资产 3 个未完成意图") {
+		t.Fatalf("第二次阻断未触发资产熔断: %q err=%v", out, err)
+	}
+	if !runningWorkerCancelled {
+		t.Fatal("资产级阻断后应取消同资产运行中的 Worker")
+	}
+	work, err = service.db.GetProjectAssetWork(ctx, "project-tools", "user-1", "asset-access-block")
+	if err != nil || work == nil || work.WorkState != database.AssetWorkBlocked {
+		t.Fatalf("资产工作项应被阻断: %+v err=%v", work, err)
+	}
+	if !strings.Contains(work.StateReason, "连续 2 次访问受阻") {
+		t.Fatalf("资产阻断原因不完整: %q", work.StateReason)
+	}
+	nodes, err := service.db.ListProjectGraphNodesByAsset(ctx, "project-tools", "asset-access-block")
+	if err != nil {
+		t.Fatalf("读取攻击路径失败: %v", err)
+	}
+	intentCount := 0
+	for _, node := range nodes {
+		if node.Kind != "intent" {
+			continue
+		}
+		intentCount++
+		if node.Status != "blocked" || !strings.Contains(node.Detail, "资产连续 2 次访问受阻") {
+			t.Fatalf("资产内意图应全部阻断并注明原因: %+v", node)
+		}
+	}
+	if intentCount != 3 {
+		t.Fatalf("意图数量异常: %d", intentCount)
+	}
+	if _, err := invokeProjectTool(t, service, ctx, "project_complete_hypothesis", map[string]interface{}{
+		"hypothesis_id": items[2].ID,
+		"status":        "tested_clean",
+		"result":        "运行中的 Worker 完成了当前请求",
+		"evidence":      "HTTP 200",
+	}); err != nil {
+		t.Fatalf("运行中假设完成失败: %v", err)
+	}
+	inFlightIntent, err := service.db.GetProjectGraphNode(ctx, items[2].IntentID, "project-tools")
+	if err != nil || inFlightIntent == nil || inFlightIntent.Status != "blocked" {
+		t.Fatalf("资产阻断后运行中的 Worker 不应重新打开意图: %+v err=%v", inFlightIntent, err)
+	}
+	out, err = invokeProjectTool(t, service, ctx, "project_plan_hypotheses", map[string]interface{}{
+		"hypotheses_json": `[{"asset_id":"asset-access-block","dimension":"入口 D","technique":"http","rationale":"不应继续规划","expected_evidence":"请求结果"}]`,
+	})
+	if err != nil || !strings.Contains(out, "跳过 1 个") {
+		t.Fatalf("已阻断资产不应继续规划: %q err=%v", out, err)
+	}
+	if _, err := invokeProjectTool(t, service, ctx, "project_add_intent", map[string]interface{}{
+		"title":    "不应新增的意图",
+		"asset_id": "asset-access-block",
+	}); err == nil || !strings.Contains(err.Error(), "资产级访问阻断") {
+		t.Fatalf("已阻断资产不应允许新增意图: %v", err)
+	}
+	if _, err := invokeProjectTool(t, service, ctx, "project_sync_graph", map[string]interface{}{}); err != nil {
+		t.Fatalf("同步攻击路径失败: %v", err)
+	}
+	nodes, err = service.db.ListProjectGraphNodesByAsset(ctx, "project-tools", "asset-access-block")
+	if err != nil {
+		t.Fatalf("重新读取攻击路径失败: %v", err)
+	}
+	for _, node := range nodes {
+		if node.Source == "blocked-follow-up" {
+			t.Fatalf("资产级阻断后不应派生普通替代意图: %+v", node)
+		}
+	}
+}
+
+func TestStaleAccessFailuresDoNotBlockAsset(t *testing.T) {
+	service, ctx := openProjectToolService(t, true)
+	now := time.Now().UTC()
+	if err := service.db.CreateAsset(ctx, database.Asset{
+		ID: "asset-stale-access", ProjectID: "project-tools", OwnerUserID: "user-1",
+		Name: "陈旧阻断目标", Kind: "url", Value: "https://stale.example/",
+		Status: "active", Criticality: "high", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("创建资产失败: %v", err)
+	}
+	for index, item := range []struct {
+		id        string
+		intentID  string
+		dimension string
+	}{
+		{id: "stale-test-a", intentID: "stale-intent-a", dimension: "陈旧入口 A"},
+		{id: "stale-test-b", intentID: "stale-intent-b", dimension: "陈旧入口 B"},
+	} {
+		if _, err := service.db.UpsertProjectTestResult(ctx, database.ProjectTestResult{
+			ID:          item.id,
+			ProjectID:   "project-tools",
+			AssetID:     "asset-stale-access",
+			Dimension:   item.dimension,
+			Technique:   "http",
+			Status:      "blocked",
+			StateReason: formatAccessBlockStateReason("waf", "历史 WAF 拦截", ""),
+			Result:      "历史 WAF 拦截",
+			IntentID:    item.intentID,
+			CreatedAt:   now.Add(-time.Duration(index+1) * time.Hour),
+			UpdatedAt:   now.Add(-time.Duration(index+1) * time.Hour),
+		}); err != nil {
+			t.Fatalf("创建陈旧测试结果失败: %v", err)
+		}
+		staleAt := now.Add(-11 * time.Minute).Unix()
+		if _, err := service.db.ExecContext(
+			ctx,
+			`UPDATE project_test_results SET last_finished_at = ?, updated_at = ? WHERE id = ?`,
+			staleAt,
+			staleAt,
+			item.id,
+		); err != nil {
+			t.Fatalf("更新陈旧时间失败: %v", err)
+		}
+	}
+	blocked, _, err := service.blockAssetAfterRepeatedAccessFailure(
+		ctx,
+		"project-tools",
+		"user-1",
+		"asset-stale-access",
+	)
+	if err != nil {
+		t.Fatalf("检查陈旧资产阻断失败: %v", err)
+	}
+	if blocked {
+		t.Fatal("超过时间窗口的历史失败不应触发资产阻断")
+	}
+}
+
+func TestUserStoppedAssetCannotOverwriteStoppedHypothesis(t *testing.T) {
+	service, ctx := openProjectToolService(t, true)
+	now := time.Now().UTC()
+	if err := service.db.CreateAsset(ctx, database.Asset{
+		ID: "asset-user-stopped-writeback", ProjectID: "project-tools", OwnerUserID: "user-1",
+		Name: "用户停止写回", Kind: "url", Value: "https://user-stop.example/",
+		Status: "active", Criticality: "high", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("创建资产失败: %v", err)
+	}
+	item, err := service.db.UpsertProjectTestResult(ctx, database.ProjectTestResult{
+		ProjectID:   "project-tools",
+		AssetID:     "asset-user-stopped-writeback",
+		Dimension:   "已停止测试",
+		Technique:   "http",
+		Status:      "stopped",
+		StateReason: database.AssetUserStopReason,
+		IntentID:    "intent-user-stopped-writeback",
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	})
+	if err != nil {
+		t.Fatalf("创建已停止测试失败: %v", err)
+	}
+	if _, err := invokeProjectTool(t, service, ctx, "project_complete_hypothesis", map[string]interface{}{
+		"hypothesis_id": item.ID,
+		"status":        "tested_clean",
+		"result":        "不应覆盖停止状态",
+		"evidence":      "HTTP 200",
+	}); err == nil || !strings.Contains(err.Error(), "用户停止探测") {
+		t.Fatalf("用户停止资产后不应允许覆盖测试状态: %v", err)
+	}
+}

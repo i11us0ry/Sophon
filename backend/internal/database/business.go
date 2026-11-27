@@ -12,6 +12,24 @@ import (
 
 var ErrProjectInactive = errors.New("项目当前状态不允许执行 Agent 工作")
 
+const assetDeleteIDBatchSize = 400
+
+type AssetDeleteImpact struct {
+	AssetID          string `json:"assetId"`
+	ProjectID        string `json:"projectId"`
+	AssetName        string `json:"assetName"`
+	AssetValue       string `json:"assetValue"`
+	Intents          int64  `json:"intents"`
+	Facts            int64  `json:"facts"`
+	MemoryEntities   int64  `json:"memoryEntities"`
+	Findings         int64  `json:"findings"`
+	Tests            int64  `json:"tests"`
+	GraphNodes       int64  `json:"graphNodes"`
+	CampaignRecords  int64  `json:"campaignRecords"`
+	Conversations    int64  `json:"conversations"`
+	VulnerabilityFPs int64  `json:"vulnerabilityFingerprints"`
+}
+
 type Project struct {
 	ID          string    `json:"id"`
 	OwnerUserID string    `json:"ownerUserId"`
@@ -1360,10 +1378,10 @@ func (db *DB) GetAsset(ctx context.Context, id, ownerUserID string) (*Asset, err
 	return &item, nil
 }
 
-func (db *DB) DeleteAsset(ctx context.Context, id, ownerUserID string) error {
+func (db *DB) DeleteAsset(ctx context.Context, id, ownerUserID string) (*AssetDeleteImpact, error) {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer func() { _ = tx.Rollback() }()
 
@@ -1376,10 +1394,14 @@ func (db *DB) DeleteAsset(ctx context.Context, id, ownerUserID string) error {
 		id,
 		ownerUserID,
 	).Scan(&projectID, &name, &value); err != nil {
-		return err
+		return nil, err
 	}
-	if err := clearAssetFactRelations(ctx, tx, projectID, id, name, value); err != nil {
-		return err
+	impact, err := assetDeleteImpact(ctx, tx, projectID, ownerUserID, id, name, value)
+	if err != nil {
+		return nil, err
+	}
+	if err := deleteAssetOwnedData(ctx, tx, projectID, ownerUserID, id); err != nil {
+		return nil, err
 	}
 	result, err := tx.ExecContext(
 		ctx,
@@ -1388,31 +1410,468 @@ func (db *DB) DeleteAsset(ctx context.Context, id, ownerUserID string) error {
 		ownerUserID,
 	)
 	if err := requireAffected(result, err); err != nil {
-		return err
+		return nil, err
 	}
-	if _, err := tx.ExecContext(
+	if err := insertAssetDeleteAudit(ctx, tx, ownerUserID, impact); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return impact, nil
+}
+
+type assetDeleteQueryer interface {
+	QueryContext(context.Context, string, ...interface{}) (*sql.Rows, error)
+	QueryRowContext(context.Context, string, ...interface{}) *sql.Row
+}
+
+func (db *DB) AssetDeleteImpact(
+	ctx context.Context,
+	id string,
+	ownerUserID string,
+) (*AssetDeleteImpact, error) {
+	var projectID, name, value string
+	if err := db.QueryRowContext(
 		ctx,
-		`UPDATE project_graph_nodes SET asset_id = ''
-		 WHERE project_id = ? AND asset_id = ?`,
-		projectID,
+		`SELECT project_id, name, value FROM assets WHERE id = ? AND owner_user_id = ?`,
 		id,
-	); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(
-		ctx,
-		`UPDATE vulnerabilities SET asset_id = ''
-		 WHERE owner_user_id = ? AND asset_id = ?`,
 		ownerUserID,
-		id,
+	).Scan(&projectID, &name, &value); err != nil {
+		return nil, err
+	}
+	return assetDeleteImpact(ctx, db, projectID, ownerUserID, id, name, value)
+}
+
+func assetDeleteImpact(
+	ctx context.Context,
+	queryer assetDeleteQueryer,
+	projectID string,
+	ownerUserID string,
+	assetID string,
+	name string,
+	value string,
+) (*AssetDeleteImpact, error) {
+	impact := &AssetDeleteImpact{
+		AssetID:    assetID,
+		ProjectID:  projectID,
+		AssetName:  name,
+		AssetValue: value,
+	}
+	normalizedAssetID := strings.ToLower(strings.TrimSpace(assetID))
+	factQuery := `SELECT COUNT(*) FROM project_facts
+		WHERE project_id = ? AND (
+			asset_id = ? OR LOWER(TRIM(relation)) IN (?, ?)
+		)`
+	counts := []struct {
+		target *int64
+		query  string
+		args   []interface{}
+	}{
+		{
+			target: &impact.Intents,
+			query:  `SELECT COUNT(*) FROM project_graph_nodes WHERE project_id = ? AND asset_id = ? AND kind = 'intent'`,
+			args:   []interface{}{projectID, assetID},
+		},
+		{
+			target: &impact.Facts,
+			query:  factQuery,
+			args:   []interface{}{projectID, assetID, "asset_id:" + normalizedAssetID, "asset:" + normalizedAssetID},
+		},
+		{
+			target: &impact.MemoryEntities,
+			query: `SELECT COUNT(*) FROM project_memory_entities
+				WHERE project_id = ? AND source_ref_id IN (
+					SELECT id FROM project_facts
+					WHERE project_id = ? AND (
+						asset_id = ? OR LOWER(TRIM(relation)) IN (?, ?)
+					)
+				)`,
+			args: []interface{}{
+				projectID,
+				projectID,
+				assetID,
+				"asset_id:" + normalizedAssetID,
+				"asset:" + normalizedAssetID,
+			},
+		},
+		{
+			target: &impact.Findings,
+			query:  `SELECT COUNT(*) FROM vulnerabilities WHERE project_id = ? AND owner_user_id = ? AND asset_id = ?`,
+			args:   []interface{}{projectID, ownerUserID, assetID},
+		},
+		{
+			target: &impact.Tests,
+			query:  `SELECT COUNT(*) FROM project_test_results WHERE project_id = ? AND asset_id = ?`,
+			args:   []interface{}{projectID, assetID},
+		},
+		{
+			target: &impact.GraphNodes,
+			query: `SELECT COUNT(*) FROM project_graph_nodes
+				WHERE project_id = ? AND (
+					asset_id = ?
+					OR source_ref_id IN (
+						SELECT id FROM project_facts
+						WHERE project_id = ? AND (
+							asset_id = ? OR LOWER(TRIM(relation)) IN (?, ?)
+						)
+					)
+					OR source_ref_id IN (
+						SELECT id FROM vulnerabilities WHERE project_id = ? AND owner_user_id = ? AND asset_id = ?
+					)
+				)`,
+			args: []interface{}{
+				projectID,
+				assetID,
+				projectID,
+				assetID,
+				"asset_id:" + normalizedAssetID,
+				"asset:" + normalizedAssetID,
+				projectID,
+				ownerUserID,
+				assetID,
+			},
+		},
+		{
+			target: &impact.Conversations,
+			query:  `SELECT COUNT(*) FROM conversations WHERE project_id = ? AND asset_id = ?`,
+			args:   []interface{}{projectID, assetID},
+		},
+		{
+			target: &impact.VulnerabilityFPs,
+			query: `SELECT COUNT(*) FROM vulnerability_fingerprints
+				WHERE project_id = ? AND vulnerability_id IN (
+					SELECT id FROM vulnerabilities WHERE project_id = ? AND owner_user_id = ? AND asset_id = ?
+				)`,
+			args: []interface{}{projectID, projectID, ownerUserID, assetID},
+		},
+	}
+	for _, item := range counts {
+		if err := queryCount(ctx, queryer, item.query, item.target, item.args...); err != nil {
+			return nil, err
+		}
+	}
+	campaignQueries := []struct {
+		query string
+		args  []interface{}
+	}{
+		{`SELECT COUNT(*) FROM campaign_tasks WHERE project_id = ? AND owner_user_id = ? AND asset_id = ?`, []interface{}{projectID, ownerUserID, assetID}},
+		{`SELECT COUNT(*) FROM campaign_endpoints WHERE project_id = ? AND asset_id = ?`, []interface{}{projectID, assetID}},
+		{`SELECT COUNT(*) FROM campaign_frontier WHERE asset_id = ?`, []interface{}{assetID}},
+		{`SELECT COUNT(*) FROM campaign_links WHERE project_id = ? AND (src_asset_id = ? OR dst_asset_id = ?)`, []interface{}{projectID, assetID, assetID}},
+		{`SELECT COUNT(*) FROM campaign_coverage WHERE asset_id = ?`, []interface{}{assetID}},
+		{
+			`SELECT COUNT(*) FROM campaign_chains
+			 WHERE project_id = ? AND (
+				entry_asset_id = ? OR target_asset_id = ?
+				OR id IN (SELECT chain_id FROM campaign_chain_steps WHERE asset_id = ?)
+			 )`,
+			[]interface{}{projectID, assetID, assetID, assetID},
+		},
+	}
+	for _, item := range campaignQueries {
+		var count int64
+		if err := queryCount(ctx, queryer, item.query, &count, item.args...); err != nil {
+			return nil, err
+		}
+		impact.CampaignRecords += count
+	}
+	return impact, nil
+}
+
+func queryCount(
+	ctx context.Context,
+	queryer assetDeleteQueryer,
+	query string,
+	target *int64,
+	args ...interface{},
+) error {
+	return queryer.QueryRowContext(ctx, query, args...).Scan(target)
+}
+
+func insertAssetDeleteAudit(
+	ctx context.Context,
+	tx *sql.Tx,
+	ownerUserID string,
+	impact *AssetDeleteImpact,
+) error {
+	username := ownerUserID
+	if err := tx.QueryRowContext(
+		ctx,
+		`SELECT username FROM users WHERE id = ?`,
+		ownerUserID,
+	).Scan(&username); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	detail := fmt.Sprintf(
+		"asset=%s; intents=%d; facts=%d; memory_entities=%d; findings=%d; tests=%d; graph_nodes=%d; campaign_records=%d; conversations=%d; vulnerability_fingerprints=%d",
+		impact.AssetValue,
+		impact.Intents,
+		impact.Facts,
+		impact.MemoryEntities,
+		impact.Findings,
+		impact.Tests,
+		impact.GraphNodes,
+		impact.CampaignRecords,
+		impact.Conversations,
+		impact.VulnerabilityFPs,
+	)
+	_, err := tx.ExecContext(
+		ctx,
+		`INSERT INTO audit_logs (
+			id, user_id, username, action, resource_type, resource_id, result, detail, created_at
+		) VALUES (?, ?, ?, 'asset.delete_cascade', 'asset', ?, 'success', ?, ?)`,
+		newID(),
+		ownerUserID,
+		username,
+		impact.AssetID,
+		detail,
+		time.Now().UTC().Unix(),
+	)
+	return err
+}
+
+func deleteAssetOwnedData(
+	ctx context.Context,
+	tx *sql.Tx,
+	projectID string,
+	ownerUserID string,
+	assetID string,
+) error {
+	normalizedAssetID := strings.ToLower(strings.TrimSpace(assetID))
+	relationPatterns := []string{
+		"asset_id:" + normalizedAssetID,
+		"asset:" + normalizedAssetID,
+	}
+	factArgs := []interface{}{projectID, assetID}
+	for _, pattern := range relationPatterns {
+		factArgs = append(factArgs, pattern)
+	}
+	factIDs, err := queryStringColumn(
+		ctx,
+		tx,
+		`SELECT id FROM project_facts
+		 WHERE project_id = ?
+		   AND (asset_id = ? OR LOWER(TRIM(relation)) IN (`+placeholders(len(relationPatterns))+`))`,
+		factArgs...,
+	)
+	if err != nil {
+		return err
+	}
+	memoryEntityIDs, err := queryMemoryEntityIDsByFactIDs(ctx, tx, projectID, factIDs)
+	if err != nil {
+		return err
+	}
+	testResultIDs, err := queryStringColumn(
+		ctx,
+		tx,
+		`SELECT id FROM project_test_results WHERE project_id = ? AND asset_id = ?`,
+		projectID,
+		assetID,
+	)
+	if err != nil {
+		return err
+	}
+	vulnerabilityIDs, err := queryStringColumn(
+		ctx,
+		tx,
+		`SELECT id FROM vulnerabilities WHERE project_id = ? AND owner_user_id = ? AND asset_id = ?`,
+		projectID,
+		ownerUserID,
+		assetID,
+	)
+	if err != nil {
+		return err
+	}
+	nodeIDs, err := queryStringColumn(
+		ctx,
+		tx,
+		`SELECT id FROM project_graph_nodes WHERE project_id = ? AND asset_id = ?`,
+		projectID,
+		assetID,
+	)
+	if err != nil {
+		return err
+	}
+	nodeIDSet := make(map[string]bool, len(nodeIDs))
+	for _, id := range nodeIDs {
+		nodeIDSet[id] = true
+	}
+	for _, sourceIDs := range [][]string{factIDs, vulnerabilityIDs} {
+		for start := 0; start < len(sourceIDs); start += assetDeleteIDBatchSize {
+			end := minInt(start+assetDeleteIDBatchSize, len(sourceIDs))
+			args := []interface{}{projectID}
+			for _, id := range sourceIDs[start:end] {
+				args = append(args, id)
+			}
+			related, err := queryStringColumn(
+				ctx,
+				tx,
+				`SELECT id FROM project_graph_nodes
+				 WHERE project_id = ? AND source_ref_id IN (`+placeholders(end-start)+`)`,
+				args...,
+			)
+			if err != nil {
+				return err
+			}
+			for _, id := range related {
+				if !nodeIDSet[id] {
+					nodeIDSet[id] = true
+					nodeIDs = append(nodeIDs, id)
+				}
+			}
+		}
+	}
+	campaignTaskIDs, err := queryStringColumn(
+		ctx,
+		tx,
+		`SELECT id FROM campaign_tasks WHERE project_id = ? AND owner_user_id = ? AND asset_id = ?`,
+		projectID,
+		ownerUserID,
+		assetID,
+	)
+	if err != nil {
+		return err
+	}
+	campaignChainIDs, err := queryStringColumn(
+		ctx,
+		tx,
+		`SELECT DISTINCT id FROM campaign_chains
+		 WHERE project_id = ?
+		   AND (
+		     entry_asset_id = ? OR target_asset_id = ?
+		     OR id IN (SELECT chain_id FROM campaign_chain_steps WHERE asset_id = ?)
+		   )`,
+		projectID,
+		assetID,
+		assetID,
+		assetID,
+	)
+	if err != nil {
+		return err
+	}
+
+	if err := deleteRowsByIDs(ctx, tx, "vulnerability_images", "vulnerability_id", vulnerabilityIDs); err != nil {
+		return err
+	}
+	if err := deleteRowsByIDs(ctx, tx, "vulnerability_retests", "vulnerability_id", vulnerabilityIDs); err != nil {
+		return err
+	}
+	if err := deleteRowsByIDs(ctx, tx, "vulnerability_fingerprints", "vulnerability_id", vulnerabilityIDs); err != nil {
+		return err
+	}
+	if err := deleteRowsByIDs(ctx, tx, "vulnerability_report_drafts", "vulnerability_id", vulnerabilityIDs); err != nil {
+		return err
+	}
+	if err := deleteRowsByIDs(ctx, tx, "vulnerability_report_drafts", "intent_id", nodeIDs); err != nil {
+		return err
+	}
+	if err := deleteRowsByIDs(ctx, tx, "vulnerability_report_drafts", "hypothesis_id", testResultIDs); err != nil {
+		return err
+	}
+	if err := deleteRowsByIDs(ctx, tx, "campaign_verifications", "finding_id", vulnerabilityIDs); err != nil {
+		return err
+	}
+	if err := deleteRowsByIDs(ctx, tx, "campaign_verifications", "task_id", campaignTaskIDs); err != nil {
+		return err
+	}
+	if err := deleteRowsByIDs(ctx, tx, "campaign_frontier", "task_id", campaignTaskIDs); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(
+		ctx,
+		`DELETE FROM campaign_frontier WHERE asset_id = ?`,
+		assetID,
 	); err != nil {
+		return err
+	}
+	if err := deleteRowsByIDs(ctx, tx, "campaign_chain_steps", "chain_id", campaignChainIDs); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(
+		ctx,
+		`DELETE FROM campaign_chain_steps WHERE asset_id = ?`,
+		assetID,
+	); err != nil {
+		return err
+	}
+	if err := deleteRowsByIDs(ctx, tx, "campaign_chains", "id", campaignChainIDs); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(
+		ctx,
+		`DELETE FROM campaign_links WHERE project_id = ? AND (src_asset_id = ? OR dst_asset_id = ?)`,
+		projectID,
+		assetID,
+		assetID,
+	); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(
+		ctx,
+		`DELETE FROM campaign_coverage WHERE asset_id = ?`,
+		assetID,
+	); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(
+		ctx,
+		`DELETE FROM campaign_endpoints WHERE project_id = ? AND asset_id = ?`,
+		projectID,
+		assetID,
+	); err != nil {
+		return err
+	}
+	if err := deleteRowsByIDs(ctx, tx, "campaign_tasks", "id", campaignTaskIDs); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(
+		ctx,
+		`DELETE FROM campaign_memory_digests
+		 WHERE project_id = ? AND scope_type = 'asset' AND scope_id = ?`,
+		projectID,
+		assetID,
+	); err != nil {
+		return err
+	}
+	if err := deleteRowsByIDs(ctx, tx, "project_fact_versions", "fact_id", factIDs); err != nil {
+		return err
+	}
+	if err := deleteRowsByIDs(ctx, tx, "memory_writes", "fact_id", factIDs); err != nil {
+		return err
+	}
+	if err := deleteRowsByIDs(ctx, tx, "project_memory_relations", "fact_id", factIDs); err != nil {
+		return err
+	}
+	if err := deleteRowsByIDs(ctx, tx, "project_memory_relations", "src_entity_id", memoryEntityIDs); err != nil {
+		return err
+	}
+	if err := deleteRowsByIDs(ctx, tx, "project_memory_relations", "dst_entity_id", memoryEntityIDs); err != nil {
+		return err
+	}
+	if err := deleteRowsByIDs(ctx, tx, "project_memory_entities", "id", memoryEntityIDs); err != nil {
+		return err
+	}
+	if err := deleteRowsByIDs(ctx, tx, "project_facts", "id", factIDs); err != nil {
+		return err
+	}
+	if err := deleteRowsByIDs(ctx, tx, "project_graph_edges", "src_id", nodeIDs); err != nil {
+		return err
+	}
+	if err := deleteRowsByIDs(ctx, tx, "project_graph_edges", "dst_id", nodeIDs); err != nil {
+		return err
+	}
+	if err := deleteRowsByIDs(ctx, tx, "project_graph_nodes", "id", nodeIDs); err != nil {
+		return err
+	}
+	if err := deleteRowsByIDs(ctx, tx, "vulnerabilities", "id", vulnerabilityIDs); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(
 		ctx,
 		`DELETE FROM project_test_results WHERE project_id = ? AND asset_id = ?`,
 		projectID,
-		id,
+		assetID,
 	); err != nil {
 		return err
 	}
@@ -1420,11 +1879,109 @@ func (db *DB) DeleteAsset(ctx context.Context, id, ownerUserID string) error {
 		ctx,
 		`DELETE FROM project_asset_work WHERE project_id = ? AND asset_id = ?`,
 		projectID,
-		id,
+		assetID,
 	); err != nil {
 		return err
 	}
-	return tx.Commit()
+	_, err = tx.ExecContext(
+		ctx,
+		`UPDATE conversations SET asset_id = '' WHERE project_id = ? AND asset_id = ?`,
+		projectID,
+		assetID,
+	)
+	return err
+}
+
+func queryStringColumn(
+	ctx context.Context,
+	tx *sql.Tx,
+	query string,
+	args ...interface{},
+) ([]string, error) {
+	rows, err := tx.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]string, 0)
+	for rows.Next() {
+		var item string
+		if err := rows.Scan(&item); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func queryMemoryEntityIDsByFactIDs(
+	ctx context.Context,
+	tx *sql.Tx,
+	projectID string,
+	factIDs []string,
+) ([]string, error) {
+	entityIDs := make([]string, 0)
+	seen := map[string]bool{}
+	for start := 0; start < len(factIDs); start += assetDeleteIDBatchSize {
+		end := minInt(start+assetDeleteIDBatchSize, len(factIDs))
+		args := []interface{}{projectID}
+		for _, id := range factIDs[start:end] {
+			args = append(args, id)
+		}
+		items, err := queryStringColumn(
+			ctx,
+			tx,
+			`SELECT id FROM project_memory_entities
+			 WHERE project_id = ? AND source_ref_id IN (`+placeholders(end-start)+`)`,
+			args...,
+		)
+		if err != nil {
+			return nil, err
+		}
+		for _, id := range items {
+			if !seen[id] {
+				seen[id] = true
+				entityIDs = append(entityIDs, id)
+			}
+		}
+	}
+	return entityIDs, nil
+}
+
+func deleteRowsByIDs(
+	ctx context.Context,
+	tx *sql.Tx,
+	table string,
+	column string,
+	ids []string,
+) error {
+	if !hasStringIDs(ids) {
+		return nil
+	}
+	for start := 0; start < len(ids); start += assetDeleteIDBatchSize {
+		end := minInt(start+assetDeleteIDBatchSize, len(ids))
+		args := make([]interface{}, 0, end-start)
+		for _, id := range ids[start:end] {
+			args = append(args, id)
+		}
+		if _, err := tx.ExecContext(
+			ctx,
+			`DELETE FROM `+table+` WHERE `+column+` IN (`+placeholders(end-start)+`)`,
+			args...,
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func hasStringIDs(ids []string) bool {
+	for _, id := range ids {
+		if strings.TrimSpace(id) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func (db *DB) UpdateAsset(ctx context.Context, item Asset) error {

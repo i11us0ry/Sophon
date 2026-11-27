@@ -34,11 +34,12 @@ var attackStepSeverities = map[string]bool{
 }
 
 type ProjectHandler struct {
-	db           *database.DB
-	manager      *task.Manager
-	storage      *storagepkg.Service
-	jobs         conversationJobCanceller
-	draftManager VulnerabilityDraftManager
+	db                   *database.DB
+	manager              *task.Manager
+	storage              *storagepkg.Service
+	jobs                 conversationJobCanceller
+	assetAgentController assetAgentController
+	draftManager         VulnerabilityDraftManager
 }
 
 type VulnerabilityDraftManager interface {
@@ -57,13 +58,17 @@ func NewProjectHandler(
 	jobs conversationJobCanceller,
 	draftManager VulnerabilityDraftManager,
 ) *ProjectHandler {
-	return &ProjectHandler{
+	handler := &ProjectHandler{
 		db:           db,
 		manager:      manager,
 		storage:      storageService,
 		jobs:         jobs,
 		draftManager: draftManager,
 	}
+	if controller, ok := jobs.(assetAgentController); ok {
+		handler.assetAgentController = controller
+	}
+	return handler
 }
 
 func (h *ProjectHandler) Summary(c *gin.Context) {

@@ -98,6 +98,38 @@ func TestOrchestratorControlTargetsSingleWorker(t *testing.T) {
 	}
 }
 
+func TestStopAssetWorkersOnlyStopsMatchingAsset(t *testing.T) {
+	service := &Service{}
+	var firstCancelled, secondCancelled, otherCancelled bool
+	first := service.registerWorkerControl("conv-asset-stop", "hypothesis-a", func() {
+		firstCancelled = true
+	})
+	first.bindAsset("project-asset-stop", "asset-a")
+	second := service.registerWorkerControl("conv-asset-stop", "hypothesis-b", func() {
+		secondCancelled = true
+	})
+	second.bindAsset("project-asset-stop", "asset-a")
+	other := service.registerWorkerControl("conv-asset-stop", "hypothesis-c", func() {
+		otherCancelled = true
+	})
+	other.bindAsset("project-asset-stop", "asset-b")
+
+	stopped := service.StopAssetWorkers("project-asset-stop", "asset-a", "资产级访问阻断")
+	if stopped != 2 || !firstCancelled || !secondCancelled || otherCancelled {
+		t.Fatalf(
+			"应按资产停止 Worker: stopped=%d first=%t second=%t other=%t",
+			stopped,
+			firstCancelled,
+			secondCancelled,
+			otherCancelled,
+		)
+	}
+	if reason, message := first.stopDetails(); reason != "asset_access_blocked" ||
+		message != "资产级访问阻断" {
+		t.Fatalf("Worker 停止原因错误: reason=%s message=%s", reason, message)
+	}
+}
+
 func TestPausedOrchestrationDoesNotBlockRunningWorker(t *testing.T) {
 	parent, cancel := context.WithCancel(context.Background())
 	cancel()

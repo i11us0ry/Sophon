@@ -498,29 +498,6 @@ func assetHasReferences(
 	return count > 0, nil
 }
 
-func clearAssetFactRelations(
-	ctx context.Context,
-	tx *sql.Tx,
-	projectID string,
-	assetID string,
-	name string,
-	value string,
-) error {
-	patterns := assetRelationMatches(assetID, name, value)
-	args := make([]interface{}, 0, len(patterns)+1)
-	args = append(args, projectID)
-	for _, pattern := range patterns {
-		args = append(args, pattern)
-	}
-	_, err := tx.ExecContext(
-		ctx,
-		`UPDATE project_facts SET relation = ''
-		 WHERE project_id = ? AND LOWER(TRIM(relation)) IN (`+placeholders(len(patterns))+`)`,
-		args...,
-	)
-	return err
-}
-
 func canonicalizeAssetFactRelations(
 	ctx context.Context,
 	tx *sql.Tx,

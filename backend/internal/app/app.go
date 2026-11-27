@@ -409,6 +409,7 @@ func New(cfg config.Config) (*App, error) {
 	protected.GET("/projects/:id/evidence-gaps", projectHandler.ListEvidenceGaps)
 	protected.GET("/projects/:id/asset-work", projectHandler.ListAssetWork)
 	protected.GET("/projects/:id/assets/:assetId/closeout", projectHandler.AssetCloseout)
+	protected.POST("/projects/:id/assets/:assetId/stop", projectHandler.StopAssetWork)
 	protected.POST("/projects/:id/assets/:assetId/reopen", projectHandler.ReopenAssetWork)
 	protected.GET("/projects/:id/export", projectHandler.Export)
 	protected.GET("/projects/:id/report", projectHandler.ReportPreview)
@@ -439,6 +440,7 @@ func New(cfg config.Config) (*App, error) {
 
 	protected.POST("/assets", businessHandler.CreateAsset)
 	protected.GET("/assets", businessHandler.ListAssets)
+	protected.GET("/assets/:id/delete-impact", businessHandler.AssetDeleteImpact)
 	protected.PUT("/assets/:id", businessHandler.UpdateAsset)
 	protected.DELETE("/assets/:id", businessHandler.DeleteAsset)
 

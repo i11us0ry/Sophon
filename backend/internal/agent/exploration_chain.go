@@ -331,6 +331,15 @@ func (s *Service) spawnBlockedIntentAlternatives(
 		(intent.Status != "blocked" && intent.Status != "capacity_blocked") {
 		return 0, nil
 	}
+	if strings.TrimSpace(intent.AssetID) != "" {
+		blocked, err := s.db.ProjectAssetWorkBlocked(ctx, projectID, intent.AssetID)
+		if err != nil {
+			return 0, err
+		}
+		if blocked {
+			return 0, nil
+		}
+	}
 	s.graphWriteMu.Lock()
 	defer s.graphWriteMu.Unlock()
 	hasOpen, err := s.hasOpenDerivedIntent(ctx, projectID, intent.ID)

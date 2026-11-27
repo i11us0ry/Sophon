@@ -44,6 +44,10 @@ type projectCampaignController interface {
 	ResumeProjectCampaigns(context.Context, string, string) (int, error)
 }
 
+type assetAgentController interface {
+	StopAssetWorkers(string, string, string) int
+}
+
 func respondVulnerabilityReviewFailure(c *gin.Context, err error) {
 	var unavailable *agentpkg.VulnerabilityReviewUnavailableError
 	if errors.As(err, &unavailable) {
@@ -67,6 +71,7 @@ type BusinessHandler struct {
 	storage                *storagepkg.Service
 	jobs                   conversationJobCanceller
 	projectAgentController projectAgentController
+	assetAgentController   assetAgentController
 	projectCampaigns       projectCampaignController
 	vulnerabilityReviewer  VulnerabilityReviewer
 }
@@ -96,6 +101,9 @@ func NewBusinessHandler(
 	}
 	if controller, ok := jobs.(projectAgentController); ok {
 		handler.projectAgentController = controller
+	}
+	if controller, ok := jobs.(assetAgentController); ok {
+		handler.assetAgentController = controller
 	}
 	return handler
 }
@@ -782,11 +790,33 @@ func (h *BusinessHandler) DeleteAsset(c *gin.Context) {
 		unauthorized(c)
 		return
 	}
-	if err := h.db.DeleteAsset(c.Request.Context(), c.Param("id"), user.ID); err != nil {
+	impact, err := h.db.DeleteAsset(c.Request.Context(), c.Param("id"), user.ID)
+	if err != nil {
 		respondMutationError(c, err, "asset_not_found", "资产不存在", "delete_asset_failed", "删除资产失败")
 		return
 	}
-	c.Status(http.StatusNoContent)
+	if h.assetAgentController != nil && impact != nil {
+		h.assetAgentController.StopAssetWorkers(
+			impact.ProjectID,
+			impact.AssetID,
+			"资产已删除，停止关联 Worker",
+		)
+	}
+	c.JSON(http.StatusOK, impact)
+}
+
+func (h *BusinessHandler) AssetDeleteImpact(c *gin.Context) {
+	user := middleware.UserFromContext(c)
+	if user == nil {
+		unauthorized(c)
+		return
+	}
+	impact, err := h.db.AssetDeleteImpact(c.Request.Context(), c.Param("id"), user.ID)
+	if err != nil {
+		respondMutationError(c, err, "asset_not_found", "资产不存在", "asset_delete_impact_failed", "读取删除影响失败")
+		return
+	}
+	c.JSON(http.StatusOK, impact)
 }
 
 func (h *BusinessHandler) UpdateAsset(c *gin.Context) {

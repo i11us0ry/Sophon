@@ -644,6 +644,29 @@ async function reopenAssetWork(item: AssetOverview) {
   }, t('project.assetWorkReopened'))
 }
 
+function canStopAssetWork(item: AssetOverview) {
+  return ['queued', 'active', 'testing', 'needs_followup', 'reopened'].includes(item.workState)
+}
+
+async function stopAssetWork(item: AssetOverview) {
+  if (!window.confirm(t('project.assetWorkStopConfirm', { name: item.name || item.value }))) {
+    return
+  }
+  await run(async () => {
+    const result = await apiPost<{
+      stoppedIntents: number
+      stoppedTests: number
+      stoppedWorkers: number
+    }>(`/projects/${projectId}/assets/${item.id}/stop`, {})
+    await Promise.all([loadAssetOverview(), loadCoverage()])
+    notice.value = t('project.assetWorkStopped', {
+      intents: result.stoppedIntents,
+      tests: result.stoppedTests,
+      workers: result.stoppedWorkers,
+    })
+  })
+}
+
 function assetPrimaryLabel(asset: AssetOverview) {
   const name = asset.name?.trim() ?? ''
   const value = asset.value?.trim() ?? ''
@@ -2547,6 +2570,15 @@ onUnmounted(() => {
             <td>{{ asset.riskScore }} / {{ asset.priority }}</td>
             <td class="wrap-cell">{{ asset.stateReason || '-' }}</td>
             <td>
+              <div class="project-asset-work-actions">
+              <button
+                v-if="canStopAssetWork(asset)"
+                class="button compact danger"
+                type="button"
+                @click="stopAssetWork(asset)"
+              >
+                {{ t('project.assetWorkStop') }}
+              </button>
               <button
                 v-if="['complete', 'blocked', 'awaiting_user'].includes(asset.workState)"
                 class="button compact"
@@ -2555,6 +2587,7 @@ onUnmounted(() => {
               >
                 {{ t('project.assetWorkReopen') }}
               </button>
+              </div>
             </td>
           </tr>
           <tr v-if="!assetOverviewItems.length">
@@ -5281,5 +5314,11 @@ onUnmounted(() => {
   .main-column .page-projects .node-drawer {
     width: 100%;
   }
+}
+
+.project-asset-work-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
 }
 </style>

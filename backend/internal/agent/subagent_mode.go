@@ -2,7 +2,9 @@ package agent
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -304,6 +306,30 @@ func (t *gatedSubagentTool) InvokableRun(
 	argumentsInJSON string,
 	options ...tool.Option,
 ) (string, error) {
+	if _, ok := execctx.Subagent(ctx); ok {
+		blocked, reason, err := t.service.assetExecutionBlocked(ctx)
+		if err != nil {
+			return renderToolError(
+				t.name,
+				toolErrorPolicy,
+				"资产执行状态检查失败，已失败关闭",
+				false,
+				nil,
+			), nil
+		}
+		if blocked {
+			t.service.recordSafetyInterception(ctx, t.name, reason, map[string]interface{}{
+				"source": "asset_access_gate",
+			})
+			return renderToolError(
+				t.name,
+				toolErrorPolicy,
+				reason,
+				false,
+				nil,
+			), nil
+		}
+	}
 	// 工具发现层的内部工具在自身逻辑里对目标工具做同样的判定，此处不重复。
 	if t.name != mcpUseToolName && t.name != mcpSearchToolName {
 		args := map[string]interface{}{}
@@ -324,6 +350,50 @@ func (t *gatedSubagentTool) InvokableRun(
 		}
 	}
 	return invokeTool(ctx, t.inner, argumentsInJSON, options...)
+}
+
+func (s *Service) assetExecutionBlocked(ctx context.Context) (bool, string, error) {
+	projectID := strings.TrimSpace(execctx.ProjectID(ctx))
+	userID := strings.TrimSpace(execctx.UserID(ctx))
+	if projectID == "" || userID == "" {
+		return false, "", nil
+	}
+	if s == nil || s.db == nil {
+		return true, "资产执行状态检查不可用，任务已停止", nil
+	}
+	assetID := strings.TrimSpace(execctx.AssetID(ctx))
+	if assetID == "" {
+		if info, ok := execctx.Subagent(ctx); ok && strings.TrimSpace(info.HypothesisID) != "" {
+			item, err := s.db.GetProjectTestResultByID(ctx, projectID, info.HypothesisID)
+			if err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return true, "读取 Worker 资产状态失败，任务已停止", err
+			}
+			if item != nil {
+				assetID = strings.TrimSpace(item.AssetID)
+			}
+		}
+	}
+	if assetID == "" {
+		return false, "", nil
+	}
+	asset, err := s.db.GetAsset(ctx, assetID, userID)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && asset == nil) {
+		return true, "关联资产已删除，Worker 已停止", nil
+	}
+	if err != nil {
+		return true, "读取关联资产失败，Worker 已停止", err
+	}
+	if asset.ProjectID != projectID {
+		return true, "关联资产不属于当前项目，Worker 已停止", nil
+	}
+	blocked, err := s.db.ProjectAssetWorkBlocked(ctx, projectID, assetID)
+	if err != nil {
+		return true, "读取资产阻断状态失败，Worker 已停止", err
+	}
+	if blocked {
+		return true, "关联资产已被阻断，Worker 已停止", nil
+	}
+	return false, "", nil
 }
 
 // gateSubagentTools 为子 Agent 包装一层能力门禁；非子 Agent 上下文直接返回原工具。

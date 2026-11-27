@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -46,7 +47,6 @@ func TestAssetDuplicateAndProjectMoveProtection(t *testing.T) {
 	if err := db.CreateAsset(ctx, asset); err != nil {
 		t.Fatalf("创建资产失败: %v", err)
 	}
-
 	duplicate := asset
 	duplicate.ID = "asset-duplicate"
 	duplicate.Name = "重复资产"
@@ -173,7 +173,7 @@ func TestOpenMigratesLegacyAssetsToUnknownSource(t *testing.T) {
 	}
 }
 
-func TestDeleteAssetClearsFactReferenceAndDoesNotRecreate(t *testing.T) {
+func TestDeleteAssetRemovesOwnedDataAndDoesNotRecreate(t *testing.T) {
 	db, err := Open(filepath.Join(t.TempDir(), "asset-delete-reference.db"))
 	if err != nil {
 		t.Fatalf("打开数据库失败: %v", err)
@@ -207,9 +207,25 @@ func TestDeleteAssetClearsFactReferenceAndDoesNotRecreate(t *testing.T) {
 	if err := db.CreateAsset(ctx, asset); err != nil {
 		t.Fatalf("创建资产失败: %v", err)
 	}
-	if _, err := db.UpsertProjectFact(ctx, ProjectFact{
+	otherAsset := Asset{
+		ID: "asset-delete-other", ProjectID: asset.ProjectID, OwnerUserID: asset.OwnerUserID,
+		Name: "保留资产", Kind: "url", Value: "https://example.com/keep",
+		Status: "active", Criticality: "medium", CreatedAt: now, UpdatedAt: now,
+	}
+	if err := db.CreateAsset(ctx, otherAsset); err != nil {
+		t.Fatalf("创建其他资产失败: %v", err)
+	}
+	if err := db.CreateConversation(ctx, Conversation{
+		ID: "conversation-delete-reference", OwnerUserID: asset.OwnerUserID,
+		ProjectID: asset.ProjectID, AssetID: asset.ID, Title: "关联会话",
+		CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("创建关联会话失败: %v", err)
+	}
+	fact, err := db.UpsertProjectFact(ctx, ProjectFact{
 		ID:         newID(),
 		ProjectID:  asset.ProjectID,
+		AssetID:    asset.ID,
 		FactType:   "asset",
 		Key:        "目标资产",
 		Value:      asset.Name,
@@ -217,19 +233,167 @@ func TestDeleteAssetClearsFactReferenceAndDoesNotRecreate(t *testing.T) {
 		Confidence: 100,
 		CreatedAt:  now,
 		UpdatedAt:  now,
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("创建事实失败: %v", err)
 	}
+	otherFact, err := db.UpsertProjectFact(ctx, ProjectFact{
+		ID:         newID(),
+		ProjectID:  otherAsset.ProjectID,
+		AssetID:    otherAsset.ID,
+		FactType:   "asset",
+		Key:        "其他资产同名事实",
+		Value:      otherAsset.Name,
+		Relation:   "asset:" + asset.Name,
+		Confidence: 100,
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	})
+	if err != nil {
+		t.Fatalf("创建其他资产事实失败: %v", err)
+	}
+	if _, err := db.UpsertProjectMemoryEntity(ctx, ProjectMemoryEntity{
+		ID:          "memory-delete-reference",
+		ProjectID:   asset.ProjectID,
+		EntityType:  "asset",
+		EntityKey:   asset.ID,
+		Label:       asset.Name,
+		SourceRefID: fact.ID,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}); err != nil {
+		t.Fatalf("创建记忆实体失败: %v", err)
+	}
+	if err := db.CreateVulnerability(ctx, Vulnerability{
+		ID: "vuln-delete-reference", ProjectID: asset.ProjectID, OwnerUserID: asset.OwnerUserID,
+		AssetID: asset.ID, Title: "关联漏洞", Severity: "high", Status: "open",
+		Fingerprint: "vuln-delete-fingerprint",
+		CreatedAt:   now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("创建关联漏洞失败: %v", err)
+	}
+	if err := db.CreateProjectGraphNode(ctx, GraphNode{
+		ID: "intent-delete-reference", ProjectID: asset.ProjectID, Kind: "intent",
+		Title: "关联意图", Status: "open", AssetID: asset.ID, CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("创建关联意图失败: %v", err)
+	}
+	if err := db.CreateProjectGraphNode(ctx, GraphNode{
+		ID: "begin-delete-reference", ProjectID: asset.ProjectID, Kind: "begin",
+		Title: "删除测试起点", Status: "open", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("创建起点失败: %v", err)
+	}
+	if err := db.CreateProjectGraphEdge(ctx, GraphEdge{
+		ID: "edge-delete-reference", ProjectID: asset.ProjectID,
+		SrcID: "begin-delete-reference", DstID: "intent-delete-reference",
+		Rel: "spawns", CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("创建关联边失败: %v", err)
+	}
+	if _, err := db.UpsertProjectTestResult(ctx, ProjectTestResult{
+		ID: "test-delete-reference", ProjectID: asset.ProjectID, AssetID: asset.ID,
+		Dimension: "关联测试", Technique: "http", Status: "untested",
+		IntentID: "intent-delete-reference", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("创建关联测试失败: %v", err)
+	}
+	if err := db.SyncProjectAssetWork(ctx, asset.ProjectID, asset.OwnerUserID); err != nil {
+		t.Fatalf("同步资产工作项失败: %v", err)
+	}
 
-	if err := db.DeleteAsset(ctx, asset.ID, asset.OwnerUserID); err != nil {
+	impact, err := db.AssetDeleteImpact(ctx, asset.ID, asset.OwnerUserID)
+	if err != nil {
+		t.Fatalf("读取删除影响失败: %v", err)
+	}
+	if impact.Intents != 1 || impact.Facts != 1 || impact.Findings != 1 ||
+		impact.Tests != 1 || impact.MemoryEntities != 1 {
+		t.Fatalf("删除影响统计不准确: %+v", impact)
+	}
+	deleted, err := db.DeleteAsset(ctx, asset.ID, asset.OwnerUserID)
+	if err != nil {
 		t.Fatalf("删除资产失败: %v", err)
+	}
+	if deleted.Intents != impact.Intents || deleted.Facts != impact.Facts ||
+		deleted.Findings != impact.Findings || deleted.Tests != impact.Tests {
+		t.Fatalf("实际删除统计与预览不一致: preview=%+v actual=%+v", impact, deleted)
 	}
 	facts, err := db.ListProjectFacts(ctx, asset.ProjectID)
 	if err != nil {
 		t.Fatalf("读取事实失败: %v", err)
 	}
-	if len(facts) != 1 || facts[0].Relation != "" {
-		t.Fatalf("删除资产后事实关系应清空: %+v", facts)
+	if len(facts) != 1 || facts[0].ID != otherFact.ID {
+		t.Fatalf("删除资产后只应保留其他资产事实: %+v", facts)
+	}
+	var graphNodes int
+	if err := db.QueryRowContext(
+		ctx,
+		`SELECT COUNT(*) FROM project_graph_nodes WHERE project_id = ? AND asset_id = ?`,
+		asset.ProjectID,
+		asset.ID,
+	).Scan(&graphNodes); err != nil {
+		t.Fatalf("统计攻击路径节点失败: %v", err)
+	}
+	if graphNodes != 0 {
+		t.Fatalf("删除资产后关联意图节点应全部删除: %d", graphNodes)
+	}
+	var graphEdges int
+	if err := db.QueryRowContext(
+		ctx,
+		`SELECT COUNT(*) FROM project_graph_edges WHERE id = 'edge-delete-reference'`,
+	).Scan(&graphEdges); err != nil {
+		t.Fatalf("统计攻击路径边失败: %v", err)
+	}
+	if graphEdges != 0 {
+		t.Fatalf("删除资产后关联攻击路径边应删除")
+	}
+	if vulnerability, err := db.GetVulnerability(ctx, "vuln-delete-reference", asset.OwnerUserID); !errors.Is(err, sql.ErrNoRows) || vulnerability != nil {
+		t.Fatalf("删除资产后关联漏洞应删除: %+v err=%v", vulnerability, err)
+	}
+	var fingerprints int
+	if err := db.QueryRowContext(
+		ctx,
+		`SELECT COUNT(*) FROM vulnerability_fingerprints WHERE project_id = ? AND vulnerability_id = 'vuln-delete-reference'`,
+		asset.ProjectID,
+	).Scan(&fingerprints); err != nil {
+		t.Fatalf("统计漏洞指纹失败: %v", err)
+	}
+	if fingerprints != 0 {
+		t.Fatalf("删除资产后漏洞指纹应删除")
+	}
+	var memoryEntities int
+	if err := db.QueryRowContext(
+		ctx,
+		`SELECT COUNT(*) FROM project_memory_entities WHERE project_id = ? AND id = 'memory-delete-reference'`,
+		asset.ProjectID,
+	).Scan(&memoryEntities); err != nil {
+		t.Fatalf("统计记忆实体失败: %v", err)
+	}
+	if memoryEntities != 0 {
+		t.Fatalf("删除资产后记忆实体应删除")
+	}
+	var auditDetail string
+	if err := db.QueryRowContext(
+		ctx,
+		`SELECT detail FROM audit_logs WHERE action = 'asset.delete_cascade' AND resource_id = ? ORDER BY created_at DESC LIMIT 1`,
+		asset.ID,
+	).Scan(&auditDetail); err != nil {
+		t.Fatalf("读取删除审计失败: %v", err)
+	}
+	if !strings.Contains(auditDetail, "intents=1") || !strings.Contains(auditDetail, "facts=1") {
+		t.Fatalf("删除审计统计缺失: %q", auditDetail)
+	}
+	testResults, err := db.ListProjectTestResultsByAsset(ctx, asset.ProjectID, asset.ID, 10)
+	if err != nil || len(testResults) != 0 {
+		t.Fatalf("删除资产后关联测试应删除: %+v err=%v", testResults, err)
+	}
+	work, err := db.GetProjectAssetWork(ctx, asset.ProjectID, asset.OwnerUserID, asset.ID)
+	if err != nil || work != nil {
+		t.Fatalf("删除资产后资产工作项应删除: %+v err=%v", work, err)
+	}
+	conversation, err := db.GetConversation(ctx, "conversation-delete-reference", asset.OwnerUserID)
+	if err != nil || conversation == nil || conversation.AssetID != "" {
+		t.Fatalf("删除资产后会话应保留并解除资产绑定: %+v err=%v", conversation, err)
 	}
 	if err := db.backfillProjectAssets(ctx); err != nil {
 		t.Fatalf("执行回填失败: %v", err)
@@ -238,8 +402,8 @@ func TestDeleteAssetClearsFactReferenceAndDoesNotRecreate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("读取资产失败: %v", err)
 	}
-	if len(assets) != 0 {
-		t.Fatalf("已删除资产不应因事实关系重新创建: %+v", assets)
+	if len(assets) != 1 || assets[0].ID != otherAsset.ID {
+		t.Fatalf("只应保留其他资产且已删除资产不应重建: %+v", assets)
 	}
 }
 

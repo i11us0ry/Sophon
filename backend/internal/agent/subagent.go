@@ -1677,7 +1677,11 @@ func (s *Service) runCoordinatedWorkerLoop(
 		control := s.registerWorkerControl(conversationID, hypothesis.ID, func() {
 			workerCancel(errWorkerStopped)
 		}, workerCancel)
+		control.bindAsset(projectID, hypothesis.AssetID)
 		workerCtx = withWorkerControl(workerCtx, control)
+		if strings.TrimSpace(hypothesis.AssetID) != "" {
+			workerCtx = execctx.WithAssetID(workerCtx, hypothesis.AssetID)
+		}
 		prompt := s.hypothesisWorkerPrompt(workerCtx, *hypothesis, true)
 		workerPrompt := prompt
 		recoveryReason := workerPreservedRetryReason(hypothesis.StateReason)
@@ -2011,6 +2015,12 @@ func (s *Service) syncIntentNodeFromHypothesis(
 	node, err := s.db.GetProjectGraphNode(ctx, intentID, projectID)
 	if err != nil || node == nil || node.Kind != "intent" {
 		return
+	}
+	if strings.TrimSpace(node.AssetID) != "" {
+		blocked, blockedErr := s.db.ProjectAssetWorkBlocked(ctx, projectID, node.AssetID)
+		if blockedErr == nil && blocked {
+			return
+		}
 	}
 	switch executionState {
 	case database.ProjectExecutionOpen:

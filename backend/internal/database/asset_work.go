@@ -3,6 +3,7 @@ package database
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
@@ -24,7 +25,11 @@ const (
 	AssetWorkAwaitingUser  = "awaiting_user"
 	AssetWorkComplete      = "complete"
 	AssetWorkReopened      = "reopened"
+
+	AssetUserStopReason = "user_asset_stopped"
 )
+
+var ErrAssetWorkNotStoppable = errors.New("资产当前状态不允许停止")
 
 var assetAuthorizationStates = map[string]bool{
 	AssetAuthorizationDiscovered: true,
@@ -65,6 +70,12 @@ type ProjectAssetWork struct {
 	CloseoutReason      string    `json:"closeoutReason"`
 	CreatedAt           time.Time `json:"createdAt"`
 	UpdatedAt           time.Time `json:"updatedAt"`
+}
+
+type ProjectAssetStopResult struct {
+	AssetID        string `json:"assetId"`
+	StoppedIntents int64  `json:"stoppedIntents"`
+	StoppedTests   int64  `json:"stoppedTests"`
 }
 
 func NormalizeAssetWorkState(value string) (string, bool) {
@@ -651,6 +662,299 @@ func (db *DB) UpdateProjectAssetWorkState(
 		return sql.ErrNoRows
 	}
 	return nil
+}
+
+func (db *DB) RecentTerminalProjectTestResultsByAsset(
+	ctx context.Context,
+	projectID string,
+	assetID string,
+	since time.Time,
+	limit int,
+) ([]ProjectTestResult, error) {
+	projectID = strings.TrimSpace(projectID)
+	assetID = strings.TrimSpace(assetID)
+	if projectID == "" || assetID == "" {
+		return nil, fmt.Errorf("项目和资产不能为空")
+	}
+	if limit <= 0 || limit > 20 {
+		limit = 2
+	}
+	if since.IsZero() {
+		since = time.Now().UTC().Add(-10 * time.Minute)
+	}
+	rows, err := db.QueryContext(
+		ctx,
+		`SELECT `+projectTestResultColumns+`
+		 FROM project_test_results
+		 WHERE project_id = ? AND asset_id = ?
+		   AND status IN ('tested_clean', 'confirmed', 'blocked', 'suspicious', 'stopped', 'exhausted')
+		   AND COALESCE(NULLIF(last_finished_at, 0), updated_at) >= ?
+		 ORDER BY
+			CASE WHEN last_finished_at > 0 THEN last_finished_at ELSE updated_at END DESC,
+			updated_at DESC, id DESC
+		 LIMIT ?`,
+		projectID,
+		assetID,
+		since.UTC().Unix(),
+		limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]ProjectTestResult, 0, limit)
+	for rows.Next() {
+		item, scanErr := scanProjectTestResult(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (db *DB) ProjectAssetWorkBlocked(
+	ctx context.Context,
+	projectID string,
+	assetID string,
+) (bool, error) {
+	projectID = strings.TrimSpace(projectID)
+	assetID = strings.TrimSpace(assetID)
+	if projectID == "" || assetID == "" {
+		return false, nil
+	}
+	var state string
+	err := db.QueryRowContext(
+		ctx,
+		`SELECT work_state FROM project_asset_work
+		 WHERE project_id = ? AND asset_id = ?
+		 LIMIT 1`,
+		projectID,
+		assetID,
+	).Scan(&state)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	switch strings.ToLower(strings.TrimSpace(state)) {
+	case AssetWorkBlocked, AssetWorkAwaitingUser:
+		return true, nil
+	default:
+		return false, nil
+	}
+}
+
+// BlockProjectAssetForAccessFailure atomically blocks the asset work item and
+// every non-terminal intent that belongs to it.
+func (db *DB) BlockProjectAssetForAccessFailure(
+	ctx context.Context,
+	projectID string,
+	ownerUserID string,
+	assetID string,
+	reason string,
+) (int, error) {
+	projectID = strings.TrimSpace(projectID)
+	ownerUserID = strings.TrimSpace(ownerUserID)
+	assetID = strings.TrimSpace(assetID)
+	reason = strings.TrimSpace(reason)
+	if projectID == "" || ownerUserID == "" || assetID == "" || reason == "" {
+		return 0, fmt.Errorf("项目、用户、资产和阻断原因不能为空")
+	}
+	if err := db.SyncProjectAssetWork(ctx, projectID, ownerUserID); err != nil {
+		return 0, err
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var state string
+	if err := tx.QueryRowContext(
+		ctx,
+		`SELECT work_state FROM project_asset_work
+		 WHERE project_id = ? AND owner_user_id = ? AND asset_id = ?`,
+		projectID,
+		ownerUserID,
+		assetID,
+	).Scan(&state); err != nil {
+		return 0, err
+	}
+	switch strings.ToLower(strings.TrimSpace(state)) {
+	case AssetWorkBlocked, AssetWorkAwaitingUser:
+		return 0, nil
+	}
+
+	now := time.Now().UTC()
+	result, err := tx.ExecContext(
+		ctx,
+		`UPDATE project_graph_nodes
+		 SET status = 'blocked',
+		     detail = CASE
+		       WHEN TRIM(detail) = '' THEN ?
+		       ELSE detail || char(10) || char(10) || ?
+		     END,
+		     updated_at = ?
+		 WHERE project_id = ? AND asset_id = ? AND kind = 'intent'
+		   AND status IN ('open', 'running', 'paused', 'blocked', 'capacity_blocked')`,
+		reason,
+		reason,
+		now.Unix(),
+		projectID,
+		assetID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if _, err := tx.ExecContext(
+		ctx,
+		`UPDATE project_asset_work
+		 SET work_state = ?, state_reason = ?,
+		     lease_owner = '', lease_conversation_id = '', lease_until = 0,
+		     last_progress_at = ?, updated_at = ?
+		 WHERE project_id = ? AND owner_user_id = ? AND asset_id = ?`,
+		AssetWorkBlocked,
+		reason,
+		now.Unix(),
+		now.Unix(),
+		projectID,
+		ownerUserID,
+		assetID,
+	); err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return int(affected), nil
+}
+
+func (db *DB) StopProjectAssetWork(
+	ctx context.Context,
+	projectID string,
+	ownerUserID string,
+	assetID string,
+	reason string,
+) (*ProjectAssetStopResult, error) {
+	projectID = strings.TrimSpace(projectID)
+	ownerUserID = strings.TrimSpace(ownerUserID)
+	assetID = strings.TrimSpace(assetID)
+	reason = strings.TrimSpace(reason)
+	if projectID == "" || ownerUserID == "" || assetID == "" {
+		return nil, fmt.Errorf("项目、用户和资产不能为空")
+	}
+	if reason == "" {
+		reason = "用户停止资产探测"
+	}
+	if err := db.SyncProjectAssetWork(ctx, projectID, ownerUserID); err != nil {
+		return nil, err
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var currentState string
+	if err := tx.QueryRowContext(
+		ctx,
+		`SELECT work_state FROM project_asset_work
+		 WHERE project_id = ? AND owner_user_id = ? AND asset_id = ?`,
+		projectID,
+		ownerUserID,
+		assetID,
+	).Scan(&currentState); err != nil {
+		return nil, err
+	}
+	switch strings.ToLower(strings.TrimSpace(currentState)) {
+	case AssetWorkQueued, AssetWorkActive, AssetWorkTesting,
+		AssetWorkNeedsFollowup, AssetWorkReopened:
+	default:
+		return nil, ErrAssetWorkNotStoppable
+	}
+
+	now := time.Now().UTC()
+	testResult, err := tx.ExecContext(
+		ctx,
+		`UPDATE project_test_results
+		 SET status = 'stopped', execution_state = 'stopped', outcome_state = 'unknown',
+		     state_reason = ?, last_finished_at = ?, updated_at = ?
+		 WHERE project_id = ? AND asset_id = ?
+		   AND status IN ('untested', 'running', 'paused')`,
+		AssetUserStopReason,
+		now.Unix(),
+		now.Unix(),
+		projectID,
+		assetID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	stoppedTests, err := testResult.RowsAffected()
+	if err != nil {
+		return nil, err
+	}
+	intentResult, err := tx.ExecContext(
+		ctx,
+		`UPDATE project_graph_nodes
+		 SET status = 'stopped',
+		     detail = CASE
+		       WHEN TRIM(detail) = '' THEN ?
+		       ELSE detail || char(10) || char(10) || ?
+		     END,
+		     updated_at = ?
+		 WHERE project_id = ? AND asset_id = ? AND kind = 'intent'
+		   AND status IN ('open', 'running', 'paused', 'capacity_blocked')`,
+		reason,
+		reason,
+		now.Unix(),
+		projectID,
+		assetID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	stoppedIntents, err := intentResult.RowsAffected()
+	if err != nil {
+		return nil, err
+	}
+	result, err := tx.ExecContext(
+		ctx,
+		`UPDATE project_asset_work
+		 SET work_state = ?, state_reason = ?,
+		     lease_owner = '', lease_conversation_id = '', lease_until = 0,
+		     last_progress_at = ?, updated_at = ?
+		 WHERE project_id = ? AND owner_user_id = ? AND asset_id = ?`,
+		AssetWorkBlocked,
+		reason,
+		now.Unix(),
+		now.Unix(),
+		projectID,
+		ownerUserID,
+		assetID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if affected, rowsErr := result.RowsAffected(); rowsErr != nil {
+		return nil, rowsErr
+	} else if affected == 0 {
+		return nil, sql.ErrNoRows
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return &ProjectAssetStopResult{
+		AssetID:        assetID,
+		StoppedIntents: stoppedIntents,
+		StoppedTests:   stoppedTests,
+	}, nil
 }
 
 func (db *DB) ReleaseProjectAssetWork(

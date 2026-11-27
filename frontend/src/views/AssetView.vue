@@ -46,6 +46,18 @@ interface AssetDraft {
   updatedAt?: string
 }
 
+interface AssetDeleteImpact {
+  intents: number
+  facts: number
+  memoryEntities: number
+  findings: number
+  tests: number
+  graphNodes: number
+  campaignRecords: number
+  conversations: number
+  vulnerabilityFingerprints: number
+}
+
 const STATUS_OPTIONS = [
   { value: 'unknown', label: t('assetStatus.unknown') },
   { value: 'active', label: t('assetStatus.active') },
@@ -71,6 +83,9 @@ const notice = ref('')
 const draft = ref<AssetDraft | null>(null)
 const editingId = ref('')
 const deleteTarget = ref<Asset | null>(null)
+const deleteImpact = ref<AssetDeleteImpact | null>(null)
+const deleteImpactLoading = ref(false)
+const deleteImpactError = ref('')
 const deleting = ref(false)
 const copiedId = ref('')
 let copyTimer: number | undefined
@@ -394,15 +409,27 @@ async function copyAssetValue(asset: Asset) {
   }
 }
 
-function requestDelete(asset: Asset) {
+async function requestDelete(asset: Asset) {
   if (canDelete.value) {
     deleteTarget.value = asset
+    deleteImpact.value = null
+    deleteImpactError.value = ''
+    deleteImpactLoading.value = true
+    try {
+      deleteImpact.value = await apiGet<AssetDeleteImpact>(`/assets/${asset.id}/delete-impact`)
+    } catch (err) {
+      deleteImpactError.value = err instanceof Error ? err.message : t('message.operationFailed')
+    } finally {
+      deleteImpactLoading.value = false
+    }
   }
 }
 
 function closeDeleteDialog() {
-  if (!deleting.value) {
+  if (!deleting.value && !deleteImpactLoading.value) {
     deleteTarget.value = null
+    deleteImpact.value = null
+    deleteImpactError.value = ''
   }
 }
 
@@ -417,11 +444,14 @@ async function confirmDelete() {
   try {
     await apiDelete(`/assets/${asset.id}`)
     deleteTarget.value = null
+    deleteImpact.value = null
+    deleteImpactError.value = ''
     notice.value = t('asset.deleted')
     await load()
   } catch (err) {
     error.value = err instanceof Error ? err.message : t('message.operationFailed')
     deleteTarget.value = null
+    deleteImpact.value = null
   } finally {
     deleting.value = false
   }
@@ -739,9 +769,23 @@ onUnmounted(() => {
           <header><span class="asset-warning" aria-hidden="true">!</span><div><span class="asset-code">ASSET REMOVAL</span><h2>{{ t('asset.deleteTitle') }}</h2></div></header>
           <p>{{ t('asset.deleteHint', { name: deleteTarget.name }) }}</p>
           <div class="asset-dialog-value"><span>{{ kindLabel(deleteTarget.kind) }}</span><code>{{ deleteTarget.value }}</code></div>
+          <div class="asset-delete-impact">
+            <strong>{{ t('asset.deleteImpactTitle') }}</strong>
+            <p v-if="deleteImpactLoading">{{ t('common.loading') }}</p>
+            <p v-else-if="deleteImpactError" class="asset-delete-impact-error">{{ deleteImpactError }}</p>
+            <ul v-else-if="deleteImpact">
+              <li><span>{{ t('asset.deleteImpactIntents') }}</span><b>{{ deleteImpact.intents }}</b></li>
+              <li><span>{{ t('asset.deleteImpactFacts') }}</span><b>{{ deleteImpact.facts }}</b></li>
+              <li><span>{{ t('asset.deleteImpactFindings') }}</span><b>{{ deleteImpact.findings }}</b></li>
+              <li><span>{{ t('asset.deleteImpactTests') }}</span><b>{{ deleteImpact.tests }}</b></li>
+              <li><span>{{ t('asset.deleteImpactGraphNodes') }}</span><b>{{ deleteImpact.graphNodes }}</b></li>
+              <li><span>{{ t('asset.deleteImpactCampaigns') }}</span><b>{{ deleteImpact.campaignRecords }}</b></li>
+              <li><span>{{ t('asset.deleteImpactConversations') }}</span><b>{{ deleteImpact.conversations }}</b></li>
+            </ul>
+          </div>
           <footer>
-            <button class="button compact" type="button" :disabled="deleting" @click="closeDeleteDialog">{{ t('common.cancel') }}</button>
-            <button class="button compact danger" type="button" :disabled="deleting" @click="confirmDelete">{{ deleting ? t('common.loading') : t('asset.deletePermanently') }}</button>
+            <button class="button compact" type="button" :disabled="deleting || deleteImpactLoading" @click="closeDeleteDialog">{{ t('common.cancel') }}</button>
+            <button class="button compact danger" type="button" :disabled="deleting || deleteImpactLoading || !deleteImpact" @click="confirmDelete">{{ deleting ? t('common.loading') : t('asset.deletePermanently') }}</button>
           </footer>
         </aside>
       </div>
@@ -2499,6 +2543,57 @@ onUnmounted(() => {
   font-size: 8px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.asset-delete-impact {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 9px;
+  border: 1px solid color-mix(in srgb, var(--asset-coral) 28%, var(--border));
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--asset-coral) 5%, transparent);
+}
+
+.asset-delete-impact > strong {
+  color: var(--text-secondary);
+  font-size: 9px;
+  font-weight: 500;
+}
+
+.asset-delete-impact > p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 9px;
+}
+
+.asset-delete-impact-error {
+  color: var(--danger) !important;
+}
+
+.asset-delete-impact ul {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 5px 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.asset-delete-impact li {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+  min-width: 0;
+  color: var(--text-muted);
+  font-size: 9px;
+}
+
+.asset-delete-impact b {
+  color: var(--text-primary);
+  font-family: var(--mono);
+  font-size: 9px;
 }
 
 .asset-dialog footer {

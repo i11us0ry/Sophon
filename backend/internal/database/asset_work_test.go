@@ -2,8 +2,10 @@ package database
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -305,5 +307,97 @@ func TestAssetCloseoutUsesAggregateEvidenceBeyondListLimit(t *testing.T) {
 	}
 	if status.CanClose || status.EvidenceGaps == 0 {
 		t.Fatalf("超过列表上限的缺证据漏洞仍应阻断关闭: %+v", status)
+	}
+}
+
+func TestStopProjectAssetWorkClosesUnfinishedIntentsAndTests(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "asset-user-stop.db"))
+	if err != nil {
+		t.Fatalf("打开数据库失败: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ctx := context.Background()
+	now := time.Now().UTC()
+	if err := db.CreateProject(ctx, Project{
+		ID: "project-user-stop", OwnerUserID: "user-1", Name: "用户停止资产",
+		Status: "active", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("创建项目失败: %v", err)
+	}
+	if err := db.CreateAsset(ctx, Asset{
+		ID: "asset-user-stop", ProjectID: "project-user-stop", OwnerUserID: "user-1",
+		Name: "停止目标", Kind: "url", Value: "https://stop.example.com",
+		Status: "active", Source: AssetSourceManual, Criticality: "high",
+		CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("创建资产失败: %v", err)
+	}
+	for _, node := range []GraphNode{
+		{ID: "intent-stop-open", ProjectID: "project-user-stop", Kind: "intent", Title: "待办", Status: "open", AssetID: "asset-user-stop", CreatedAt: now, UpdatedAt: now},
+		{ID: "intent-stop-running", ProjectID: "project-user-stop", Kind: "intent", Title: "运行中", Status: "running", AssetID: "asset-user-stop", CreatedAt: now, UpdatedAt: now},
+		{ID: "intent-stop-done", ProjectID: "project-user-stop", Kind: "intent", Title: "已完成", Status: "done", AssetID: "asset-user-stop", CreatedAt: now, UpdatedAt: now},
+	} {
+		if err := db.CreateProjectGraphNode(ctx, node); err != nil {
+			t.Fatalf("创建意图失败: %v", err)
+		}
+	}
+	for _, item := range []ProjectTestResult{
+		{ID: "test-stop-untested", ProjectID: "project-user-stop", AssetID: "asset-user-stop", Dimension: "待办测试", Technique: "http", Status: "untested", IntentID: "intent-stop-open", CreatedAt: now, UpdatedAt: now},
+		{ID: "test-stop-running", ProjectID: "project-user-stop", AssetID: "asset-user-stop", Dimension: "运行测试", Technique: "http", Status: "running", IntentID: "intent-stop-running", CreatedAt: now, UpdatedAt: now},
+		{ID: "test-stop-clean", ProjectID: "project-user-stop", AssetID: "asset-user-stop", Dimension: "已完成测试", Technique: "http", Status: "tested_clean", Evidence: "HTTP 200", IntentID: "intent-stop-done", CreatedAt: now, UpdatedAt: now},
+	} {
+		if _, err := db.UpsertProjectTestResult(ctx, item); err != nil {
+			t.Fatalf("创建测试结果失败: %v", err)
+		}
+	}
+	if err := db.SyncProjectAssetWork(ctx, "project-user-stop", "user-1"); err != nil {
+		t.Fatalf("同步资产工作项失败: %v", err)
+	}
+	result, err := db.StopProjectAssetWork(
+		ctx,
+		"project-user-stop",
+		"user-1",
+		"asset-user-stop",
+		"用户停止资产探测",
+	)
+	if err != nil {
+		t.Fatalf("停止资产失败: %v", err)
+	}
+	if result.StoppedIntents != 2 || result.StoppedTests != 2 {
+		t.Fatalf("停止数量错误: %+v", result)
+	}
+	work, err := db.GetProjectAssetWork(ctx, "project-user-stop", "user-1", "asset-user-stop")
+	if err != nil || work == nil || work.WorkState != AssetWorkBlocked ||
+		!strings.Contains(work.StateReason, "用户停止资产探测") {
+		t.Fatalf("资产工作项未停止: %+v err=%v", work, err)
+	}
+	for _, intentID := range []string{"intent-stop-open", "intent-stop-running"} {
+		node, err := db.GetProjectGraphNode(ctx, intentID, "project-user-stop")
+		if err != nil || node.Status != "stopped" || !strings.Contains(node.Detail, "用户停止资产探测") {
+			t.Fatalf("意图未停止: %+v err=%v", node, err)
+		}
+	}
+	done, err := db.GetProjectGraphNode(ctx, "intent-stop-done", "project-user-stop")
+	if err != nil || done.Status != "done" {
+		t.Fatalf("已完成意图不应被改写: %+v err=%v", done, err)
+	}
+	for _, testID := range []string{"test-stop-untested", "test-stop-running"} {
+		item, err := db.GetProjectTestResultByID(ctx, "project-user-stop", testID)
+		if err != nil || item.Status != "stopped" || item.StateReason != AssetUserStopReason {
+			t.Fatalf("测试结果未停止: %+v err=%v", item, err)
+		}
+	}
+	clean, err := db.GetProjectTestResultByID(ctx, "project-user-stop", "test-stop-clean")
+	if err != nil || clean.Status != "tested_clean" {
+		t.Fatalf("已完成测试不应被改写: %+v err=%v", clean, err)
+	}
+	if _, err := db.StopProjectAssetWork(
+		ctx,
+		"project-user-stop",
+		"user-1",
+		"asset-user-stop",
+		"重复停止",
+	); !errors.Is(err, ErrAssetWorkNotStoppable) {
+		t.Fatalf("已停止资产不应重复停止: %v", err)
 	}
 }

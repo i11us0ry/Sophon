@@ -2,6 +2,8 @@ package database
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"testing"
 	"time"
 )
@@ -63,12 +65,15 @@ func TestDeletingProjectRecordsKeepsGraphConsistent(t *testing.T) {
 	if err := db.CreateProjectGraphNode(ctx, node); err != nil {
 		t.Fatalf("创建资产节点失败: %v", err)
 	}
-	if err := db.DeleteAsset(ctx, asset.ID, "user-1"); err != nil {
+	if _, err := db.DeleteAsset(ctx, asset.ID, "user-1"); err != nil {
 		t.Fatalf("删除资产失败: %v", err)
 	}
 	storedNode, err := db.GetProjectGraphNode(ctx, node.ID, project.ID)
-	if err != nil || storedNode.AssetID != "" {
-		t.Fatalf("资产删除后节点引用应被清空: %+v err=%v", storedNode, err)
+	if err == nil && storedNode != nil {
+		t.Fatalf("资产删除后关联节点应被删除: %+v", storedNode)
+	}
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("读取已删除节点失败: %v", err)
 	}
 
 	vulnerability := Vulnerability{
