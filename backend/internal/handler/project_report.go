@@ -225,7 +225,7 @@ func buildProjectReportMarkdown(
 	sort.SliceStable(sortedFindings, func(i, j int) bool {
 		left, right := docxSeverityRank(sortedFindings[i].Severity), docxSeverityRank(sortedFindings[j].Severity)
 		if left != right {
-			return left < right
+			return left > right
 		}
 		return sortedFindings[i].UpdatedAt.After(sortedFindings[j].UpdatedAt)
 	})
@@ -293,15 +293,7 @@ func buildProjectReportMarkdown(
 	builder.WriteString("\n")
 
 	builder.WriteString("## 2. 报告信息与评估范围\n\n")
-	builder.WriteString("### 2.1 文档控制\n\n")
-	builder.WriteString("| 字段 | 内容 |\n|---|---|\n")
-	builder.WriteString(fmt.Sprintf("| 报告编号 | `%s` |\n", projectReportNumber(project.ID, generatedAt)))
-	builder.WriteString("| 报告版本 | V1.0 |\n")
-	builder.WriteString(fmt.Sprintf("| 生成时间 | %s |\n", projectReportTime(generatedAt)))
-	builder.WriteString("| 报告密级 | 内部 |\n")
-	builder.WriteString("| 报告状态 | 正式导出 |\n")
-	builder.WriteString("| 数据来源 | 项目资产、测试记录、漏洞证据与复测记录 |\n\n")
-	builder.WriteString("### 2.2 资产覆盖\n\n")
+	builder.WriteString("### 2.1 资产覆盖\n\n")
 	if coverage == nil {
 		builder.WriteString("覆盖数据不可用，本轮报告不能给出资产测试覆盖结论。\n\n")
 	} else {
@@ -322,18 +314,19 @@ func buildProjectReportMarkdown(
 		builder.WriteString(fmt.Sprintf("| 已确认漏洞 | %d | 平台当前确认可利用或存在的漏洞 |\n", coverage.FindingsConfirmed))
 		builder.WriteString(fmt.Sprintf("| 缺少证据的漏洞 | %d | 需要补充证据或继续验证的漏洞 |\n\n", coverage.FindingsWithoutEvidence))
 	}
-	builder.WriteString("### 2.3 项目目标\n\n")
+	builder.WriteString("### 2.2 项目目标\n\n")
 	builder.WriteString(markdownParagraph(project.Goals, "项目未填写目标。") + "\n\n")
-	builder.WriteString("### 2.4 授权与免责声明\n\n")
+	builder.WriteString("### 2.3 授权与免责声明\n\n")
 	builder.WriteString(scopeSummary + "\n\n")
 	builder.WriteString(reportAuthorizationNotice + "\n\n")
-	builder.WriteString("### 2.5 评估方法与限制\n\n")
+	builder.WriteString("### 2.4 评估方法与限制\n\n")
 	builder.WriteString("- 报告依据项目授权范围、资产记录、测试记录、漏洞证据和复测记录生成。\n")
 	builder.WriteString("- 风险等级沿用平台漏洞记录，当前报告不将平台等级声明为 CVSS 评分。\n")
 	builder.WriteString("- 覆盖状态依赖平台的测试记录、事实和证据关联；未测试或阻塞不代表目标不存在漏洞。\n")
 	builder.WriteString("- 报告结论以生成时数据为准，后续新增测试或证据应更新报告并重新导出。\n\n")
 
 	builder.WriteString("## 3. 漏洞统计\n\n")
+	builder.WriteString("### 3.1 状态统计\n\n")
 	builder.WriteString("| 状态 | 数量 |\n|---|---:|\n")
 	statuses := make([]string, 0, len(statusCounts))
 	for status := range statusCounts {
@@ -344,6 +337,22 @@ func buildProjectReportMarkdown(
 		builder.WriteString(fmt.Sprintf("| %s | %d |\n", docxStatusLabel(status), statusCounts[status]))
 	}
 	builder.WriteString("\n")
+	builder.WriteString("### 3.2 漏洞清单\n\n")
+	if len(sortedFindings) == 0 {
+		builder.WriteString("当前项目未记录漏洞。\n\n")
+	} else {
+		builder.WriteString("| 漏洞地址 | 漏洞类型 | 危害等级 |\n")
+		builder.WriteString("|---|---|---|\n")
+		for _, item := range sortedFindings {
+			builder.WriteString(fmt.Sprintf(
+				"| %s | %s | %s |\n",
+				markdownCell(docxValue(item.Target, item.Title)),
+				markdownCell(docxValue(item.VulnerabilityType, "未分类")),
+				docxSeverityLabel(item.Severity),
+			))
+		}
+		builder.WriteString("\n")
+	}
 
 	builder.WriteString("## 4. 漏洞详情\n\n")
 	if len(sortedFindings) == 0 {
@@ -362,13 +371,6 @@ func buildProjectReportMarkdown(
 			builder.WriteString("#### 前置条件\n\n" + markdownParagraph(item.Preconditions, "否") + "\n\n")
 			builder.WriteString("#### 复现步骤\n\n" + markdownParagraph(item.ReproductionSteps, "未记录。") + "\n\n")
 			builder.WriteString("#### 证据\n\n" + markdownParagraph(item.Evidence, "无") + "\n\n")
-			if len(item.EvidenceRefs) > 0 {
-				builder.WriteString("#### 证据引用\n\n")
-				for _, ref := range item.EvidenceRefs {
-					builder.WriteString("- `" + strings.ReplaceAll(strings.TrimSpace(ref), "`", "'") + "`\n")
-				}
-				builder.WriteString("\n")
-			}
 			builder.WriteString("#### 影响\n\n" + markdownParagraph(item.Impact, "未记录。") + "\n\n")
 			builder.WriteString("#### 修复建议\n\n" + markdownParagraph(item.Recommendation, "未记录。") + "\n\n")
 			builder.WriteString("#### 复测备注\n\n" + markdownParagraph(item.RetestNotes, "无法复测") + "\n\n")
@@ -403,7 +405,7 @@ func buildProjectReportMarkdown(
 	builder.WriteString("## 6. 附录与数据说明\n\n")
 	builder.WriteString("- 完整资产清单：`assets.csv`\n")
 	builder.WriteString("- 漏洞列表：`vulnerabilities.csv`\n")
-	builder.WriteString("- 漏洞证据原文：见各漏洞“证据”和“证据引用”章节\n")
+	builder.WriteString("- 漏洞证据原文：见各漏洞“证据”章节\n")
 	builder.WriteString("- 本报告由 Sophon 根据项目数据库记录生成\n")
 	return builder.String()
 }
@@ -798,7 +800,6 @@ func reportHTMLDocument(
 		1,
 	)
 	logo := reportSophonLogoDataURL()
-	scope := htmlstd.EscapeString(reportScopeSummary(project.Scope))
 	projectName := htmlstd.EscapeString(docxValue(project.Name, "未命名项目"))
 	disclaimer := htmlstd.EscapeString(reportAuthorizationNotice)
 	reportNo := htmlstd.EscapeString(projectReportNumber(project.ID, generatedAt))
@@ -811,28 +812,28 @@ func reportHTMLDocument(
 @page { size: A4; margin: 14mm; }
 * { box-sizing: border-box; }
 body { margin: 0; color: #202027; background: #ffffff; font-family: "Droid Sans Fallback", "DejaVu Sans", sans-serif; font-size: 10.8pt; line-height: 1.8; letter-spacing: 0.015em; }
-.cover { position: relative; display: flex; min-height: 258mm; flex-direction: column; padding: 0; overflow: hidden; border: 1px solid #dce3e9; color: #202027; background: #f6f7f9; page-break-after: always; }
-.cover-band { position: relative; padding: 14mm 15mm 12mm; overflow: hidden; color: #eef2f5; background: #202027; }
-.cover-band::before { position: absolute; inset: 0; content: ""; background-image: linear-gradient(rgba(85, 199, 232, 0.055) 1px, transparent 1px), linear-gradient(90deg, rgba(85, 199, 232, 0.055) 1px, transparent 1px); background-size: 24px 24px; pointer-events: none; }
-.cover-band::after { position: absolute; bottom: 0; left: 15mm; width: 52mm; height: 2px; content: ""; background: #03c3ec; }
-.cover-band > * { position: relative; z-index: 1; }
-.brand-bar { display: flex; align-items: center; gap: 14px; padding-bottom: 13px; border-bottom: 1px solid rgba(232, 238, 245, 0.18); }
-.brand-logo { width: 50px; height: 50px; flex: 0 0 auto; border: 1px solid rgba(232, 238, 245, 0.24); border-radius: 6px; object-fit: cover; }
-.brand-name { color: #ffffff; font-size: 19pt; font-weight: 700; line-height: 1.1; letter-spacing: 0.02em; }
-.brand-caption { margin-top: 5px; color: #8f99a8; font-size: 7.5pt; letter-spacing: 0.12em; }
-.cover-topline { display: flex; justify-content: space-between; margin-top: 12px; color: #778391; font-family: "DejaVu Sans Mono", monospace; font-size: 7.5pt; letter-spacing: 0.12em; }
-.cover-main { display: flex; flex: 1; flex-direction: column; justify-content: center; padding: 16mm 15mm 10mm; }
-.cover-kicker { color: #0b88b2; font-family: "DejaVu Sans Mono", monospace; font-size: 8.5pt; font-weight: 700; letter-spacing: 0.16em; }
-.cover h1 { margin: 14px 0 10px; color: #202027; font-size: 29pt; line-height: 1.22; letter-spacing: 0.01em; }
-.cover h1 span { display: block; margin-top: 4px; color: #40505e; font-size: 21pt; font-weight: 500; }
-.cover-subtitle { margin: 0; color: #6b7280; font-size: 10.5pt; }
-.cover-meta { display: grid; grid-template-columns: 30mm minmax(0, 1fr); gap: 7px 12px; margin: 28px 0 0; padding: 13px 0; border-top: 1px solid #d9e0e7; border-bottom: 1px solid #d9e0e7; font-size: 9pt; }
-.cover-meta dt { color: #7b8794; font-family: "DejaVu Sans Mono", monospace; font-size: 8pt; }
-.cover-meta dd { margin: 0; color: #202027; font-weight: 600; overflow-wrap: anywhere; }
-.authorization { margin-top: 15px; padding: 11px 13px; border: 1px solid #e8c796; border-left: 4px solid #f0a43a; background: #fffaf1; color: #5f4528; }
+.cover { display: flex; height: 100vh; min-height: 100vh; flex-direction: column; overflow: hidden; border: 1px solid #dce3e9; color: #202027; background: #f7f9fb; page-break-after: always; }
+.cover-top { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 11mm 15mm; border-bottom: 1px solid #dce3e9; background: #ffffff; }
+.cover-brand { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.brand-logo { width: 44px; height: 44px; flex: 0 0 auto; border: 1px solid #dce3e9; border-radius: 6px; object-fit: cover; }
+.brand-name { color: #202027; font-size: 17pt; font-weight: 750; line-height: 1.1; letter-spacing: 0.01em; }
+.brand-caption { margin-top: 4px; color: #7b8794; font-size: 7.2pt; letter-spacing: 0.1em; }
+.cover-topline { color: #7b8794; font-family: "DejaVu Sans Mono", monospace; font-size: 7.2pt; letter-spacing: 0.1em; text-align: right; }
+.cover-hero { display: flex; flex: 1; flex-direction: column; align-items: center; justify-content: center; padding: 20mm 17mm 12mm; text-align: center; }
+.cover-title { max-width: 162mm; margin: 0 auto; color: #202027; font-size: 30pt; font-weight: 760; line-height: 1.24; letter-spacing: 0.005em; text-align: center; overflow-wrap: anywhere; }
+.cover-title::after { display: block; width: 36mm; height: 2px; margin: 8mm auto 7mm; content: ""; background: #03c3ec; }
+.cover-subtitle { margin: 0; color: #40505e; font-size: 18pt; font-weight: 650; line-height: 1.3; text-align: center; }
+.cover-description { margin: 7mm 0 0; color: #7b8794; font-size: 9.5pt; text-align: center; }
+.cover-facts { display: grid; width: 100%; max-width: 162mm; grid-template-columns: minmax(0, 1fr); margin: 13mm auto 0; border: 1px solid #dce3e9; background: #ffffff; text-align: left; }
+.cover-facts > div { display: grid; min-width: 0; grid-template-columns: 34mm minmax(0, 1fr); gap: 6mm; align-items: center; padding: 4mm 5mm; border-bottom: 1px solid #dce3e9; text-align: left; }
+.cover-facts > div:last-child { border-bottom: 0; }
+.cover-facts small { display: block; color: #7b8794; font-family: "DejaVu Sans Mono", monospace; font-size: 7.2pt; letter-spacing: 0.08em; }
+.cover-facts strong { display: block; margin: 0; color: #202027; font-size: 9.5pt; line-height: 1.45; text-align: left; overflow-wrap: anywhere; }
+.cover-bottom { margin-top: auto; padding: 0 15mm 10mm; }
+.authorization { padding: 4mm 5mm; border: 1px solid #e8c796; border-left: 3px solid #f0a43a; background: #fffaf1; color: #5f4528; }
 .authorization strong { display: block; margin-bottom: 4px; color: #a35a16; font-size: 9pt; }
 .authorization p { margin: 0; font-size: 8.5pt; line-height: 1.65; text-align: left; }
-.cover-footer { display: flex; justify-content: space-between; gap: 12px; margin: 0 15mm; padding: 10px 0 11mm; border-top: 1px solid #d9e0e7; color: #7b8794; font-family: "DejaVu Sans Mono", monospace; font-size: 7pt; letter-spacing: 0.1em; }
+.cover-footer { display: flex; justify-content: space-between; gap: 12px; margin: 4mm 0 0; padding: 4mm 0 0; border-top: 1px solid #d9e0e7; color: #7b8794; font-family: "DejaVu Sans Mono", monospace; font-size: 7pt; letter-spacing: 0.1em; }
 .report-body > h1:first-child { display: none; }
 .report-body h1 { margin: 0 0 18px; padding-bottom: 8px; border-bottom: 2px solid #03c3ec; color: #202027; font-size: 22pt; }
 .report-body h2 { margin: 27px 0 13px; padding: 10px 13px 9px 14px; border: 1px solid #34343d; border-left: 4px solid #03c3ec; background: #202027; color: #f1f4f7; font-size: 17.5pt; font-weight: 700; letter-spacing: 0.02em; page-break-before: auto; page-break-after: avoid; }
@@ -888,29 +889,27 @@ hr { margin: 18px 0; border: 0; border-top: 1px solid #d7dee6; }
 .severity-empty { margin: 4px 0; color: #7b8794; font-size: 9pt; }
 </style></head><body>
 <section class="cover">
-  <div class="cover-band">
-    <header class="brand-bar">
+  <header class="cover-top">
+    <div class="cover-brand" aria-label="Sophon 智能安全助手">
       <img class="brand-logo" src="` + logo + `" alt="Sophon">
       <div><div class="brand-name">Sophon</div><div class="brand-caption">智能安全助手 / INTELLIGENT SECURITY ASSISTANT</div></div>
-    </header>
-    <div class="cover-topline"><span>DOSSIER / RISK ASSESSMENT</span><span>INTERNAL / V1.0</span></div>
-  </div>
-  <div class="cover-main">
-    <div class="cover-kicker">AUTHORIZED SECURITY ASSESSMENT</div>
-    <h1>` + projectName + `<span>风险评估报告</span></h1>
-    <p class="cover-subtitle">基于授权测试记录、运行证据与漏洞数据生成</p>
-    <dl class="cover-meta">
-      <dt>项目名称</dt><dd>` + projectName + `</dd>
-      <dt>报告编号</dt><dd>` + reportNo + `</dd>
-      <dt>授权范围</dt><dd>` + scope + `</dd>
-      <dt>生成日期</dt><dd>` + generatedText + `</dd>
-      <dt>报告密级</dt><dd>内部</dd>
-      <dt>报告版本</dt><dd>V1.0</dd>
-      <dt>报告来源</dt><dd>Sophon 智能安全助手</dd>
-    </dl>
+    </div>
+    <div class="cover-topline">DOSSIER / RISK ASSESSMENT<br>INTERNAL / V1.0</div>
+  </header>
+  <main class="cover-hero">
+    <h1 class="cover-title">` + projectName + `</h1>
+    <p class="cover-subtitle">风险评估报告</p>
+    <p class="cover-description">基于授权测试记录、运行证据与漏洞数据生成</p>
+    <div class="cover-facts">
+      <div><small>报告编号</small><strong>` + reportNo + `</strong></div>
+      <div><small>生成日期</small><strong>` + generatedText + `</strong></div>
+      <div><small>报告密级</small><strong>内部 / V1.0</strong></div>
+    </div>
+  </main>
+  <div class="cover-bottom">
     <div class="authorization"><strong>授权与免责声明</strong><p>` + disclaimer + `</p></div>
+    <footer class="cover-footer"><span>INTERNAL USE ONLY</span><span>SOPHON / INTELLIGENT SECURITY ASSISTANT</span></footer>
   </div>
-  <footer class="cover-footer"><span>INTERNAL USE ONLY</span><span>SOPHON / INTELLIGENT SECURITY ASSISTANT</span></footer>
 </section>
 <main class="report-body">` + body + `</main>
 </body></html>`

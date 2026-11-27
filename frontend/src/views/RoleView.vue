@@ -2,6 +2,7 @@
 import { computed, nextTick, onMounted, reactive, ref } from 'vue'
 
 import { apiDelete, apiGet, apiPost, apiPut } from '../api/client'
+import AgentIdentityRobot from '../components/AgentIdentityRobot.vue'
 import PageTitleRobot from '../components/PageTitleRobot.vue'
 import { useI18n } from '../i18n'
 import { useAuthStore } from '../stores/auth'
@@ -30,6 +31,22 @@ interface AgentRole {
 interface SkillItem {
   name: string
   description: string
+}
+
+type RoleRobotIdentity =
+  | 'mainagent'
+  | 'planner'
+  | 'worker'
+  | 'system'
+  | 'reviewer'
+  | 'writer'
+  | 'retest'
+  | 'policy'
+  | 'profile'
+
+interface RoleRobotVisual {
+  identity: RoleRobotIdentity
+  accent: string
 }
 
 const roles = ref<AgentRole[]>([])
@@ -93,6 +110,47 @@ const draftIsSystem = computed(() => (draft.value ? isSystemRole(draft.value) : 
 
 function isSystemRole(role: AgentRole) {
   return Boolean(role.internal || role.system || role.kind === 'system_agent')
+}
+
+const roleRobotAccents = [
+  '#55c7e8',
+  '#f0a43a',
+  '#fb7185',
+  '#34d399',
+  '#a78bfa',
+  '#22d3ee',
+]
+
+function roleRobotVisual(role: AgentRole): RoleRobotVisual {
+  switch (role.id) {
+    case 'system-main-agent':
+      return { identity: 'mainagent', accent: '#f0b94d' }
+    case 'system-deep-path-planner':
+      return { identity: 'planner', accent: '#55c7e8' }
+    case 'system-deep-path-worker':
+      return { identity: 'worker', accent: '#ff9f43' }
+    case 'system-retest-agent':
+      return { identity: 'retest', accent: '#22d3ee' }
+    case 'system-vulnerability-reviewer':
+      return { identity: 'reviewer', accent: '#34d399' }
+    case 'system-vulnerability-writer':
+      return { identity: 'writer', accent: '#a78bfa' }
+    case 'system-mission-policy':
+      return { identity: 'policy', accent: '#d4a72c' }
+    default:
+      break
+  }
+  if (isSystemRole(role)) {
+    return { identity: 'system', accent: '#8b9aaa' }
+  }
+  let hash = 0
+  for (const character of role.id) {
+    hash = (hash * 31 + character.charCodeAt(0)) >>> 0
+  }
+  return {
+    identity: 'profile',
+    accent: roleRobotAccents[hash % roleRobotAccents.length],
+  }
 }
 
 async function load() {
@@ -304,14 +362,20 @@ onMounted(load)
           <span>{{ group.items.length }}</span>
         </header>
         <div class="role-grid">
-          <article v-for="role in group.items" :key="role.id" class="role-card">
+          <article
+            v-for="role in group.items"
+            :key="role.id"
+            class="role-card"
+            :style="{ '--bot-tone': roleRobotVisual(role).accent }"
+          >
             <div class="role-card-unit">
               <div class="role-bot" :class="{ off: !role.enabled }" aria-hidden="true">
-                <span class="role-bot-antenna"></span>
-                <span class="role-bot-head"><i></i><i></i><b class="role-bot-mouth"></b></span>
-                <span class="role-bot-body">
-                  <span class="role-bot-core"></span>
-                </span>
+                <AgentIdentityRobot
+                  :role="roleRobotVisual(role).identity"
+                  status="idle"
+                  size="lg"
+                  :accent="roleRobotVisual(role).accent"
+                />
               </div>
               <div class="role-card-content">
                 <div class="role-card-title">
@@ -431,9 +495,17 @@ onMounted(load)
 
     <aside v-if="systemAgent" class="role-drawer system-agent-drawer">
       <header class="drawer-header">
-        <div>
-          <h2>{{ systemAgent.name }}</h2>
-          <small>{{ t('role.systemAgent') }}</small>
+        <div class="system-agent-heading">
+          <AgentIdentityRobot
+            :role="roleRobotVisual(systemAgent).identity"
+            status="idle"
+            size="md"
+            :accent="roleRobotVisual(systemAgent).accent"
+          />
+          <div>
+            <h2>{{ systemAgent.name }}</h2>
+            <small>{{ t('role.systemAgent') }}</small>
+          </div>
         </div>
         <button class="text-button dark" type="button" @click="systemAgent = null">
           {{ t('common.close') }}
@@ -813,6 +885,11 @@ onMounted(load)
   opacity: 0.52;
 }
 
+.role-bot.off :deep(.agent-robot) {
+  filter: grayscale(1);
+  opacity: 0.72;
+}
+
 .role-bot.off .role-bot-antenna::before,
 .role-bot.off .role-bot-head i {
   animation: none;
@@ -1063,6 +1140,12 @@ onMounted(load)
   border: 1px solid color-mix(in srgb, var(--warning) 28%, var(--line));
   border-radius: 4px;
   background: color-mix(in srgb, var(--warning) 6%, var(--surface-soft));
+}
+
+.system-agent-heading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 
 .system-agent-banner > div {

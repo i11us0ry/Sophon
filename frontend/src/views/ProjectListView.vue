@@ -155,9 +155,8 @@ function statusLabel(status: string) {
   return t(`projectStatus.${status}`)
 }
 
-function projectInitial(value: string) {
-  const first = Array.from(value.trim())[0] ?? 'P'
-  return first.toUpperCase()
+function factoryStatusLabel(status: string) {
+  return t(`projectFactoryStatus.${status}`)
 }
 
 const batchAssetCount = computed(
@@ -870,9 +869,16 @@ onUnmounted(() => {
       >
         <div class="project-main">
           <div class="project-summary">
-            <div class="project-mark" aria-hidden="true">
-              <span>{{ projectInitial(project.name) }}</span>
-              <i></i>
+            <div
+              class="project-factory-cell"
+              :class="`factory-${project.status}`"
+              aria-hidden="true"
+            >
+              <span class="factory-scanner"></span>
+              <span class="factory-lamp"></span>
+              <span class="factory-robot"></span>
+              <span class="factory-crate"></span>
+              <span class="factory-belt"></span>
             </div>
             <div class="project-copy">
               <div class="project-head">
@@ -886,7 +892,7 @@ onUnmounted(() => {
                   {{ project.name }}
                 </button>
                 <span class="status-badge" :class="`status-${project.status}`">
-                  {{ statusLabel(project.status) }}
+                  {{ factoryStatusLabel(project.status) }}
                 </span>
               </div>
               <span class="project-record-id">
@@ -897,41 +903,47 @@ onUnmounted(() => {
               </p>
             </div>
           </div>
-          <div class="project-meta-line">
-            <span>
-              <small>{{ t('project.tabPendingIntents') }}</small>
-              <strong>{{ project.counts?.pendingIntents ?? 0 }}</strong>
-            </span>
-            <span>
-              <small>{{ t('project.tabEvidenceGaps') }}</small>
-              <strong>{{ project.counts?.evidenceGaps ?? 0 }}</strong>
-            </span>
-            <span>
-              <small>{{ t('project.facts') }}</small>
-              <strong>{{ project.counts?.facts ?? 0 }}</strong>
-            </span>
-            <span>
-              <small>{{ t('project.attackSteps') }}</small>
-              <strong>{{ project.counts?.attackSteps ?? 0 }}</strong>
-            </span>
-            <span>
+          <div class="project-stats-line">
+            <span class="project-metric">
               <small>{{ t('project.assets') }}</small>
               <strong>{{ project.counts?.assets ?? 0 }}</strong>
             </span>
-            <span>
-              <small>{{ t('nav.chat') }}</small>
-              <strong>{{ project.counts?.conversations ?? 0 }}</strong>
-            </span>
-            <span class="project-meta-token" :title="projectTokenTitle(project)">
-              <small>{{ t('project.tokenUsage') }}</small>
-              <strong>{{ formatTokenCount(project.counts?.totalTokens ?? 0) }}</strong>
+            <span class="project-metric">
+              <small>{{ t('project.tabPendingIntents') }}</small>
+              <strong>{{ project.counts?.pendingIntents ?? 0 }}</strong>
             </span>
             <span
-              class="project-meta-risk"
-              :class="{ alert: (project.counts?.vulnerabilities ?? 0) > 0 }"
+              class="project-metric"
+              :class="{ risk: (project.counts?.vulnerabilities ?? 0) > 0 }"
             >
               <small>{{ t('project.vulnerabilities') }}</small>
               <strong>{{ project.counts?.vulnerabilities ?? 0 }}</strong>
+            </span>
+            <span
+              v-if="(project.counts?.evidenceGaps ?? 0) > 0"
+              class="project-metric warning"
+            >
+              <small>{{ t('project.tabEvidenceGaps') }}</small>
+              <strong>{{ project.counts?.evidenceGaps ?? 0 }}</strong>
+            </span>
+            <span class="project-stat-detail">
+              <small>{{ t('project.facts') }}</small>
+              <strong>{{ project.counts?.facts ?? 0 }}</strong>
+            </span>
+            <span class="project-stat-detail">
+              <small>{{ t('project.attackSteps') }}</small>
+              <strong>{{ project.counts?.attackSteps ?? 0 }}</strong>
+            </span>
+            <span class="project-stat-detail">
+              <small>{{ t('nav.chat') }}</small>
+              <strong>{{ project.counts?.conversations ?? 0 }}</strong>
+            </span>
+            <span
+              class="project-stat-detail project-meta-token"
+              :title="projectTokenTitle(project)"
+            >
+              <small>{{ t('project.tokenUsage') }}</small>
+              <strong>{{ formatTokenCount(project.counts?.totalTokens ?? 0) }}</strong>
             </span>
           </div>
         </div>
@@ -948,6 +960,7 @@ onUnmounted(() => {
               @click="openProject(project)"
             >
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6" /></svg>
+              <span>{{ t('project.enter') }}</span>
             </button>
             <button
               v-if="project.status === 'active' || project.status === 'paused'"
@@ -966,11 +979,15 @@ onUnmounted(() => {
                 <path d="M8 5l11 7-11 7z" />
               </svg>
               <span>
-                {{ project.status === 'active' ? t('project.pauseAction') : t('project.resumeAction') }}
+                {{
+                  project.status === 'active'
+                    ? t('project.pauseFactoryAction')
+                    : t('project.resumeFactoryAction')
+                }}
               </span>
             </button>
             <button
-              class="project-action-quiet project-action-icon"
+              class="project-action-secondary"
               type="button"
               :title="t('project.export')"
               :aria-label="t('project.export')"
@@ -979,9 +996,10 @@ onUnmounted(() => {
               <svg viewBox="0 0 24 24" aria-hidden="true">
                 <path d="M12 4v11M7 10l5 5 5-5M5 20h14" />
               </svg>
+              <span>{{ t('project.export') }}</span>
             </button>
             <button
-              class="project-action-quiet project-action-icon"
+              class="project-action-secondary"
               type="button"
               :title="t('common.edit')"
               :aria-label="t('common.edit')"
@@ -990,9 +1008,10 @@ onUnmounted(() => {
               <svg viewBox="0 0 24 24" aria-hidden="true">
                 <path d="M4 20h4l11-11-4-4L4 16v4zM13.5 6.5l4 4" />
               </svg>
+              <span>{{ t('common.edit') }}</span>
             </button>
             <button
-              class="project-action-quiet project-action-icon danger"
+              class="project-action-secondary danger"
               type="button"
               :title="t('common.delete')"
               :aria-label="t('common.delete')"
@@ -1001,6 +1020,7 @@ onUnmounted(() => {
               <svg viewBox="0 0 24 24" aria-hidden="true">
                 <path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13M10 11v5M14 11v5" />
               </svg>
+              <span>{{ t('common.delete') }}</span>
             </button>
           </div>
         </div>
@@ -1833,7 +1853,7 @@ onUnmounted(() => {
 }
 
 .project-name {
-  flex: 1 1 auto;
+  flex: 0 1 auto;
   min-width: 0;
   padding: 0;
   border: 0;
@@ -2310,22 +2330,23 @@ onUnmounted(() => {
 }
 
 .project-inventory .project-grid {
-  gap: 1px;
-  padding: 1px;
-  overflow: hidden;
-  border: 1px solid var(--project-line);
-  border-radius: 4px;
-  background: var(--project-line);
+  gap: 8px;
+  padding: 0;
+  overflow: visible;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
 }
 
 .project-inventory .project-card {
-  grid-template-columns: minmax(0, 1fr) 250px;
-  gap: 14px;
-  min-height: 96px;
-  padding: 10px 12px;
-  border: 0;
-  border-left: 2px solid var(--project-tone);
-  border-radius: 0;
+  grid-template-columns: minmax(0, 1fr) 386px;
+  gap: 16px;
+  min-height: 112px;
+  padding: 13px 15px;
+  overflow: visible;
+  border: 1px solid var(--project-line);
+  border-left: 3px solid var(--project-tone);
+  border-radius: 5px;
   background: var(--project-panel);
 }
 
@@ -2338,49 +2359,135 @@ onUnmounted(() => {
 }
 
 .project-inventory .project-summary {
-  grid-template-columns: 42px minmax(0, 1fr);
+  grid-template-columns: 54px minmax(0, 1fr);
   gap: 12px;
+  align-items: start;
 }
 
-.project-inventory .project-mark {
-  width: 42px;
-  height: 42px;
-  border-radius: 5px;
+.project-factory-cell {
+  position: relative;
+  width: 54px;
+  height: 54px;
+  overflow: hidden;
   color: var(--project-tone);
+  border: 1px solid color-mix(in srgb, var(--project-tone) 48%, var(--project-line));
+  border-radius: 4px;
   background:
-    linear-gradient(135deg, color-mix(in srgb, var(--project-tone) 12%, transparent), transparent),
-    color-mix(in srgb, var(--project-tone) 3%, var(--surface));
-  font-size: 15px;
+    linear-gradient(color-mix(in srgb, var(--project-tone) 8%, transparent), transparent),
+    #0d1415;
 }
 
-.project-inventory .project-mark::before {
+.project-factory-cell::before {
+  position: absolute;
+  inset: 5px;
+  content: '';
+  opacity: 0.38;
+  background:
+    linear-gradient(var(--project-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--project-line) 1px, transparent 1px);
+  background-size: 9px 9px;
+}
+
+.factory-robot {
+  position: absolute;
+  top: 8px;
+  left: 19px;
+  z-index: 2;
+  width: 17px;
+  height: 13px;
+  border: 1px solid currentColor;
+  border-radius: 3px;
+  background: color-mix(in srgb, currentColor 8%, #0d1415);
+}
+
+.factory-robot::before {
+  position: absolute;
+  top: 4px;
+  left: 3px;
+  width: 3px;
+  height: 3px;
+  content: '';
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow:
+    7px 0 0 currentColor,
+    3px 5px 0 -1px currentColor;
+}
+
+.factory-robot::after {
   position: absolute;
   top: -5px;
-  left: 19px;
+  left: 7px;
   width: 1px;
   height: 5px;
   content: '';
   background: currentColor;
 }
 
-.project-inventory .project-mark::after {
+.factory-lamp {
   position: absolute;
-  top: -7px;
-  left: 17px;
+  top: 7px;
+  right: 7px;
+  z-index: 3;
   width: 5px;
-  height: 3px;
-  content: '';
-  border: 1px solid currentColor;
-  border-radius: 2px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
 }
 
-.project-inventory .project-mark i {
+.factory-belt {
+  position: absolute;
+  right: 6px;
+  bottom: 8px;
+  left: 6px;
+  z-index: 2;
+  height: 8px;
+  border-top: 1px solid currentColor;
+  border-bottom: 1px solid color-mix(in srgb, currentColor 55%, transparent);
+  background: repeating-linear-gradient(
+    90deg,
+    transparent 0 5px,
+    color-mix(in srgb, currentColor 40%, transparent) 5px 7px
+  );
+}
+
+.factory-crate {
+  position: absolute;
+  bottom: 17px;
+  left: 6px;
+  z-index: 3;
+  width: 7px;
+  height: 6px;
+  border: 1px solid currentColor;
+  background: color-mix(in srgb, currentColor 18%, #0d1415);
+  opacity: 0;
+}
+
+.factory-scanner {
+  position: absolute;
   top: 5px;
-  right: 5px;
-  width: 4px;
-  height: 4px;
-  border: 0;
-  box-shadow: 0 0 6px currentColor;
+  bottom: 17px;
+  left: 5px;
+  z-index: 4;
+  width: 1px;
+  background: currentColor;
+  opacity: 0;
+}
+
+.factory-active .factory-belt {
+  animation: factory-belt-run 0.9s linear infinite;
+}
+
+.factory-active .factory-crate {
+  animation: factory-crate-run 2.8s linear infinite;
+}
+
+.factory-active .factory-scanner {
+  animation: factory-scan 3.2s ease-in-out infinite;
+}
+
+.factory-active .factory-lamp {
+  animation: factory-lamp-pulse 1.8s ease-in-out infinite;
 }
 
 .project-inventory .project-copy {
@@ -2400,90 +2507,169 @@ onUnmounted(() => {
 }
 
 .project-inventory .status-badge {
-  padding: 2px 6px;
-  border-radius: 2px;
-  font-size: 8px;
+  padding: 2px 7px;
+  border-radius: 3px;
+  font-size: 9px;
 }
 
 .project-inventory .project-description {
   color: var(--text-muted);
-  font-size: 10px;
-  -webkit-line-clamp: 1;
+  font-size: 11px;
+  -webkit-line-clamp: 2;
 }
 
-.project-inventory .project-meta-line {
-  gap: 2px 0;
-  padding-left: 54px;
+.project-stats-line {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 5px;
+  align-items: center;
+  min-width: 0;
+  padding-left: 66px;
+  overflow: hidden;
 }
 
-.project-inventory .project-meta-line span {
-  gap: 4px;
-  padding: 0 8px;
+.project-metric {
+  display: inline-flex;
+  gap: 5px;
+  align-items: baseline;
+  padding: 3px 7px;
+  border: 1px solid var(--project-line);
+  border-radius: 3px;
+  color: var(--text-muted);
+  background: color-mix(in srgb, var(--field-bg) 72%, transparent);
+  font-size: 9px;
+  flex: 0 0 auto;
 }
 
-.project-inventory .project-meta-line small {
-  font-size: 8px;
+.project-metric small {
+  color: inherit;
+  font-size: 9px;
+  white-space: nowrap;
 }
 
-.project-inventory .project-meta-line strong {
+.project-metric strong {
+  color: var(--text-primary);
   font-family: var(--mono);
   font-size: 10px;
 }
 
+.project-metric.risk {
+  border-color: color-mix(in srgb, var(--danger) 48%, var(--project-line));
+}
+
+.project-metric.risk strong {
+  color: var(--danger);
+}
+
+.project-metric.warning {
+  border-color: color-mix(in srgb, var(--warning) 44%, var(--project-line));
+  color: var(--warning);
+}
+
+.project-metric.warning strong {
+  color: var(--warning);
+}
+
+.project-stat-detail {
+  display: flex;
+  gap: 4px;
+  align-items: baseline;
+  padding: 0 8px;
+  border-left: 1px solid var(--project-line);
+  color: var(--text-muted);
+  font-size: 8px;
+  white-space: nowrap;
+}
+
+.project-stat-detail small {
+  color: inherit;
+  font-size: inherit;
+}
+
+.project-stat-detail strong {
+  color: color-mix(in srgb, var(--text-primary) 74%, var(--text-muted));
+  font-family: var(--mono);
+  font-size: 9px;
+}
+
+.project-stat-detail.project-meta-token strong {
+  color: var(--project-accent);
+}
+
 .project-inventory .project-side {
-  gap: 8px;
+  gap: 9px;
   padding-left: 12px;
   border-left-color: var(--project-line);
 }
 
 .project-inventory .project-updated {
-  font-size: 7px;
+  font-size: 8px;
 }
 
 .project-inventory .project-actions {
-  gap: 4px;
+  gap: 5px;
   flex-wrap: nowrap;
 }
 
-.project-inventory .project-action-open {
+.project-inventory .project-action-open,
+.project-inventory .project-action-lifecycle,
+.project-inventory .project-action-secondary {
   display: inline-flex;
+  gap: 4px;
   align-items: center;
   justify-content: center;
-  width: 27px;
-  min-width: 27px;
-  height: 27px;
-  padding: 4px;
+  width: auto;
+  height: 29px;
+  padding: 4px 8px;
   font-size: 9px;
+  white-space: nowrap;
+}
+
+.project-inventory .project-action-open {
+  min-width: 58px;
 }
 
 .project-inventory .project-action-lifecycle {
-  width: 27px;
-  min-width: 27px;
-  height: 27px;
-  padding: 4px;
+  min-width: 78px;
 }
 
-.project-inventory .project-action-lifecycle span {
-  display: none;
+.project-inventory .project-action-secondary {
+  min-width: 52px;
+  border: 1px solid var(--project-line);
+  color: var(--text-muted);
+  background: color-mix(in srgb, var(--field-bg) 58%, transparent);
 }
 
-.project-inventory .project-action-quiet {
-  display: inline-flex;
-  width: 27px;
-  height: 27px;
-  min-width: 27px;
-  align-items: center;
-  justify-content: center;
-  padding: 4px;
-  border-color: var(--border);
-  white-space: nowrap;
+.project-inventory .project-action-secondary:hover {
+  color: var(--text-primary);
+  border-color: var(--border-strong);
+  background: var(--surface-soft);
+}
+
+.project-inventory .project-action-secondary.danger {
+  color: var(--danger);
+}
+
+.project-inventory .project-action-secondary.danger:hover {
+  border-color: color-mix(in srgb, var(--danger) 45%, var(--border));
+  background: color-mix(in srgb, var(--danger) 8%, transparent);
+}
+
+.project-inventory .project-action-secondary svg {
+  width: 13px;
+  height: 13px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2;
 }
 
 .project-inventory .empty-projects {
   grid-column: 1 / -1;
   margin: 0;
-  border: 0;
-  border-radius: 0;
+  border: 1px dashed var(--project-line);
+  border-radius: 5px;
   background: var(--project-panel);
 }
 
@@ -2652,6 +2838,51 @@ onUnmounted(() => {
   }
 }
 
+@keyframes factory-belt-run {
+  to {
+    background-position: 7px 0;
+  }
+}
+
+@keyframes factory-crate-run {
+  0% {
+    left: 6px;
+    opacity: 0;
+  }
+  12%,
+  80% {
+    opacity: 1;
+  }
+  100% {
+    left: 43px;
+    opacity: 0;
+  }
+}
+
+@keyframes factory-scan {
+  0%,
+  12% {
+    left: 5px;
+    opacity: 0;
+  }
+  20%,
+  75% {
+    opacity: 0.6;
+  }
+  88%,
+  100% {
+    left: 48px;
+    opacity: 0;
+  }
+}
+
+@keyframes factory-lamp-pulse {
+  50% {
+    box-shadow: 0 0 7px currentColor;
+    opacity: 0.55;
+  }
+}
+
 @keyframes project-drawer-in {
   from {
     opacity: 0;
@@ -2663,7 +2894,7 @@ onUnmounted(() => {
   }
 }
 
-@media (max-width: 980px) {
+@media (max-width: 1180px) {
   .project-status-rail {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
@@ -2682,7 +2913,22 @@ onUnmounted(() => {
   }
 
   .project-inventory .project-card {
-    grid-template-columns: minmax(0, 1fr) 220px;
+    grid-template-columns: 1fr;
+  }
+
+  .project-inventory .project-side {
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    justify-items: stretch;
+    padding-top: 8px;
+    padding-left: 0;
+    border-top: 1px solid var(--project-line);
+    border-left: 0;
+  }
+
+  .project-inventory .project-actions {
+    flex-wrap: wrap;
+    justify-content: flex-end;
   }
 }
 
@@ -2758,20 +3004,7 @@ onUnmounted(() => {
   }
 
   .project-inventory .project-summary {
-    grid-template-columns: 36px minmax(0, 1fr);
-  }
-
-  .project-inventory .project-mark {
-    width: 36px;
-    height: 36px;
-  }
-
-  .project-inventory .project-mark::before {
-    left: 16px;
-  }
-
-  .project-inventory .project-mark::after {
-    left: 14px;
+    grid-template-columns: 54px minmax(0, 1fr);
   }
 
   .project-inventory .project-head {
@@ -2779,6 +3012,8 @@ onUnmounted(() => {
   }
 
   .project-inventory .project-side {
+    grid-template-columns: 1fr;
+    align-items: center;
     justify-items: stretch;
     padding-top: 8px;
     padding-left: 0;
@@ -2788,28 +3023,11 @@ onUnmounted(() => {
 
   .project-inventory .project-actions {
     flex-wrap: wrap;
+    justify-content: flex-start;
   }
 
-  .project-inventory .project-action-open {
-    flex: 0 0 29px;
-    width: 29px;
-    height: 29px;
-  }
-
-  .project-inventory .project-action-quiet {
-    flex: 0 0 29px;
-    width: 29px;
-    height: 29px;
-  }
-
-  .project-inventory .project-action-lifecycle {
-    flex: 0 0 29px;
-    width: 29px;
-    height: 29px;
-  }
-
-  .project-inventory .project-meta-line {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+  .project-stats-line {
+    flex-wrap: wrap;
     padding-left: 0;
   }
 
@@ -2820,8 +3038,16 @@ onUnmounted(() => {
 
 @media (prefers-reduced-motion: reduce) {
   .project-scan i,
+  .factory-active .factory-belt,
+  .factory-active .factory-crate,
+  .factory-active .factory-scanner,
+  .factory-active .factory-lamp,
   .main-column .page-projects .project-modal {
     animation: none;
+  }
+
+  .factory-active .factory-lamp {
+    box-shadow: 0 0 6px currentColor;
   }
 }
 </style>

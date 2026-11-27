@@ -3922,8 +3922,7 @@ onUnmounted(() => {
 }
 
 .intent-card {
-  height: 236px;
-  overflow: hidden;
+  align-content: start;
 }
 
 .intent-card footer {

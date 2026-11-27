@@ -54,21 +54,76 @@ func TestBuildProjectReportMarkdown(t *testing.T) {
 		"当前项目未记录严重漏洞",
 		"## 目录",
 		"[4. 漏洞详情](#4-漏洞详情)",
-		"报告编号",
 		"已测试资产",
+		"### 2.1 资产覆盖",
+		"### 2.2 项目目标",
+		"### 2.3 授权与免责声明",
+		"### 2.4 评估方法与限制",
 		"授权与免责声明",
 		"合法授权",
 		"## 5. 修复计划与复测要求",
 		"vulnerabilities.csv",
+		"### 3.1 状态统计",
+		"### 3.2 漏洞清单",
+		"| 漏洞地址 | 漏洞类型 | 危害等级 |",
+		"| https://example.com/api | 未授权访问 | 高危 |",
 		"### 4.1 ",
 		"#### 复现步骤",
 		"#### 证据",
-		"tool:evidence-1",
 		"完整资产清单",
 	} {
 		if !strings.Contains(markdown, want) {
 			t.Fatalf("Markdown 报告缺少 %q", want)
 		}
+	}
+	for _, unwanted := range []string{"### 2.1 文档控制", "#### 证据引用", "tool:evidence-1"} {
+		if strings.Contains(markdown, unwanted) {
+			t.Fatalf("Markdown 报告不应包含 %q", unwanted)
+		}
+	}
+}
+
+func TestBuildProjectReportMarkdownVulnerabilitySummaryEscapesAndSorts(t *testing.T) {
+	project := &database.Project{ID: "project-summary", Name: "清单测试"}
+	findings := []database.Vulnerability{
+		{
+			ID:                "vuln-medium",
+			Title:             "中危漏洞",
+			Severity:          "medium",
+			Status:            "confirmed",
+			VulnerabilityType: "信息泄露",
+			Target:            "https://medium.example/a",
+		},
+		{
+			ID:                "vuln-critical",
+			Title:             "严重漏洞",
+			Severity:          "critical",
+			Status:            "confirmed",
+			VulnerabilityType: "SQL|注入",
+			Target:            "https://critical.example/a|b",
+		},
+	}
+	markdown := buildProjectReportMarkdown(
+		project,
+		nil,
+		findings,
+		nil,
+		time.Date(2026, 11, 27, 0, 0, 0, 0, time.UTC),
+	)
+	for _, want := range []string{
+		"### 3.2 漏洞清单",
+		"| 漏洞地址 | 漏洞类型 | 危害等级 |",
+		"| https://critical.example/a\\|b | SQL\\|注入 | 严重 |",
+		"| https://medium.example/a | 信息泄露 | 中危 |",
+	} {
+		if !strings.Contains(markdown, want) {
+			t.Fatalf("漏洞清单正文缺少 %q:\n%s", want, markdown)
+		}
+	}
+	criticalIndex := strings.Index(markdown, "https://critical.example/a\\|b")
+	mediumIndex := strings.Index(markdown, "https://medium.example/a")
+	if criticalIndex < 0 || mediumIndex < 0 || criticalIndex > mediumIndex {
+		t.Fatalf("漏洞清单未按危害等级排序")
 	}
 }
 
@@ -166,9 +221,11 @@ func TestRenderReportMarkdownHTMLEscapesRawHTML(t *testing.T) {
 		"Sophon 智能安全助手",
 		"授权与免责声明",
 		"合法授权",
-		"cover-band",
+		"cover-top",
+		"cover-title",
+		"cover-facts",
+		"text-align: center",
 		"报告编号",
-		"10.0.0.0/24",
 		`h2[id="目录"]`,
 		"page-break-before: auto",
 		"text-align: left",
@@ -187,6 +244,18 @@ func TestRenderReportMarkdownHTMLEscapesRawHTML(t *testing.T) {
 	}
 	if strings.Contains(document, "cover-metrics") {
 		t.Fatal("PDF 封面不应再包含重复指标块")
+	}
+	if strings.Contains(document, "项目名称</small>") {
+		t.Fatal("PDF 封面不应重复展示项目名称")
+	}
+	for _, unwanted := range []string{
+		"AUTHORIZED SECURITY ASSESSMENT",
+		"cover-scope",
+		"授权范围</small>",
+	} {
+		if strings.Contains(document, unwanted) {
+			t.Fatalf("PDF 封面不应包含 %q", unwanted)
+		}
 	}
 }
 

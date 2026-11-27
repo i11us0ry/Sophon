@@ -3,6 +3,7 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 
 import { apiUrl } from '../api/client'
+import AgentIdentityRobot from '../components/AgentIdentityRobot.vue'
 import AgentRunSteps from '../components/AgentRunSteps.vue'
 import MarkdownContent from '../components/MarkdownContent.vue'
 import { useAuthStore } from '../stores/auth'
@@ -26,6 +27,7 @@ const MAX_ATTACHMENT_BYTES = 2 * 1024 * 1024 * 1024
 const CONVERSATION_GROUP_COLLAPSE_STORAGE_KEY = 'sophon.conversationGroupsCollapsed'
 type ConversationGroupKey = 'queued' | 'running' | 'completed'
 type AgentLaneRole = 'mainagent' | 'planner' | 'system' | 'worker'
+type WorkerRobotClass = 'recon' | 'audit' | 'exploit' | 'verify' | 'general'
 type AgentLaneStatus =
   | 'idle'
   | 'running'
@@ -973,6 +975,23 @@ function agentLaneLabel(role: AgentLaneRole) {
     default:
       return t('chat.agentMain')
   }
+}
+
+function workerRobotClass(lane: AgentLane): WorkerRobotClass {
+  const text = `${lane.label} ${lane.subtitle}`.toLowerCase()
+  if (/(复测|验证|证据|retest|verify)/i.test(text)) {
+    return 'verify'
+  }
+  if (/(源码|代码|审计|audit|source)/i.test(text)) {
+    return 'audit'
+  }
+  if (/(侦察|扫描|指纹|枚举|信息收集|资产发现|recon|scan)/i.test(text)) {
+    return 'recon'
+  }
+  if (/(注入|上传|利用|权限|shell|exploit|attack|rce|ssrf|xss|sql)/i.test(text)) {
+    return 'exploit'
+  }
+  return 'general'
 }
 
 function laneKeyFromData(data: Record<string, unknown>, role: AgentLaneRole) {
@@ -2023,7 +2042,7 @@ onUnmounted(() => {
           @click="selectAgentLane(lane.key)"
         >
           <span class="agent-session-glyph" aria-hidden="true">
-            {{ lane.role === 'mainagent' ? 'M' : lane.role === 'planner' ? 'P' : 'S' }}
+            <AgentIdentityRobot :role="lane.role" :status="lane.status" size="md" />
           </span>
           <span class="agent-session-copy">
             <strong>{{ lane.label }}</strong>
@@ -2046,7 +2065,14 @@ onUnmounted(() => {
             :aria-label="`${lane.label} ${agentLaneStatusLabel(lane.status)}`"
             @click="selectAgentLane(lane.key)"
           >
-            <span class="agent-session-glyph" aria-hidden="true">W</span>
+            <span class="agent-session-glyph" aria-hidden="true">
+              <AgentIdentityRobot
+                role="worker"
+                :status="lane.status"
+                :worker-class="workerRobotClass(lane)"
+                size="md"
+              />
+            </span>
             <span class="agent-session-copy">
               <strong>{{ lane.label }}</strong>
               <small>{{ lane.subtitle || agentLaneStatusLabel(lane.status) }}</small>
@@ -2066,6 +2092,11 @@ onUnmounted(() => {
           :class="[lane.role, lane.status, { active: selectedAgentLaneKey === lane.key }]"
           @click="selectAgentLane(lane.key)"
         >
+          <AgentIdentityRobot
+            :role="lane.role"
+            :status="lane.status"
+            :worker-class="lane.role === 'worker' ? workerRobotClass(lane) : 'general'"
+          />
           <span>{{ lane.role === 'worker' ? lane.label : lane.label }}</span>
           <em v-if="lane.role === 'worker'">{{ agentLaneStatusLabel(lane.status) }}</em>
         </button>
@@ -2552,6 +2583,16 @@ onUnmounted(() => {
 
       <div v-else class="agent-lane-transcript-shell">
         <header class="agent-lane-transcript-head">
+          <AgentIdentityRobot
+            :role="selectedAgentLaneRole"
+            :status="selectedAgentLane?.status || 'idle'"
+            :worker-class="
+              selectedAgentLaneRole === 'worker' && selectedAgentLane
+                ? workerRobotClass(selectedAgentLane)
+                : 'general'
+            "
+            size="md"
+          />
           <div>
             <span>{{ t(`chat.agentRole.${selectedAgentLaneRole}`) }}</span>
             <strong>{{ selectedAgentLaneTitle }}</strong>
@@ -5139,10 +5180,12 @@ onUnmounted(() => {
 
 .agent-lane-transcript-head > div {
   display: grid;
+  flex: 1;
+  min-width: 0;
   gap: 3px;
 }
 
-.agent-lane-transcript-head span:first-child {
+.agent-lane-transcript-head > div > span:first-child {
   color: var(--chat-work);
   font-family: var(--mono);
   font-size: 8px;
@@ -5523,8 +5566,8 @@ onUnmounted(() => {
 }
 
 .agent-session-row.worker .agent-session-glyph {
-  color: var(--success);
-  background: color-mix(in srgb, var(--success) 11%, transparent);
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 11%, transparent);
 }
 
 .agent-session-row.system .agent-session-glyph {
@@ -5899,7 +5942,7 @@ onUnmounted(() => {
   gap: 2px;
 }
 
-.agent-lane-transcript-head span:first-child {
+.agent-lane-transcript-head > div > span:first-child {
   color: var(--text-muted);
   font-family: inherit;
   font-size: 9px;

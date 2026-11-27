@@ -30,4 +30,5 @@ up2git/
 .release-redactions.tsv
 .release-stage.*
 .release-excluded/
+localWork/
 up2git.backup.*
